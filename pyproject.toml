@@ -1,0 +1,28 @@
+[build-system]
+requires = ["scikit-build-core>=0.10,<1.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "cpu2tensor"
+version = "0.3.0"
+description = "CPU execution traces as tensors"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "AGPL-3.0-only"
+dependencies = ["torch>=2.2"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+gym = ["gymnasium>=1.0,<2"]
+
+[tool.scikit-build]
+cmake.source-dir = "native"
+wheel.packages = ["python/cpu2tensor"]
+sdist.include = ["native/**", "python/**", "LICENSE", "docs/**", "example/**"]
+
+[tool.scikit-build.cmake.define]
+CPU2TENSOR_BUILD_PYTHON = "ON"
+BUILD_TESTING = "OFF"
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

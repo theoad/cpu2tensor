@@ -1,0 +1,30 @@
+{
+  "version": 5,
+  "configurePresets": [
+    {
+      "name": "portable",
+      "displayName": "Portable core",
+      "generator": "Ninja",
+      "binaryDir": "$env{HOME}/.cache/cpu2tensor${sourceDir}/portable",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "worker",
+      "displayName": "Linux QEMU worker",
+      "inherits": "portable",
+      "binaryDir": "$env{HOME}/.cache/cpu2tensor${sourceDir}/worker",
+      "cacheVariables": {"CPU2TENSOR_BUILD_WORKER": "ON"}
+    }
+  ],
+  "buildPresets": [
+    {"name": "portable", "configurePreset": "portable"},
+    {"name": "worker", "configurePreset": "worker"}
+  ],
+  "testPresets": [
+    {"name": "portable", "configurePreset": "portable", "output": {"outputOnFailure": true}},
+    {"name": "worker", "configurePreset": "worker", "output": {"outputOnFailure": true}}
+  ]
+}

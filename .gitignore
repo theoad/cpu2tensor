@@ -1,0 +1,16 @@
+.local/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+build/
+dist/
+.obsidian/workspace*.json
+.idea/
+.vscode/
+compile_commands.json
+CMakeUserPresets.json

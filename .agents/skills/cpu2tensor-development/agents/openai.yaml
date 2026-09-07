@@ -1,0 +1,4 @@
+interface:
+  display_name: "cpu2tensor Development"
+  short_description: "Deliver small cpu2tensor slices with clear evidence"
+  default_prompt: "Use $cpu2tensor-development to take the next ready cpu2tensor task through implementation and validation."
