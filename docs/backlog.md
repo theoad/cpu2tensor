@@ -179,6 +179,7 @@ rebooted episodes, and external monitor control are deferred.
 | C2T-22 Optional boundary state | Mechanism pending | Fresh validated all-vCPU register acquisition at action/end boundaries, separately acknowledged from trace drain |
 | C2T-21 AWS scale evidence | Pending assigned infrastructure; local pilot complete | One/two-process x86-to-MPS rich drain completes; repeated sustained scaling and actual multi-host AWS runs remain required |
 | C2T-23 Native tensor notebook | Done | [Executed tutorial](tutorials/normalization.ipynb): initial three-field executable layout, real same-binary relocation across 11 locations, CPU/MPS learning curves and controls; [evidence](normalization-results.md) |
+| C2T-24 Absolute observation deadline | Implemented and checked | `--max-run-ms` covers active forwarding, backpressure and post-seal exit; 17 real ARM checks and one ordinary x86 kernel boot check pass; [semantics/evidence](worker-deadlines.md) |
 
 The user agreed to explicit sampled state and attributed transactions, while
 full RAM reconstruction remains deferred. Runtime fixes, probes, contributor

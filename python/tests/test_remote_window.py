@@ -145,10 +145,6 @@ class RemoteWindowTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn(b"start", errors)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
     def test_ring_backpressure_drains_without_loss(self):
         data = b"abcde\n" * 20000
         endpoint = self.remote.start(data, publication="ring")
@@ -180,3 +176,7 @@ if __name__ == "__main__":
         self.assertNotEqual(code, 0)
         self.assertIn(b"disconnected", errors)
         self.assertEqual(self.remote.ssh(f"test ! -d /proc/{child} && echo gone").stdout, b"gone\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

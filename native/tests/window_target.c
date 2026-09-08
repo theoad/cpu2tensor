@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 enum { word_count = 8, workload_steps = 64, tail_steps = 512 };
 volatile uint64_t window_words[word_count];
@@ -34,13 +35,18 @@ int main(int argc, char** argv)
     const int missing_stop = strcmp(mode, "missing-stop") == 0;
     const int stop_before_start = strcmp(mode, "stop-before-start") == 0;
     const int repeat = strcmp(mode, "repeat") == 0;
+    const int spin = strcmp(mode, "spin") == 0;
+    const int idle = strcmp(mode, "idle") == 0;
     if (argc > 2 || (!missing_start && !missing_stop && !stop_before_start &&
-                    !repeat && strcmp(mode, "normal") != 0)) {
+                    !repeat && !spin && !idle && strcmp(mode, "normal") != 0)) {
         fputs("unknown window target mode\n", stderr);
         return 2;
     }
     if (stop_before_start) window_stop_marker();
     if (!missing_start) window_start_marker();
+    // Deadline checks need both a busy target and one that produces no new data.
+    if (spin) for (;;) window_workload();
+    if (idle) for (;;) pause();
     window_workload();
     if (!missing_stop) window_stop_marker();
     if (repeat) {

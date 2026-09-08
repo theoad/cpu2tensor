@@ -56,7 +56,9 @@ The default listener is loopback. To use the VM from a Mac, either add
 `ssh -N -L 9000:127.0.0.1:9000 trail-arm` in another terminal. The transport has no
 authentication or encryption; use an operator-controlled connection or tunnel.
 Worker and client timeouts default to 30 seconds. Increase `--timeout-ms` and the
-client's `timeout` for longer pauses. The worker serves one run and then exits.
+client's `timeout` for longer pauses. The worker serves one run and then exits. Add `--max-run-ms 60000` for an
+absolute observation budget that includes active capture and backpressure; see
+[deadline semantics](worker-deadlines.md).
 
 ## Install and read on the learner
 

@@ -56,6 +56,7 @@ def main():
     parser.add_argument('--bytes', type=int, default=64)
     parser.add_argument('--batch-bytes', type=int, default=0)
     parser.add_argument('--max-seconds', type=float, default=120)
+    parser.add_argument('--max-run-ms', type=int, help='Absolute per-worker observation deadline')
     parser.add_argument('--mode', choices=('drain', 'train'), default='drain')
     parser.add_argument('--start-pc', type=lambda value: int(value, 0), required=True)
     parser.add_argument('--stop-pc', type=lambda value: int(value, 0), required=True)
@@ -63,6 +64,8 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.workers <= 4:
         parser.error('Use between 1 and 4 workers for this small host example')
+    if args.max_run_ms is not None and not 1 <= args.max_run_ms <= 2147483647:
+        parser.error('--max-run-ms must be between 1 and 2147483647')
     args.output = args.output.expanduser()
     if args.output.exists():
         parser.error('Output directory must not already exist')
@@ -78,7 +81,8 @@ def main():
             workers.append(worker)
             endpoints.append(worker.start(interactive=False, rich=True, timeout=300000,
                                           start=args.start_pc, stop=args.stop_pc,
-                                          batching='mixed', publication=args.publication, workload_bytes=args.bytes))
+                                          batching='mixed', publication=args.publication, workload_bytes=args.bytes,
+                                          max_run_ms=args.max_run_ms))
         result = benchmark(endpoints, args.output, device=args.device, mode=args.mode,
                            timeout=30, capture_hosts=[worker.host for worker in workers],
                            batch_bytes=args.batch_bytes, max_seconds=args.max_seconds,

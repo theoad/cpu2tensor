@@ -34,13 +34,15 @@ class RemoteKernelTests(unittest.TestCase):
     def ssh(self, args):
         return subprocess.check_output(['ssh', '-o', 'BatchMode=yes', self.host, shlex.join(args)], timeout=20)
 
-    def start(self, *, interactive=True, episodes=1, rich=False, timeout=30000, start=None, full_boot=False, cpus='2', stop=None, batching='legacy', publication='pipe', workload_bytes=None):
+    def start(self, *, interactive=True, episodes=1, rich=False, timeout=30000, start=None, full_boot=False, cpus='2', stop=None, batching='legacy', publication='pipe', workload_bytes=None, max_run_ms=None):
         port = int(self.ssh(['python3', '-c', 'import socket; s=socket.socket(); s.bind(("0.0.0.0",0)); print(s.getsockname()[1])']))
         args = [f'{self.build}/cpu2tensor-worker', '--qemu', self.qemu, '--plugin', f'{self.build}/libcpu2tensor_plugin.so',
                 '--system', 'on', '--host', self.address, '--port', str(port), '--episodes', str(episodes),
                 '--timeout-ms', str(timeout), '--registers', 'general' if rich else 'none',
                 '--memory', 'on' if rich else 'off', '--memory-values', 'on' if rich else 'off',
                 '--batching', batching, '--publication', publication]
+        if max_run_ms is not None:
+            args += ['--max-run-ms', str(max_run_ms)]
         if not full_boot:
             args += ['--start-pc', hex(self.begin if start is None else start)]
         if stop is not None:
@@ -100,6 +102,22 @@ class RemoteKernelTests(unittest.TestCase):
     @staticmethod
     def drain(batches):
         return sum(batch.addresses.numel() for batch in batches)
+
+    def test_observation_total_deadline_reaps_guest(self):
+        endpoint = self.start(interactive=False, full_boot=True, max_run_ms=1000)
+        started = time.monotonic()
+        with Pool([endpoint], timeout=10) as pool:
+            batches = pool.read()
+            first = next(batches)
+            self.assertGreater(first.addresses.numel(), 0)
+            children = self.children()
+            self.assertEqual(len(children), 1)
+            with self.assertRaisesRegex(RuntimeError, 'Incomplete trace'):
+                for _ in batches:
+                    pass
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIn('Target exceeded --max-run-ms deadline', self.finish(expected=1))
+        self.gone(children[0])
 
     def test_rich_parallel_values_and_retained_device_storage(self):
         endpoint = self.start(rich=True, timeout=300000)

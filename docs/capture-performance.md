@@ -10,7 +10,8 @@ cpu2tensor-worker ... --batching mixed --publication pipe -- TARGET
 ```
 
 These flags apply to user and system workers. No QEMU build or dependency
-installation is part of package setup.
+installation is part of package setup. Use [an absolute worker deadline](worker-deadlines.md)
+when a finite observation run must stop even while it is producing data.
 
 ## Mixed frames
 

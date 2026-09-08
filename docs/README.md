@@ -38,3 +38,5 @@ to revise as experiments produce evidence.
 - [Tensor pipeline benchmark](benchmark-pipeline.md): rich uploads and bounded model updates across supplied endpoints.
 
 - [Measured performance](pipeline-performance-results.md): matched MPS transfer/collation results and live rich workers; [native matrix](performance-matrix-results.md).
+
+- [Worker deadlines](worker-deadlines.md): absolute observation budgets, incomplete traces and child cleanup.

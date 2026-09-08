@@ -49,7 +49,8 @@ not included in logical batch bytes.
 `--max-seconds` gives the measurement a separate consumption budget, checked
 between batches. A blocked socket operation can still take its configured
 `--timeout`; this is not a hard real-time deadline. The worker's own timeout is
-also an operation timeout, not a total target-runtime limit. Failed or interrupted
+also an operation timeout, not a total target-runtime limit. Set the worker
+`--max-run-ms` separately to [bound active observation runs](worker-deadlines.md). Failed or interrupted
 measurements write `failure.json` with partial counters and never a successful
 completion report.
 

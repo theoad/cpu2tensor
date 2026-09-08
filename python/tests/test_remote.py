@@ -30,7 +30,7 @@ class RemoteTests(unittest.TestCase):
             check=True, capture_output=True, timeout=20, **kwargs,
         )
 
-    def start(self, data=b"cpu2tensor\n", target=None, closed_stdin=False, qemu=None, port=0, registers="none", memory="off", values="off", stdio=False, episodes=1, timeout_ms=30000, start_pc=None, stop_pc=None, batching="legacy", publication="pipe"):
+    def start(self, data=b"cpu2tensor\n", target=None, closed_stdin=False, qemu=None, port=0, registers="none", memory="off", values="off", stdio=False, episodes=1, timeout_ms=30000, start_pc=None, stop_pc=None, batching="legacy", publication="pipe", max_run_ms=None):
         self.ssh(f"umask 077; cat > {shlex.quote(self.input_path)}", input=data)
         arguments = [
             f"{self.build}/cpu2tensor-worker", "--qemu", qemu or self.qemu,
@@ -39,6 +39,7 @@ class RemoteTests(unittest.TestCase):
             "--episodes", str(episodes), "--host", self.address, "--port", str(port),
             "--timeout-ms", str(timeout_ms), "--registers", registers, "--memory", memory, "--memory-values", values,
             "--batching", batching, "--publication", publication,
+            *([] if max_run_ms is None else ["--max-run-ms", str(max_run_ms)]),
             *([] if start_pc is None else ['--start-pc', hex(start_pc)]),
             *([] if stop_pc is None else ['--stop-pc', hex(stop_pc)]),
             "--", *(target or [f"{self.build}/checksum"]),

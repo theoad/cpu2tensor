@@ -35,6 +35,26 @@ int remaining_timeout(const timespec& start, int timeout_ms) {
     return elapsed >= timeout_ms ? 0 : timeout_ms - static_cast<int>(elapsed);
 }
 
+// One absolute budget for an observation run. Successful I/O never renews it.
+// Disabled budgets avoid clock reads on the normal forwarding path.
+class RunDeadline final {
+public:
+    explicit RunDeadline(int maximum_ms) : _end_ms(maximum_ms == 0 ? 0 : now_ms() + maximum_ms) {}
+    Result<int> limit(int operation_ms) const {
+        if (_end_ms == 0) return Result<int>::success(operation_ms);
+        const int64_t remaining = _end_ms - now_ms();
+        if (remaining <= 0) return Result<int>::failure("Target exceeded --max-run-ms deadline");
+        return Result<int>::success(remaining < operation_ms ? static_cast<int>(remaining) : operation_ms);
+    }
+private:
+    static int64_t now_ms() {
+        timespec now{};
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        return static_cast<int64_t>(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
+    }
+    const int64_t _end_ms;
+};
+
 struct Options final {
     const char* qemu = nullptr;
     const char* plugin = nullptr;
@@ -45,6 +65,7 @@ struct Options final {
     const char* values = "off";
     int port = 0;
     int timeout_ms = default_timeout_ms;
+    int max_run_ms = 0;
     bool stdio = false;
     bool system = false;
     bool kernel = false;
@@ -130,12 +151,18 @@ Result<Options> parse(int argc, char** argv) {
             const auto parsed = number(value, 0, 65535);
             if (!parsed.ok()) return Result<Options>::failure(parsed.error());
             options.port = parsed.value();
+        } else if (std::strcmp(key, "--max-run-ms") == 0) {
+            const auto parsed = number(value, 1, INT_MAX);
+            if (!parsed.ok()) return Result<Options>::failure(parsed.error());
+            options.max_run_ms = parsed.value();
         } else if (std::strcmp(key, "--timeout-ms") == 0) {
             const auto parsed = number(value, 1, INT_MAX);
             if (!parsed.ok()) return Result<Options>::failure(parsed.error());
             options.timeout_ms = parsed.value();
         } else return Result<Options>::failure("Unknown worker option");
     }
+    if (options.max_run_ms != 0 && (options.stdio || options.kernel))
+        return Result<Options>::failure("--max-run-ms requires observation-only capture");
     if (options.kernel && (!options.system || options.stdio || options.input != nullptr))
         return Result<Options>::failure("--kernel-adapter on needs --system on and owns guest input");
     if (options.system && options.stdio) return Result<Options>::failure("System guests use --kernel-adapter, not --stdio");
@@ -219,10 +246,12 @@ public:
         if (kill(_pid, SIGCONT) != 0) return Result<Done>::failure("Cannot resume target");
         return Result<Done>::success({});
     }
-    Result<ChildExit> finish(int client, int timeout_ms) {
+    Result<ChildExit> finish(int client, int timeout_ms, const RunDeadline& deadline) {
         timespec start{};
         clock_gettime(CLOCK_MONOTONIC, &start);
         for (;;) {
+            const auto budget = deadline.limit(10);
+            if (!budget.ok()) return Result<ChildExit>::failure(budget.error());
             int status = 0;
             const auto result = waitpid(_pid, &status, WNOHANG);
             if (result == _pid) { _pid = -1; return Result<ChildExit>::success({status, false}); }
@@ -230,7 +259,7 @@ public:
             if (remaining_timeout(start, timeout_ms) == 0)
                 return Result<ChildExit>::failure("Target did not exit after capture ended");
             pollfd connection{client, POLLIN | POLLRDHUP, 0};
-            const int ready = poll(&connection, 1, 10);
+            const int ready = poll(&connection, 1, budget.value());
             if (ready > 0 && (connection.revents & (POLLRDHUP | POLLHUP | POLLERR)))
                 return Result<ChildExit>::success({0, true});
             if (ready > 0) return Result<ChildExit>::failure("Consumer sent unexpected data while target was exiting");
@@ -241,10 +270,16 @@ private:
     pid_t _pid;
 };
 
-Result<Transfer> wait_ready(int fd, short events, int client, int timeout_ms) {
+Result<Transfer> wait_ready(int fd, short events, int client, int timeout_ms, const RunDeadline& deadline) {
     pollfd watches[2] = {{fd, events, 0}, {client, POLLIN | POLLRDHUP, 0}};
     int count;
-    do { count = poll(watches, 2, timeout_ms); } while (count < 0 && errno == EINTR);
+    do {
+        const auto budget = deadline.limit(timeout_ms);
+        if (!budget.ok()) return Result<Transfer>::failure(budget.error());
+        count = poll(watches, 2, budget.value());
+    } while (count < 0 && errno == EINTR);
+    const auto budget = deadline.limit(timeout_ms);
+    if (!budget.ok()) return Result<Transfer>::failure(budget.error());
     if (count == 0) return Result<Transfer>::failure("Trace connection timed out");
     if (count < 0) return Result<Transfer>::failure("Cannot wait for trace data");
     if (watches[1].revents & (POLLRDHUP | POLLHUP | POLLERR))
@@ -256,10 +291,10 @@ Result<Transfer> wait_ready(int fd, short events, int client, int timeout_ms) {
     return Result<Transfer>::success(Transfer::ready);
 }
 
-Result<Transfer> read_exact(int pipe, int client, uint8_t* bytes, size_t size, int timeout_ms) {
+Result<Transfer> read_exact(int pipe, int client, uint8_t* bytes, size_t size, int timeout_ms, const RunDeadline& deadline) {
     size_t offset = 0;
     while (offset < size) {
-        const auto ready = wait_ready(pipe, POLLIN, client, timeout_ms);
+        const auto ready = wait_ready(pipe, POLLIN, client, timeout_ms, deadline);
         if (!ready.ok() || ready.value() == Transfer::cancelled) return ready;
         const auto count = read(pipe, bytes + offset, size - offset);
         if (count == 0) return Result<Transfer>::failure("Capture ended without a complete frame and seal");
@@ -272,14 +307,16 @@ Result<Transfer> read_exact(int pipe, int client, uint8_t* bytes, size_t size, i
     return Result<Transfer>::success(Transfer::ready);
 }
 
-Result<Transfer> send_exact(int client, const uint8_t* bytes, size_t size, int timeout_ms) {
+Result<Transfer> send_exact(int client, const uint8_t* bytes, size_t size, int timeout_ms, const RunDeadline& deadline) {
     size_t offset = 0;
     while (offset < size) {
+        const auto budget = deadline.limit(timeout_ms);
+        if (!budget.ok()) return Result<Transfer>::failure(budget.error());
         const auto count = send(client, bytes + offset, size - offset, MSG_NOSIGNAL | MSG_DONTWAIT);
         if (count > 0) { offset += static_cast<size_t>(count); continue; }
         if (count < 0 && errno == EINTR) continue;
         if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            const auto ready = wait_ready(client, POLLOUT, client, timeout_ms);
+            const auto ready = wait_ready(client, POLLOUT, client, timeout_ms, deadline);
             if (!ready.ok() || ready.value() == Transfer::cancelled) return ready;
             continue;
         }
@@ -411,6 +448,7 @@ Result<RunOutcome> run(const Options& options, int listener) {
         arguments[index++] = options.target[i];
     }
     const pid_t parent = getpid();
+    const RunDeadline deadline(options.max_run_ms);
     const pid_t pid = fork();
     if (pid == 0) {
         if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != parent || setpgid(0, 0) != 0 ||
@@ -427,7 +465,7 @@ Result<RunOutcome> run(const Options& options, int listener) {
     Stream stream;
     uint8_t frame[max_frame_bytes];
     for (;;) {
-        auto read_result = read_exact(reader.get(), client.get(), frame, header_bytes, options.timeout_ms);
+        auto read_result = read_exact(reader.get(), client.get(), frame, header_bytes, options.timeout_ms, deadline);
         if (!read_result.ok() || read_result.value() == Transfer::cancelled)
             return stopped_transfer(options, read_result);
         const auto decoded = decode_header(frame, header_bytes);
@@ -436,7 +474,7 @@ Result<RunOutcome> run(const Options& options, int listener) {
         if (header.kind == Kind::hello && bool(header.detail & feature_system) != options.system)
             return Result<RunOutcome>::failure("QEMU mode does not match --system setting");
         const size_t payload = payload_size(header);
-        read_result = read_exact(reader.get(), client.get(), frame + header_bytes, payload, options.timeout_ms);
+        read_result = read_exact(reader.get(), client.get(), frame + header_bytes, payload, options.timeout_ms, deadline);
         if (!read_result.ok() || read_result.value() == Transfer::cancelled)
             return stopped_transfer(options, read_result);
         const auto valid = stream.accept(header, frame + header_bytes);
@@ -448,7 +486,7 @@ Result<RunOutcome> run(const Options& options, int listener) {
                 return stopped_transfer(options, stopped);
             const auto empty = require_empty_stdin(input.get());
             if (!empty.ok()) return Result<RunOutcome>::failure(empty.error());
-            const auto announced = send_exact(client.get(), frame, header_bytes, options.timeout_ms);
+            const auto announced = send_exact(client.get(), frame, header_bytes, options.timeout_ms, deadline);
             if (!announced.ok() || announced.value() == Transfer::cancelled)
                 return stopped_transfer(options, announced);
             const auto action = receive_action(client.get(), action_writer.get(), input.get(), header.detail, options.timeout_ms);
@@ -459,7 +497,7 @@ Result<RunOutcome> run(const Options& options, int listener) {
             continue;
         }
         if (header.kind == Kind::complete) {
-            const auto ended = child.finish(client.get(), options.timeout_ms);
+            const auto ended = child.finish(client.get(), options.timeout_ms, deadline);
             if (!ended.ok()) return Result<RunOutcome>::failure(ended.error());
             if (ended.value().cancelled)
                 return stopped_transfer(options, Result<Transfer>::success(Transfer::cancelled));
@@ -467,17 +505,21 @@ Result<RunOutcome> run(const Options& options, int listener) {
             if (fcntl(reader.get(), F_SETFL, O_NONBLOCK) != 0)
                 return Result<RunOutcome>::failure("Cannot check capture pipe closure");
             ssize_t tail;
-            do { tail = read(reader.get(), &extra, 1); } while (tail < 0 && errno == EINTR);
+            do {
+                const auto budget = deadline.limit(options.timeout_ms);
+                if (!budget.ok()) return Result<RunOutcome>::failure(budget.error());
+                tail = read(reader.get(), &extra, 1);
+            } while (tail < 0 && errno == EINTR);
             if (tail != 0) return Result<RunOutcome>::failure("Capture pipe stayed open or contained data after its seal");
             Header terminal{Kind::complete};
             if (WIFEXITED(ended.value().status)) terminal.detail = WEXITSTATUS(ended.value().status);
             else { terminal.kind = Kind::error; terminal.detail = static_cast<uint64_t>(Failure::target_killed); }
             encode_header(frame, terminal);
-            const auto sent = send_exact(client.get(), frame, header_bytes, options.timeout_ms);
+            const auto sent = send_exact(client.get(), frame, header_bytes, options.timeout_ms, deadline);
             if (!sent.ok() || sent.value() == Transfer::cancelled) return stopped_transfer(options, sent);
             return Result<RunOutcome>::success(RunOutcome::completed);
         }
-        const auto sent = send_exact(client.get(), frame, header_bytes + payload, options.timeout_ms);
+        const auto sent = send_exact(client.get(), frame, header_bytes + payload, options.timeout_ms, deadline);
         // A known capture failure remains a failure if the peer closes after
         // receiving it; cancellation must not turn invalid capture into success.
         if (header.kind == Kind::error) return Result<RunOutcome>::failure("Capture reported a failure");
