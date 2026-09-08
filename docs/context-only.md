@@ -125,3 +125,15 @@ resolved from that wheel. Its SHA-256 is
 `5baf3e544b55a9911fca856b400f31f6af95669d5feaeb80da6a7cba60b41109`.
 Native builds passed on ARM/x86 Linux; portable native CTest passed on Mac and ARM.
 CUDA and AWS remain unvalidated for this profile.
+
+
+## Independent client acceptance
+
+AlphaFlow reported independent integration acceptance for commit
+`feb05f687675339fdbc65f927975c1dd6ace15d0` on 2026-09-08. Its binary hashes matched
+the paired worker/plugin above. A benign getpid window completed with 10,537
+blocks, two context rows, no memory/register rows, both vCPUs, a clean exit and
+86,248 wire bytes. Its normal-workload corpus completed 26/26 captures with
+24,049,805 blocks. These are client-reported results, not reruns by the package
+maintainers or a matched performance comparison. They establish integration
+acceptance; they do not establish learner accuracy or treat CR3 as a PID.
