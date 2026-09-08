@@ -63,6 +63,7 @@ struct Options final {
     const char* registers = "general";
     const char* memory = "on";
     const char* values = "off";
+    const char* context = "auto";
     int port = 0;
     int timeout_ms = default_timeout_ms;
     int max_run_ms = 0;
@@ -110,6 +111,11 @@ Result<Options> parse(int argc, char** argv) {
         else if (std::strcmp(key, "--registers") == 0) options.registers = value;
         else if (std::strcmp(key, "--memory") == 0) options.memory = value;
         else if (std::strcmp(key, "--memory-values") == 0) options.values = value;
+        else if (std::strcmp(key, "--context") == 0) {
+            if (std::strcmp(value, "auto") != 0 && std::strcmp(value, "on") != 0)
+                return Result<Options>::failure("--context needs auto or on");
+            options.context = value;
+        }
         else if (std::strcmp(key, "--publication") == 0) {
             if (std::strcmp(value, "pipe") != 0 && std::strcmp(value, "ring") != 0)
                 return Result<Options>::failure("--publication needs pipe or ring");
@@ -161,6 +167,8 @@ Result<Options> parse(int argc, char** argv) {
             options.timeout_ms = parsed.value();
         } else return Result<Options>::failure("Unknown worker option");
     }
+    if (std::strcmp(options.context, "on") == 0 && !options.system)
+        return Result<Options>::failure("--context on requires x86 system emulation");
     if (options.max_run_ms != 0 && (options.stdio || options.kernel))
         return Result<Options>::failure("--max-run-ms requires observation-only capture");
     if (options.kernel && (!options.system || options.stdio || options.input != nullptr))
@@ -408,7 +416,7 @@ Result<int> listen_at(const Options& options) {
 Result<RunOutcome> run(const Options& options, int listener) {
     if (options.kernel) {
         const auto result = run_kernel({options.qemu, options.plugin, options.registers, options.memory,
-            options.values, options.start_pc, options.batching, options.publication, options.timeout_ms, options.target}, listener);
+            options.values, options.context, options.start_pc, options.batching, options.publication, options.timeout_ms, options.target}, listener);
         if (!result.ok()) return Result<RunOutcome>::failure(result.error());
         return Result<RunOutcome>::success(result.value() ? RunOutcome::cancelled : RunOutcome::completed);
     }
@@ -433,7 +441,7 @@ Result<RunOutcome> run(const Options& options, int listener) {
     const Descriptor reader(pipes[0]);
     // Writer is closed by the parent immediately after fork.
     char plugin_option[PATH_MAX + 256];
-    const int option_size = std::snprintf(plugin_option, sizeof(plugin_option), "%s,fd=%d,registers=%s,memory=%s,values=%s,stdio=%s,layout=%s,batching=%s,publication=%s%s%s%s%s", options.plugin, pipes[1], options.registers, options.memory, options.values, options.stdio ? "on" : "off", options.layout ? "on" : "off", options.batching, options.publication, options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc, options.stop_pc == nullptr ? "" : ",stop=", options.stop_pc == nullptr ? "" : options.stop_pc);
+    const int option_size = std::snprintf(plugin_option, sizeof(plugin_option), "%s,fd=%d,registers=%s,memory=%s,values=%s,context=%s,stdio=%s,layout=%s,batching=%s,publication=%s%s%s%s%s", options.plugin, pipes[1], options.registers, options.memory, options.values, options.context, options.stdio ? "on" : "off", options.layout ? "on" : "off", options.batching, options.publication, options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc, options.stop_pc == nullptr ? "" : ",stop=", options.stop_pc == nullptr ? "" : options.stop_pc);
     if (option_size < 0 || static_cast<size_t>(option_size) >= sizeof(plugin_option)) {
         close(pipes[1]);
         return Result<RunOutcome>::failure("Plugin path is too long");

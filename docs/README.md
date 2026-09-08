@@ -40,3 +40,5 @@ to revise as experiments produce evidence.
 - [Measured performance](pipeline-performance-results.md): matched MPS transfer/collation results and live rich workers; [native matrix](performance-matrix-results.md).
 
 - [Worker deadlines](worker-deadlines.md): absolute observation budgets, incomplete traces and child cleanup.
+
+- [Context-only blocks](context-only.md): paging attribution without register/memory traces and measured cost.

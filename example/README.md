@@ -12,3 +12,5 @@ event and compares learned positions across real executable relocations.
 Python examples live in the installed `cpu2tensor.examples` package under `python/`;
 native targets live under `native/examples/`. This directory is the entry point,
 while both source roots remain natural IDE projects.
+
+- [Context-only blocks](context/README.md): sparse paging context and ordered block tensors.

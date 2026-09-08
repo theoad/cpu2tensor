@@ -34,13 +34,13 @@ class RemoteKernelTests(unittest.TestCase):
     def ssh(self, args):
         return subprocess.check_output(['ssh', '-o', 'BatchMode=yes', self.host, shlex.join(args)], timeout=20)
 
-    def start(self, *, interactive=True, episodes=1, rich=False, timeout=30000, start=None, full_boot=False, cpus='2', stop=None, batching='legacy', publication='pipe', workload_bytes=None, max_run_ms=None):
+    def start(self, *, interactive=True, episodes=1, rich=False, timeout=30000, start=None, full_boot=False, cpus='2', stop=None, batching='legacy', publication='pipe', workload_bytes=None, max_run_ms=None, context='auto'):
         port = int(self.ssh(['python3', '-c', 'import socket; s=socket.socket(); s.bind(("0.0.0.0",0)); print(s.getsockname()[1])']))
         args = [f'{self.build}/cpu2tensor-worker', '--qemu', self.qemu, '--plugin', f'{self.build}/libcpu2tensor_plugin.so',
                 '--system', 'on', '--host', self.address, '--port', str(port), '--episodes', str(episodes),
                 '--timeout-ms', str(timeout), '--registers', 'general' if rich else 'none',
                 '--memory', 'on' if rich else 'off', '--memory-values', 'on' if rich else 'off',
-                '--batching', batching, '--publication', publication]
+                '--batching', batching, '--publication', publication, '--context', context]
         if max_run_ms is not None:
             args += ['--max-run-ms', str(max_run_ms)]
         if not full_boot:
@@ -102,6 +102,35 @@ class RemoteKernelTests(unittest.TestCase):
     @staticmethod
     def drain(batches):
         return sum(batch.addresses.numel() for batch in batches)
+
+    def test_context_only_associates_blocks_on_both_cpus(self):
+        endpoint = self.start(interactive=False, context='on', batching='mixed',
+                              workload_bytes=64, max_run_ms=60000)
+        previous = {}
+        blocks = {}
+        changes = {}
+        with Pool([endpoint], timeout=30, batch_bytes=65536) as pool:
+            for batch in pool.read():
+                self.assertIsNone(batch.registers)
+                self.assertIsNone(batch.memory)
+                source = batch.source
+                table = batch.context
+                old = previous.get(source)
+                sequences = [] if old is None else [old]
+                if table is not None:
+                    self.assertTrue(bool((table.known == 63).all()))
+                    sequences += table.sequences.tolist()
+                    changes[source] = changes.get(source, 0) + table.pc.numel()
+                    previous[source] = sequences[-1]
+                if batch.addresses.numel():
+                    self.assertTrue(sequences, 'Blocks arrived without source context')
+                    available = torch.tensor(sequences, dtype=torch.int64)
+                    positions = torch.searchsorted(available, batch.block_sequences, right=True) - 1
+                    self.assertTrue(bool((positions >= 0).all()))
+                    blocks[source] = blocks.get(source, 0) + batch.addresses.numel()
+        self.assertEqual(set(blocks), {0, 1})
+        self.assertEqual(set(changes), {0, 1})
+        self.assertIn('C2T {"event":"complete","steps":4,"ok":true}', self.finish())
 
     def test_observation_total_deadline_reaps_guest(self):
         endpoint = self.start(interactive=False, full_boot=True, max_run_ms=1000)
