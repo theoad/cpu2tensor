@@ -231,8 +231,8 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
     if (!nonblocking(trace_read.value).ok() || !nonblocking(qmp.value).ok() || !nonblocking(serial.value).ok())
         return Result<bool>::failure("Cannot configure kernel channels");
     char plugin[PATH_MAX + 256];
-    const int length = std::snprintf(plugin, sizeof(plugin), "%s,fd=%d,control=%d,kernel=on,registers=%s,memory=%s,values=%s,batching=%s,publication=%s%s%s",
-        options.plugin, trace_write.value, control_read.value, options.registers, options.memory, options.values,
+    const int length = std::snprintf(plugin, sizeof(plugin), "%s,fd=%d,control=%d,kernel=on,registers=%s,memory=%s,values=%s,context=%s,batching=%s,publication=%s%s%s",
+        options.plugin, trace_write.value, control_read.value, options.registers, options.memory, options.values, options.context,
         options.batching, options.publication,
         options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc);
     if (length < 0 || static_cast<size_t>(length) >= sizeof(plugin)) return Result<bool>::failure("Kernel plugin options too long");

@@ -5,6 +5,7 @@ from pathlib import Path
 import unittest
 
 from cpu2tensor import Pool
+from cpu2tensor.examples.observe_context import cr3_for_blocks
 from test_consumer import worker
 
 
@@ -88,6 +89,46 @@ class SystemStateCaptureTests(unittest.TestCase):
                         self.assertEqual(rows.mapping_flags[selected].tolist(), [1])
         self.assertTrue(found_apic)
         self.assertTrue({0x1000, 0x4000} <= roots)
+
+    def check_context_only(self, name, known):
+        data = (Path(os.environ['CPU2TENSOR_STATE_CAPTURES']) / (name + '.trace')).read_bytes()
+        roots = []
+        modes = set()
+        current = None
+        block_roots = set()
+        count = 0
+        state = None
+        with worker(data, fragment=65536) as endpoint, Pool([endpoint]) as pool:
+            for batch in pool.read():
+                labels, state = cr3_for_blocks(batch, state)
+                self.assertIsNone(batch.registers)
+                self.assertIsNone(batch.memory)
+                if batch.context is not None:
+                    table = batch.context
+                    self.assertEqual(table.known.tolist(), [known])
+                    current = table.cr3.item()
+                    roots.append(current)
+                    if known & 32:
+                        modes.add(table.mode.item())
+                if batch.addresses.numel():
+                    self.assertIsNotNone(current)
+                    self.assertEqual(set(labels.tolist()), {current})
+                    block_roots.add(current)
+                    count += batch.addresses.numel()
+        self.assertGreater(count, 0)
+        # This independent boot fixture installs root0x1000, switches to0x4000,
+        # and returns to0x1000. Each root must govern following block entries.
+        self.assertTrue({0x1000, 0x4000} <= block_roots)
+        second = roots.index(0x4000)
+        self.assertIn(0x1000, roots[:second])
+        self.assertIn(0x1000, roots[second + 1:])
+        self.assertEqual(modes, {16, 32, 64} if known == 63 else set())
+
+    def test_context_only_paging_oracle(self):
+        self.check_context_only('context-only', 63)
+
+    def test_public_context_only_marks_unknown_mode(self):
+        self.check_context_only('public-context-only', 15)
 
     def test_missing_hook_reports_dependency(self):
         directory = Path(os.environ['CPU2TENSOR_STATE_CAPTURES'])

@@ -90,6 +90,7 @@ char selected_registers[1024]{};
 using ReadX86State = bool (*)(uint64_t*, size_t);
 ReadX86State read_x86_state = nullptr;
 bool capture_context = false;
+bool requested_context = false;
 bool capture_memory = true;
 bool capture_values = false;
 bool capture_stdio = false;
@@ -350,7 +351,8 @@ void read_register(Source& source, const Register& reg)
 
 void register_setup(unsigned int index, Source& source)
 {
-    if (register_profile == RegisterProfile::none && !capture_context) return;
+    // A context-only hook read needs no register schema, descriptors or baselines.
+    if (register_profile == RegisterProfile::none && (!capture_context || read_x86_state != nullptr)) return;
     source.registers = new (std::nothrow) Register[max_registers];
     source.scratch = g_byte_array_sized_new(register_scratch_bytes);
     if (source.registers == nullptr) {
@@ -581,7 +583,7 @@ void block_entry(unsigned int index, void* address)
     source.recording = capture_state.load(std::memory_order_acquire) == CaptureState::running;
     if (!source.recording) return;
     const PublishChanges publication(source);
-    read_context(source, true);
+    read_context(source, source.register_count != 0);
     emit_context(index, source, pc);
     // These changes precede this block; they are not effects of its execution.
     sample_registers(index, source, pc, Checkpoint::block);
@@ -836,6 +838,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
     bool registers_seen = false;
     bool memory_seen = false;
     bool values_seen = false;
+    bool context_seen = false;
     bool stdio_seen = false;
     bool kernel_seen = false;
     bool layout_seen = false;
@@ -915,6 +918,13 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
                 std::fputs("cpu2tensor: invalid register name list\n", stderr);
                 return 1;
             }
+        } else if (std::strncmp(argument, "context=", 8) == 0 && !context_seen) {
+            context_seen = true;
+            if (std::strcmp(argument + 8, "on") == 0) requested_context = true;
+            else if (std::strcmp(argument + 8, "auto") != 0) {
+                std::fputs("cpu2tensor: context must be auto or on\n", stderr);
+                return 1;
+            }
         } else if (std::strncmp(argument, "memory=", 7) == 0 && !memory_seen) {
             memory_seen = true;
             if (std::strcmp(argument + 7, "on") == 0) {
@@ -965,8 +975,12 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         }
         system_cpus = static_cast<unsigned int>(info->system.smp_vcpus);
     }
+    if (requested_context && (!capture_system || architecture != Architecture::x86_64)) {
+        std::fputs("cpu2tensor: context=on requires x86 system emulation\n", stderr);
+        return 1;
+    }
     capture_context = capture_system && architecture == Architecture::x86_64 &&
-        (capture_memory || register_profile != RegisterProfile::none);
+        (requested_context || capture_memory || register_profile != RegisterProfile::none);
     if (capture_context) {
         read_x86_state = reinterpret_cast<ReadX86State>(dlsym(RTLD_DEFAULT, "qemu_plugin_cpu2tensor_x86_state_v1"));
         if (read_x86_state == nullptr && register_profile != RegisterProfile::none) {

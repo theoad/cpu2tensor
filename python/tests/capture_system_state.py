@@ -10,7 +10,7 @@ import subprocess
 import threading
 
 
-def capture(qemu, plugin, guest, directory, name, registers, expected_exit):
+def capture(qemu, plugin, guest, directory, name, registers, expected_exit, *, memory='on', values='on', context='auto'):
     read_fd, write_fd = os.pipe()
     trace = directory / f'{name}.trace'
     errors = []
@@ -29,7 +29,7 @@ def capture(qemu, plugin, guest, directory, name, registers, expected_exit):
             '-drive', f'file={guest},format=raw,if=floppy', '-display', 'none',
             '-serial', 'none', '-monitor', 'none', '-no-reboot', '-device',
             'isa-debug-exit,iobase=0xf4,iosize=0x04', '-plugin',
-            f'{plugin},fd={write_fd},start=0x7c00,registers={registers},memory=on,values=on']
+            f'{plugin},fd={write_fd},start=0x7c00,registers={registers},memory={memory},values={values},context={context}']
     child = None
     try:
         with (directory / f'{name}.stdout').open('wb') as out, (directory / f'{name}.stderr').open('wb') as err:
@@ -63,9 +63,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('qemu', 'plugin', 'guest', 'output'):
         parser.add_argument('--' + name, required=True, type=Path)
+    parser.add_argument('--context-only', action='store_true', help='Capture paging checkpoints with blocks only')
     parser.add_argument('--upstream', type=Path, help='Optional unmodified build for fallback/diagnostic checks')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
+    if args.context_only:
+        capture(args.qemu, args.plugin, args.guest, args.output, 'context-only', 'none', 33,
+                memory='off', values='off', context='on')
+        if args.upstream:
+            capture(args.upstream, args.plugin, args.guest, args.output, 'public-context-only', 'none', 33,
+                    memory='off', values='off', context='on')
+        return
     # isa-debug-exit uses exit status 33 deliberately; ordinary workers still
     # report their target's actual exit status. Never infer episode success here.
     for name, registers, code in [('all', 'all', 33), ('selected', 'rax:r8', 33),

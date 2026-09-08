@@ -265,3 +265,12 @@ memory-order boundary. Buffered events drain normally. QEMU continues to exit;
 only then can the worker report successful completion. A missing requested stop
 is an explicit capture failure. Stop markers are incompatible with action
 adapters in this slice. See [window acceptance](kernel-window-results.md).
+
+
+## Explicit context-only selection
+
+`--context on` selects x86 system paging context independently of register and
+memory observations. `auto` preserves previous defaults. Context events still
+precede the blocks they describe on each source; mixed/collated batches may hold
+multiple changes. See [context-only capture](context-only.md) for validity,
+raw-CR3 limits, a vectorized Python example and measured overhead.
