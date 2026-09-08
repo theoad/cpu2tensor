@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "kernel.hpp"
+#include "kernel_protocol.hpp"
 #include <cpu2tensor/trace.hpp>
 #include <json-c/json.h>
 #include <cerrno>
@@ -19,7 +20,7 @@
 
 namespace cpu2tensor {
 namespace {
-constexpr size_t line_capacity = 8192;
+using namespace kernel_protocol;
 constexpr size_t argument_capacity = 256;
 constexpr int socket_capacity = 65536;
 
@@ -74,59 +75,6 @@ Result<bool> send_bytes(int fd, const uint8_t* bytes, size_t size, int timeout) 
         return Result<bool>::failure("Kernel transport write failed");
     }
     return Result<bool>::success(false);
-}
-// Both local channels are newline framed and bounded, with no unbounded JSON buffer.
-struct Lines final {
-    char bytes[line_capacity]{};
-    size_t used = 0;
-    bool eof = false;
-    Result<Done> read_from(int fd) {
-        if (used == sizeof(bytes) - 1) return Result<Done>::failure("Kernel control line is too long");
-        const auto count = read(fd, bytes + used, sizeof(bytes) - 1 - used);
-        if (count > 0) { used += static_cast<size_t>(count); bytes[used] = 0; }
-        else if (count == 0) eof = true;
-        else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
-            return Result<Done>::failure("Kernel control channel failed");
-        return Result<Done>::success({});
-    }
-    size_t line_size() const {
-        const auto* end = static_cast<const char*>(std::memchr(bytes, '\n', used));
-        return end == nullptr ? 0 : static_cast<size_t>(end - bytes) + 1;
-    }
-    void consume(size_t size) {
-        used -= size;
-        std::memmove(bytes, bytes + size, used);
-        bytes[used] = 0;
-    }
-};
-class Json final {
-public:
-    Json(const char* bytes, size_t size) {
-        auto* parser = json_tokener_new_ex(16);
-        if (parser == nullptr) return;
-        json_tokener_set_flags(parser, JSON_TOKENER_STRICT);
-        value = json_tokener_parse_ex(parser, bytes, static_cast<int>(size));
-        if (json_tokener_get_error(parser) != json_tokener_success ||
-            json_tokener_get_parse_end(parser) != size || !json_object_is_type(value, json_type_object)) {
-            if (value != nullptr) json_object_put(value);
-            value = nullptr;
-        }
-        json_tokener_free(parser);
-    }
-    ~Json() { if (value != nullptr) json_object_put(value); }
-    Json(const Json&) = delete;
-    Json& operator=(const Json&) = delete;
-    json_object* value = nullptr;
-    json_object* get(const char* key) const {
-        json_object* result = nullptr;
-        if (value != nullptr) json_object_object_get_ex(value, key, &result);
-        return result;
-    }
-};
-const char* string_value(json_object* value) {
-    if (!json_object_is_type(value, json_type_string)) return nullptr;
-    const char* text = json_object_get_string(value);
-    return std::strlen(text) == static_cast<size_t>(json_object_get_string_len(value)) ? text : nullptr;
 }
 Result<Done> qmp_command(int fd, const char* name, int id, int timeout) {
     char bytes[128];
@@ -381,30 +329,43 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
         }
         if (watches[2].revents && !serial_lines.eof) {
             const auto read_result = serial_lines.read_from(serial.value);
-            if (!read_result.ok()) return Result<bool>::failure(read_result.error());
+            if (!read_result.ok()) {
+                log_guest_failure(stderr, "serial-framing-or-read", serial_lines.bytes, serial_lines.used);
+                return Result<bool>::failure(read_result.error());
+            }
         }
         while (const size_t size = serial_lines.line_size()) {
             if (size >= 4 && std::memcmp(serial_lines.bytes, "C2T ", 4) == 0) {
                 const char* bytes = serial_lines.bytes + 4;
                 size_t length = size - 4;
                 while (length > 0 && (bytes[length - 1] == '\n' || bytes[length - 1] == '\r')) --length;
-                if (length == 0 || length > 1024 || !hello) return Result<bool>::failure("Invalid guest event size or ordering");
+                const auto fail_event = [&](const char* reason, const char* error, const Json* event = nullptr) {
+                    log_guest_failure(stderr, reason, bytes, length, event);
+                    std::fprintf(stderr, "cpu2tensor: guest-event state hello=%d started=%d requested=%d draining=%d complete=%d pending_qmp=%d\n",
+                                 hello, guest_started, requested, draining, guest_complete, pending);
+                    return Result<bool>::failure(error);
+                };
+                if (length == 0 || length > event_capacity)
+                    return fail_event("payload-size", "Invalid guest event size or ordering");
+                if (!hello) return fail_event("before-plugin-hello", "Invalid guest event size or ordering");
                 const Json event(bytes, length);
+                if (event.event_problem() != nullptr)
+                    return fail_event(event.event_problem(), "Invalid guest adapter event", &event);
                 const char* name = string_value(event.get("event"));
-                if (name == nullptr) return Result<bool>::failure("Invalid guest adapter event");
                 if (std::strcmp(name, "start") == 0) {
-                    if (guest_started) return Result<bool>::failure("Guest reboot or repeated adapter start is unsupported");
+                    if (guest_started) return fail_event("repeated-start", "Guest reboot or repeated adapter start is unsupported", &event);
                     guest_started = true;
                 } else if (std::strcmp(name, "ready") == 0) {
-                    if (!guest_started || requested || guest_complete) return Result<bool>::failure("Unexpected guest action request");
+                    if (!guest_started || requested || guest_complete)
+                        return fail_event("unexpected-ready", "Unexpected guest action request", &event);
                     requested = true;
                 } else if (std::strcmp(name, "complete") == 0) {
                     if (!json_object_is_type(event.get("ok"), json_type_boolean) || !json_object_get_boolean(event.get("ok")))
-                        return Result<bool>::failure("Guest adapter reported an unsuccessful workload");
+                        return fail_event("unsuccessful-complete", "Guest adapter reported an unsuccessful workload", &event);
                     guest_complete = true;
                 } else if (std::strcmp(name, "result") != 0 && std::strcmp(name, "error") != 0)
-                    return Result<bool>::failure("Unknown guest adapter event");
-                uint8_t event_frame[header_bytes + 1024];
+                    return fail_event("unknown-event-name", "Unknown guest adapter event", &event);
+                uint8_t event_frame[header_bytes + event_capacity];
                 const Header header{Kind::guest_event, 0, 0, 0, length};
                 encode_header(event_frame, header);
                 std::memcpy(event_frame + header_bytes, bytes, length);
@@ -415,6 +376,10 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
             std::fwrite(serial_lines.bytes, 1, size, stderr);
             serial_lines.consume(size);
             deadline = now_ms() + options.timeout_ms;
+        }
+        if (serial_lines.eof && serial_lines.used != 0) {
+            log_guest_failure(stderr, "unterminated-serial-line", serial_lines.bytes, serial_lines.used);
+            return Result<bool>::failure("Guest serial channel ended inside a line");
         }
         if (requested && pending == 0 && !draining) {
             pending = next_id++;
