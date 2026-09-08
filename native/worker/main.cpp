@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include <cpu2tensor/trace.hpp>
+#include "kernel.hpp"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <climits>
@@ -44,6 +45,9 @@ struct Options final {
     int port = 0;
     int timeout_ms = default_timeout_ms;
     bool stdio = false;
+    bool system = false;
+    bool kernel = false;
+    const char* start_pc = nullptr;
     int episodes = 1;
     char** target = nullptr;
 };
@@ -80,6 +84,19 @@ Result<Options> parse(int argc, char** argv) {
         else if (std::strcmp(key, "--registers") == 0) options.registers = value;
         else if (std::strcmp(key, "--memory") == 0) options.memory = value;
         else if (std::strcmp(key, "--memory-values") == 0) options.values = value;
+        else if (std::strcmp(key, "--start-pc") == 0) {
+            char* end = nullptr;
+            errno = 0;
+            (void)std::strtoull(value, &end, 0);
+            if (end == value || errno != 0 || *end != '\0' || value[0] == '-')
+                return Result<Options>::failure("--start-pc needs a guest block address");
+            options.start_pc = value;
+        } else if (std::strcmp(key, "--system") == 0 || std::strcmp(key, "--kernel-adapter") == 0) {
+            if (std::strcmp(value, "on") != 0 && std::strcmp(value, "off") != 0)
+                return Result<Options>::failure("System settings need on or off");
+            if (std::strcmp(key, "--system") == 0) options.system = std::strcmp(value, "on") == 0;
+            else options.kernel = std::strcmp(value, "on") == 0;
+        }
         else if (std::strcmp(key, "--stdio") == 0) {
             if (std::strcmp(value, "on") != 0 && std::strcmp(value, "off") != 0)
                 return Result<Options>::failure("--stdio needs on or off");
@@ -98,7 +115,11 @@ Result<Options> parse(int argc, char** argv) {
             options.timeout_ms = parsed.value();
         } else return Result<Options>::failure("Unknown worker option");
     }
-    if (options.qemu == nullptr || options.plugin == nullptr || (!options.stdio && options.input == nullptr) || options.target == nullptr)
+    if (options.kernel && (!options.system || options.stdio || options.input != nullptr))
+        return Result<Options>::failure("--kernel-adapter on needs --system on and owns guest input");
+    if (options.system && options.stdio) return Result<Options>::failure("System guests use --kernel-adapter, not --stdio");
+    if (options.system && !options.kernel && options.input == nullptr) options.input = "/dev/null";
+    if (options.qemu == nullptr || options.plugin == nullptr || (!options.stdio && !options.kernel && options.input == nullptr) || options.target == nullptr)
         return Result<Options>::failure("Required: --qemu PATH --plugin PATH (--input FILE or --stdio on) -- TARGET [ARGS]");
     if (std::strchr(options.plugin, ',') != nullptr)
         return Result<Options>::failure("Plugin path cannot contain a comma (QEMU option separator)");
@@ -324,6 +345,12 @@ Result<int> listen_at(const Options& options) {
 }
 
 Result<RunOutcome> run(const Options& options, int listener) {
+    if (options.kernel) {
+        const auto result = run_kernel({options.qemu, options.plugin, options.registers, options.memory,
+            options.values, options.start_pc, options.timeout_ms, options.target}, listener);
+        if (!result.ok()) return Result<RunOutcome>::failure(result.error());
+        return Result<RunOutcome>::success(result.value() ? RunOutcome::cancelled : RunOutcome::completed);
+    }
     int input_pipe[2] = {-1, -1};
     if (options.stdio && pipe2(input_pipe, O_CLOEXEC) != 0)
         return Result<RunOutcome>::failure("Cannot create target stdin pipe");
@@ -344,8 +371,8 @@ Result<RunOutcome> run(const Options& options, int listener) {
     if (pipe2(pipes, O_CLOEXEC) != 0) return Result<RunOutcome>::failure("Cannot create capture pipe");
     const Descriptor reader(pipes[0]);
     // Writer is closed by the parent immediately after fork.
-    char plugin_option[PATH_MAX + 160];
-    const int option_size = std::snprintf(plugin_option, sizeof(plugin_option), "%s,fd=%d,registers=%s,memory=%s,values=%s,stdio=%s", options.plugin, pipes[1], options.registers, options.memory, options.values, options.stdio ? "on" : "off");
+    char plugin_option[PATH_MAX + 256];
+    const int option_size = std::snprintf(plugin_option, sizeof(plugin_option), "%s,fd=%d,registers=%s,memory=%s,values=%s,stdio=%s%s%s", options.plugin, pipes[1], options.registers, options.memory, options.values, options.stdio ? "on" : "off", options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc);
     if (option_size < 0 || static_cast<size_t>(option_size) >= sizeof(plugin_option)) {
         close(pipes[1]);
         return Result<RunOutcome>::failure("Plugin path is too long");
@@ -382,6 +409,8 @@ Result<RunOutcome> run(const Options& options, int listener) {
         const auto decoded = decode_header(frame, header_bytes);
         if (!decoded.ok()) return Result<RunOutcome>::failure(decoded.error());
         const Header header = decoded.value();
+        if (header.kind == Kind::hello && bool(header.detail & feature_system) != options.system)
+            return Result<RunOutcome>::failure("QEMU mode does not match --system setting");
         const size_t payload = payload_size(header);
         read_result = read_exact(reader.get(), client.get(), frame + header_bytes, payload, options.timeout_ms);
         if (!read_result.ok() || read_result.value() == Transfer::cancelled)

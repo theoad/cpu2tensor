@@ -1,17 +1,22 @@
 # Kernel learning examples
 
-The two kernel examples share a small, benign C17 guest target at
-[`native/examples/kernel_init.c`](../native/examples/kernel_init.c). It supplies
-deterministic memory and pipe workloads for observation, and a fixed command
-adapter for later interaction. Its host check and real ordinary guest runs pass.
-**A captured kernel training run and a kernel Gym environment are not implemented
-or validated yet.**
+The two kernel examples use a small C17 guest target at
+[`native/examples/kernel_init.c`](../native/examples/kernel_init.c). Rich x86
+system capture, synchronized action boundaries, observation-only pretraining,
+and a Gym client now run end to end. The workload accepts only named getpid,
+memory, pipe, and parallel-memory commands.
 
-The checked x86 host currently provides QEMU 8.2.2. Its system emulator lacks the
-register-read and memory-value APIs used by the current plugin; a compatible
-operator-provided system emulator and matching header are required. The plugin
-also currently rejects system emulation. See [dependency evidence](qemu-probe.md),
-[the work board](backlog.md), and [capture efficiency](capture-efficiency.md).
+Use [kernel pretraining](kernel-pretraining.md) for observation-only workers or
+[Kernel Gym](kernel-gym.md) for streamed reset/step and client-defined rewards.
+The [QEMU build and API evidence](kernel-qemu-build.md) records the compatible
+external development dependency and its limitations. The package installs no QEMU.
+
+The [integration checks](kernel-integration-results.md) include full boot through
+poweroff. The checked learning runs select an explicit postboot start marker. This excludes
+boot events; it does not restrict subsequent capture to userspace. Kernel and
+user execution on both vCPUs are observed after that marker. CPU memory accesses
+include opt-in transaction values. Device-originated writes, architectural flags
+unavailable through upstream QEMU, and a global memory order are not supplied.
 
 ## Build and check the guest target
 
@@ -32,17 +37,18 @@ ctest --test-dir "$C2T_KERNEL_BUILD" --output-on-failure
 
 `--check` runs the fixed workload as an ordinary process. It never mounts a
 filesystem or powers off the host. Invoking the program without this option is
-allowed only when its process ID is 1. The check prints four `C2T ` lines, each
+allowed only when its process ID is 1. The check prints five `C2T ` lines, each
 followed by a JSON object:
 
 ```text
 C2T {"event":"result","step":0,"action":"getpid","value":PID}
 C2T {"event":"result","step":1,"action":"memory","seed":17,"bytes":4096,"checksum":520419}
 C2T {"event":"result","step":2,"action":"pipe","seed":17,"bytes":256,"checksum":31717}
-C2T {"event":"complete","steps":3,"ok":true}
+C2T {"event":"result","step":3,"action":"parallel","seed":17,"bytes":4096,"cpu0":CPU_A,"cpu1":CPU_B,"checksum0":520419,"checksum1":522544}
+C2T {"event":"complete","steps":4,"ok":true}
 ```
 
-`PID` varies in the host check and is 1 when the target runs as guest init. This
+`PID` varies in the host check and is 1 in the guest. `CPU_A` and `CPU_B` are distinct allowed CPUs; the checked two-vCPU guest reports 0 and 1. The host check needs two available CPUs. This
 check exercises the guest workload, not QEMU, trace capture, model training, or
 multi-vCPU ordering.
 
@@ -118,7 +124,7 @@ The workload options are:
 
 | Kernel command-line option | Default | Meaning |
 | --- | --- | --- |
-| `cpu2tensor.mode=observe` | `observe` | Run three fixed actions and power off |
+| `cpu2tensor.mode=observe` | `observe` | Run four fixed actions and power off |
 | `cpu2tensor.mode=interactive` | | Read one named action per console line |
 | `cpu2tensor.seed=17` | 17 | Unsigned 32-bit seed for the observation workload |
 | `cpu2tensor.bytes=4096` | 4096 | Observation memory size, from 1 through 65536 bytes |
@@ -147,17 +153,19 @@ actions restart the generator with their supplied seed. This is an independent
 semantic oracle for the workload, not a claim that two kernel traces are equal.
 ASLR, scheduling, boot state, and instrumentation backpressure can change traces.
 
-The planned learning check predicts held-out trace events from previous events,
-retains recurrent state separately for each worker and vCPU, and records loss
-against a simple baseline. Split complete seeded runs between training and
+The learning check predicts held-out block tokens from the previous block and
+keeps that previous token separately for each worker/vCPU. It compares initial
+and trained model loss on the same held-out sample. Recurrent models remain a
+separate example; their latent state must likewise belong to the original source. Split complete seeded runs between training and
 validation before constructing windows. Output JSON, workload parameters, and
 future events must not leak into model inputs. Preserve per-vCPU sequence when
 collating workers; arriving frames do not establish a global memory order.
 
-Before this example can claim completion, the system backend needs real kernel
-capture with at least two active vCPUs, source completion and fault checks, bounded
-lossless backpressure, and a measured training run. CUDA and operator-provisioned
-AWS workers remain separate validation requirements.
+The real learning check uses two training workers and an independent test
+worker on `trail-x86`, with the model on Mac MPS. It maintains separate previous
+blocks per worker/vCPU and drains all streams through completion. See
+[the training evidence](kernel-pretraining.md#real-kernel-evidence). AWS execution,
+CUDA, multiple learner devices, and throughput optimization remain separate work.
 
 ## Named syscall adapter
 
@@ -171,6 +179,7 @@ after each `ready` event:
 | `getpid` | Read the guest process ID |
 | `memory SEED BYTES` | Allocate, fill, read, and release 1–65536 anonymous bytes |
 | `pipe SEED BYTES` | Write and verify a 1–256 byte pipe roundtrip |
+| `parallel SEED BYTES` | Pin two processes to distinct CPUs and verify independent memory loops |
 | `quit` | Emit completion and request guest poweroff |
 
 `SEED` is a decimal unsigned 32-bit integer. The command length is bounded to
@@ -185,10 +194,23 @@ completion. Clients must inspect both completion and the worker's capture status
 The adapter supplies results; clients still define rewards, success, failure, and
 episode limits.
 
-**`ready` is a guest protocol boundary, not a whole-machine pause.** Other vCPUs
-can still execute, and trace bytes can still be in producer or transport buffers.
-The kernel Gym wrapper must add a tested stop/resume handshake and a trace-tail
-barrier before it returns an observation for action selection. The existing
-Linux-user syscall hooks do not observe syscalls within a system guest. Until
-that lifecycle is implemented and checked, this target is a side-adapter building
-block and should not be presented as a working kernel Gym environment.
+`ready` requests a boundary. The worker issues QMP `stop` while continuing to
+drain observations. Once QEMU confirms the world is stopped, a private control
+pipe requests an explicit plugin drain. The plugin flushes every source and
+publishes a kernel request after those tails in the same trace pipe. Only then
+does `KernelEnv.reset()` or `.step()` finish yielding batches. The guest stays
+paused while the client decides. One bounded command is delivered before QMP
+`cont`; reset cancels and reaps the previous QEMU before another episode starts.
+
+An idle callback or a QMP reply alone is insufficient: queued CPU work can release
+QEMU's internal lock before an idle flush runs. Cold per-source mutexes protect
+lifecycle/drain operations, and release/acquire publication covers both directions
+of buffer ownership. Execution and memory callbacks take no global lock. These
+rules and the independent repeated-fence probe are recorded in
+[the API review](kernel-qemu-build.md).
+
+The kernel worker exclusively owns QMP and serial control. Hotplug, migration,
+external monitor controllers, and rebooted episodes are outside this version's
+contract. A guest `complete(ok=true)`, plugin seal, closed channels, and successful
+QEMU exit are all required before interactive completion. A kernel panic followed
+by QEMU exit zero is not sufficient.

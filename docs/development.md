@@ -76,7 +76,8 @@ and backpressure behavior. Use the x86-64 host for performance claims. Mac/ARM r
 are development and portability evidence, not cross-ISA speed comparisons.
 
 Failures that reveal missing operator dependencies produce a precise compatibility
-report. Do not respond by installing or rebuilding QEMU. Work on independent native
+report. Follow existing explicit authorization for separate developer builds; never add
+QEMU installation to package setup. Work on independent native
 and consumer components while that dependency is unresolved.
 
 ## Review and completion

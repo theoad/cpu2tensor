@@ -41,6 +41,9 @@ class StdioEnv:
     an operator-started interactive worker, which must permit another episode.
     """
 
+    _feature = _FEATURE_STDIO
+    _request_kind = _INPUT_REQUEST
+
     def __init__(
         self,
         endpoint: str,
@@ -62,7 +65,7 @@ class StdioEnv:
 
     def __enter__(self) -> "StdioEnv":
         if self._closed:
-            raise RuntimeError("StdioEnv is closed")
+            raise RuntimeError(f"{type(self).__name__} is closed")
         return self
 
     def __exit__(
@@ -96,9 +99,10 @@ class StdioEnv:
     def reset(self) -> Iterator[Batch]:
         """Restart, then yield observations until input is needed or the run ends."""
         if self._closed:
-            raise RuntimeError("StdioEnv is closed")
+            raise RuntimeError(f"{type(self).__name__} is closed")
         self._cancel_run()
         self.exit_code = None
+        self._clear_events()
         self._stream = _native.new_stream()
         self._names = {}
         try:
@@ -106,9 +110,9 @@ class StdioEnv:
                 self._converter._address, timeout=self._converter._timeout
             )
         except TimeoutError as error:
-            raise TimeoutError("Stdio connection timed out while starting a run") from error
+            raise TimeoutError(f"{type(self).__name__} connection timed out while starting a run") from error
         except OSError as error:
-            raise ConnectionError("Stdio connection failed while starting a run") from error
+            raise ConnectionError(f"{type(self).__name__} connection failed while starting a run") from error
         self._reading = True
         return self._read(self._run, first=True)
 
@@ -119,7 +123,7 @@ class StdioEnv:
         A nonzero target exit code is an episode result, not a capture failure.
         """
         if self._closed:
-            raise RuntimeError("StdioEnv is closed")
+            raise RuntimeError(f"{type(self).__name__} is closed")
         if self._reading:
             raise RuntimeError("Consume all observations before taking an action")
         if not self.needs_input or self._connection is None:
@@ -128,16 +132,17 @@ class StdioEnv:
             raise TypeError("Stdio actions must be bytes")
         if not 1 <= len(action) <= self.max_action_bytes:
             raise ValueError(f"Action must contain 1 to {self.max_action_bytes} bytes")
+        self._clear_events()
         self.needs_input = False
         self.max_action_bytes = 0
         try:
             self._connection.sendall(struct.pack("<I", len(action)) + action)
         except TimeoutError as error:
             self._cancel_run()
-            raise TimeoutError("Stdio connection timed out while sending an action") from error
+            raise TimeoutError(f"{type(self).__name__} connection timed out while sending an action") from error
         except OSError as error:
             self._cancel_run()
-            raise ConnectionError("Stdio connection failed while sending an action") from error
+            raise ConnectionError(f"{type(self).__name__} connection failed while sending an action") from error
         self._reading = True
         return self._read(self._run, first=False)
 
@@ -155,8 +160,8 @@ class StdioEnv:
                 frame = header + self._converter._receive(connection, payload_size)
                 kind, source, count, sequence, detail, payload = _native.decode(self._stream, frame)
                 if first:
-                    if kind != _HELLO or not detail & _FEATURE_STDIO:
-                        raise RuntimeError("StdioEnv requires an interactive worker")
+                    if kind != _HELLO or not detail & self._feature:
+                        raise RuntimeError(f"{type(self).__name__} requires a matching interactive worker")
                     first = False
                 if kind == _REGISTER_SCHEMA:
                     update = cast(dict[int, str], payload)
@@ -165,7 +170,7 @@ class StdioEnv:
                     yield self._converter._batch(
                         kind, source, count, sequence, payload, self._names.get(source)
                     )
-                elif kind == _INPUT_REQUEST:
+                elif kind == self._request_kind:
                     self.needs_input = True
                     self.max_action_bytes = detail
                     reached_boundary = True
@@ -175,15 +180,26 @@ class StdioEnv:
                     return
                 elif kind == _ERROR:
                     raise RuntimeError(f"Incomplete trace: {_FAILURES[detail]}")
+                elif kind == 11:
+                    self._guest_event(cast(bytearray, payload))
         except TimeoutError as error:
-            raise TimeoutError("Stdio connection timed out before an input request or exit") from error
+            raise TimeoutError(f"{type(self).__name__} connection timed out before an input request or exit") from error
         except OSError as error:
-            raise ConnectionError("Stdio connection failed before an input request or exit") from error
+            raise ConnectionError(f"{type(self).__name__} connection failed before an input request or exit") from error
         finally:
             if run == self._run:
                 self._reading = False
                 if not reached_boundary:
                     self._cancel_run()
+
+    def _clear_events(self) -> None:
+        pass
+
+    def _guest_event(self, payload: bytearray) -> None:
+        raise RuntimeError("Unexpected guest adapter event")
+
+    def _info(self) -> dict[str, Any]:
+        return {"needs_input": self.needs_input, "exit_code": self.exit_code}
 
     def as_gym(
         self,
@@ -227,7 +243,7 @@ class StdioEnv:
                     raise
 
             def _info(self) -> dict[str, Any]:
-                return {"needs_input": stream.needs_input, "exit_code": stream.exit_code}
+                return stream._info()
 
             def reset(self, *, seed: int | None = None, options: dict | None = None) -> tuple:
                 if seed is not None or options:

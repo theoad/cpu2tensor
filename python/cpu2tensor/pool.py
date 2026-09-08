@@ -144,6 +144,8 @@ class Pool:
                 kind, source, count, sequence, detail, payload = _native.decode(stream, frame)
                 if kind == 1 and detail & 2048:
                     raise ValueError("Use StdioEnv for an interactive worker")
+                if kind == 1 and detail & (1 << 13):
+                    raise ValueError("Use KernelEnv for an interactive system worker")
                 if kind == _REGISTER_SCHEMA:
                     # Schema updates are cold-path work. Retained batches see an
                     # immutable snapshot, not a dictionary changed by later reads.

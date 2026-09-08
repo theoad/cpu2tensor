@@ -20,11 +20,15 @@ inline constexpr uint64_t feature_memory = 1 << 8;
 inline constexpr uint64_t feature_registers = 1 << 9;
 inline constexpr uint64_t feature_memory_values = 1 << 10;
 inline constexpr uint64_t feature_stdio = 1 << 11;
+inline constexpr uint64_t feature_system = 1 << 12;
+inline constexpr uint64_t feature_kernel = 1 << 13;
+inline constexpr uint64_t feature_window = 1 << 14;
 inline constexpr uint32_t max_action_bytes = 256;
 
 enum class Kind : uint16_t {
     hello = 1, blocks = 2, source_end = 3, complete = 4, error = 5,
-    register_schema = 6, registers = 7, memory = 8, input_request = 9
+    register_schema = 6, registers = 7, memory = 8, input_request = 9,
+    kernel_request = 10, guest_event = 11
 };
 enum class Architecture : uint64_t { aarch64 = 1, x86_64 = 2 };
 enum class Failure : uint64_t { capture = 1, target_killed = 2, unsupported_target = 3, transport = 4 };

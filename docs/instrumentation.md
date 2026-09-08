@@ -8,19 +8,22 @@ memory transactions. AlphaFlow is a reviewed reference, not copied code. See
 
 Worker defaults: `--registers general --memory on --memory-values off`.
 `--registers none` disables register sampling; `--registers all` requests all
-registers QEMU exposes, subject to explicit supported width/count limits.
+registers QEMU exposes, subject to supported width/count and backend limits.
 `--memory off` disables memory callbacks. Values require memory to be enabled.
 No memory value lookup or payload is produced when values are disabled.
 
 Registers have names and byte widths discovered per vCPU using the public API.
 The general profile selects AArch64 x0–x30, sp, pc, cpsr; x86-64 integer general
 registers, rip, eflags, segment selectors and fs_base/gs_base where exposed.
+Full-system x86 capture omits `eflags` in both profiles: upstream QEMU returns
+stale lazy arithmetic flags inside block callbacks. The worker reports this,
+and the schema is authoritative. See [the measured API failure](kernel-qemu-build.md).
 All mode supports at most 512 registers, each at most 256 bytes. Unsupported or
 changing widths fail explicitly, never truncate. Wide SVE/SME configurations may
 exceed this limit. General mode is the portable default.
 
 The first sample emits every selected register, including zero values. Later
-samples emit only changed values. Sample at block entry and syscall entry; a
+samples emit only changed values. Sample at block entry and, in Linux-user mode, syscall entry; a
 vCPU-exit callback can provide an additional sample. Atexit only drains buffers:
 QEMU does not permit register reads there. Consequently, stream completion is
 not a guarantee of the final register state. Changes that happen and reverse
@@ -28,7 +31,12 @@ between checkpoints are not observed. Registers are sampled before the new block
 these deltas must not be labeled as effects of that block.
 
 Memory callbacks report successful emulated accesses, not faulting accesses,
-syscall copy buffers, DMA, or all other writers to guest memory. One instruction
+host syscall copy buffers in Linux-user mode, DMA, or all other writers to guest
+memory. In a system guest, emulated kernel instructions are captured, including
+their successful memory accesses; addresses are guest virtual addresses. A vCPU
+stream can span guest processes; PID/CR3 tagging and physical-address columns
+are not yet exposed. Clients must not treat a virtual address as a unique
+physical-memory identity or assume ASLR has been normalized. One instruction
 can produce several transactions. Memory values are actual callback transaction
 values up to 16 bytes; a wider access with values enabled fails explicitly.
 Numeric values are encoded in little-endian significance order. A flag retains
@@ -42,7 +50,10 @@ Keep the 32-byte header and magic from the first [batch contract](batches.md),
 with version now 2. Maximum payload is 4064 bytes, so each full frame fits in
 Linux PIPE_BUF. Block frames still hold at most 256 eight-byte addresses.
 Hello detail: low byte architecture (1 ARM, 2 x86); bit 8 memory, bit 9 registers,
-bit 10 memory values. Reject unknown bits and values without memory.
+bit 10 memory values, bit 11 stdin actions, bit 12 system emulation, bit 13
+kernel adapter, bit 14 explicit capture start window. Reject unknown bits and
+values without memory. Kernel actions require system mode; stdin actions cannot
+be combined with system mode.
 
 New kinds: RegisterSchema=6, Registers=7, Memory=8. Their header detail is payload
 byte count. Header count is row count. Registers and Memory advance the same
@@ -118,3 +129,31 @@ waits for a real stopped QEMU child before publishing the request. Actions are a
 little-endian uint32 byte count followed by those exact bytes. Delivery and wait
 have bounded timeouts; the worker resumes QEMU after delivery. See the
 [stdin contract](stdio-example.md) for single-thread and signal/descriptor limits.
+
+## Kernel interaction and capture windows
+
+`--system on` selects the system worker contract. `--kernel-adapter on` adds
+exclusive QMP/serial ownership and the named guest adapter. Observation-only
+system runs have neither an action loop nor the plugin control thread.
+
+KernelRequest=10 has source/count/sequence zero, detail 1..127, and no payload.
+It is published only after QMP confirms all vCPUs stopped and the plugin drains
+every captured source through its private control pipe. GuestEvent=11 has
+source/count/sequence zero and detail equal to its 1..1024-byte UTF-8 JSON payload.
+These adapter frames consume no vCPU sequence numbers. Every source that emitted
+register data must have its complete selected baseline at the action boundary.
+`Pool` rejects kernel action workers; `KernelEnv` consumes these control frames
+and exposes bounded event/result metadata alongside streaming tensor batches.
+
+Actions retain the stdin transport framing: uint32 length followed by one
+printable ASCII command and newline. The worker forwards one action while the
+guest is paused, then resumes QEMU. The [kernel guide](kernel-examples.md)
+explains the stop/drain handoff, limits, and completion rules.
+
+`--start-pc ADDRESS` is optional. The exact basic-block entry activates capture
+for that source and for other vCPUs at their next block entry. Memory callbacks
+belong to their owning block's capture decision. The first captured block on each
+source receives a full selected-register baseline. This transition neither
+stops nor schedules CPUs and establishes no global memory order. A target that
+exits without executing the requested block fails explicitly. Use the marker
+from the actual guest binary; this option does not compensate for ASLR.

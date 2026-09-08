@@ -108,3 +108,35 @@ stdin checks. Native CTest passed on macOS and ARM Linux. The x86 host separatel
 built the portable core and optional static kernel target through CMake and passed
 CTest plus the benign host workload check. Real learning and guest-boot results
 are linked above; no CUDA, rich kernel capture or kernel Gym success is claimed.
+
+## Kernel integration checks
+
+`test_kernel.py` checks the actual native decoder and socket clients with mixed
+sources, adapter controls, retained tensors, invalid frames, and Gym model updates.
+`test_kernel_guest.py` runs the supplied static guest and operator kernel through
+host/guest checks; its environment variables are listed in that module.
+
+For real native worker and Python client checks, supply:
+
+```sh
+export CPU2TENSOR_KERNEL_REMOTE=trail-x86
+export CPU2TENSOR_KERNEL_ADDRESS=WORKER_PRIVATE_IP
+export CPU2TENSOR_KERNEL_BUILD=/absolute/native/build
+export CPU2TENSOR_KERNEL_QEMU=/absolute/qemu-system-x86_64
+export CPU2TENSOR_KERNEL_IMAGE=/absolute/bzImage
+export CPU2TENSOR_KERNEL_INITRAMFS=/absolute/initramfs.cpio.gz
+python -m pytest python/tests/test_remote_kernel.py -q
+```
+
+The harness owns its temporary workers, closes diagnostics independently of
+trace consumption, and re-extracts marker addresses from the exact guest binary.
+It checks both-vCPU execution, rich signals, retained CPU/MPS storage, paused and
+midstream resets, child reaping, incomplete start windows, and partial-action
+deadlines. A full-boot test omits the marker. Rich capture is currently expensive:
+use suitable consumer/worker timeouts and do not interpret these checks as
+throughput measurements.
+
+The kernel adapter additionally owns two bounded 8 KiB line readers for QMP and
+serial diagnostics and one 127-byte action. A separate QMP/drain deadline cannot
+be extended by ongoing trace or console traffic. Cancellation reaps the target
+before another connection is served.

@@ -127,3 +127,22 @@ caches, device migration, snapshot reset, DMA capture, and delay-action budgets
 remain deferred. Minimal internal sequencing and stale-response protection still
 belong to correctness. Kernel support and multiworker observation-only throughput
 are required milestones, not optional extensions.
+
+## Implemented kernel boundary
+
+The system adapter reuses the same signal frames, native tensor conversion, and
+synchronous client reducer as observation-only capture. `KernelEnv` adds only
+bounded guest event/result metadata and reset/step at a verified world pause.
+
+QMP stop establishes vCPU execution quiescence. A private control thread then
+flushes captured bytes under per-source cold locks and publishes the action
+boundary in trace order. Release/acquire handoff protects both reading and reusing
+those buffers; no register API is called by that thread. Init, idle and exit use
+the same cold locks. Hot callbacks remain owned by their vCPU and acquire no
+mutex. Fixed vCPU count, exclusive control channels, and restart-based episodes
+are the current system adapter contract.
+
+The observation-only path does not start that control thread or execute action
+callbacks. An optional explicit start block selects a postboot capture window;
+other vCPUs join at their next block entry without a scheduling barrier. See
+[kernel setup](kernel-examples.md) for exact semantics and backend limits.

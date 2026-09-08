@@ -2,15 +2,14 @@
 
 Use an AArch64 Linux worker and a Mac learner. The same client also works on CPU.
 The worker runs one prescribed target per connection and reports block entries,
-sampled general-register changes and successful memory transactions. Rich
-kernel capture remains later work. For real model training, continue with
+sampled general-register changes and successful memory transactions. For system guests, see [kernel capture](kernel-examples.md). For real model training, continue with
 [trace digits](learn-trace.md); [stdin learning](stdio-example.md) uses the
 separate interactive worker mode.
 
 ## Build the worker on Linux
 
 The operator provides QEMU with Linux-user AArch64 plugin support, its matching
-`qemu-plugin.h`, CMake 3.24+, Ninja, a C/C++ compiler, pkg-config, and GLib headers.
+`qemu-plugin.h`, CMake 3.24+, Ninja, a C/C++ compiler, pkg-config, GLib headers, and json-c 0.15+ development headers.
 The package does not install or bundle QEMU. The tested development build is
 described in [the probe](qemu-probe.md); a version string alone is not proof of a
 compatible build. A mismatched plugin API must be resolved using the matching

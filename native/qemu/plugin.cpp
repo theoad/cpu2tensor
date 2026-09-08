@@ -3,6 +3,7 @@
 #include <qemu-plugin.h>
 
 #include <cerrno>
+#include <atomic>
 #include <climits>
 #include <csignal>
 #include <cstdio>
@@ -11,6 +12,7 @@
 #include <fcntl.h>
 #include <new>
 #include <pthread.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -45,6 +47,9 @@ enum class State : uint8_t { unused, active, ended };
 // runs after instrumentation has stopped, so it can drain the remaining sources.
 // A source never shares its event buffer or sequence counter with another vCPU.
 struct alignas(64) Source final {
+    // Only lifecycle/idle/drain callbacks take this lock. Execution callbacks
+    // own their source while running; external drains require a QMP world stop.
+    pthread_mutex_t cold_mutex = PTHREAD_MUTEX_INITIALIZER;
     uint8_t bytes[max_frame_bytes]{};
     uint64_t next = 0;
     uint32_t count = 0;
@@ -56,6 +61,10 @@ struct alignas(64) Source final {
     // The descriptor at index zero can have a null but valid QEMU handle.
     int32_t pc_register = -1;
     State state = State::unused;
+    bool recording = false;
+    uint64_t generation = 0;
+    std::atomic<uint64_t> published{0};
+    std::atomic<uint64_t> drained{0};
 };
 
 Source sources[max_sources];
@@ -65,6 +74,41 @@ RegisterProfile register_profile = RegisterProfile::general;
 bool capture_memory = true;
 bool capture_values = false;
 bool capture_stdio = false;
+bool capture_system = false;
+bool capture_kernel = false;
+unsigned int system_cpus = 0;
+bool has_start_pc = false;
+uint64_t start_pc = 0;
+std::atomic<bool> recording{true};
+int control_fd = -1;
+pthread_t control_thread{};
+std::atomic<bool> closing{false};
+
+class ColdLock final {
+public:
+    explicit ColdLock(Source& source) : _mutex(&source.cold_mutex) {
+        if (pthread_mutex_lock(_mutex) != 0) _exit(capture_exit_code);
+    }
+    ~ColdLock() { pthread_mutex_unlock(_mutex); }
+    ColdLock(const ColdLock&) = delete;
+    ColdLock& operator=(const ColdLock&) = delete;
+private:
+    pthread_mutex_t* _mutex;
+};
+
+class PublishChanges final {
+public:
+    explicit PublishChanges(Source& source) : _source(source) {
+        if (capture_kernel) (void)_source.drained.load(std::memory_order_acquire);
+    }
+    ~PublishChanges() {
+        if (capture_kernel) _source.published.store(++_source.generation, std::memory_order_release);
+    }
+    PublishChanges(const PublishChanges&) = delete;
+    PublishChanges& operator=(const PublishChanges&) = delete;
+private:
+    Source& _source;
+};
 
 Result<Done> publish(const uint8_t* bytes, size_t size)
 {
@@ -220,6 +264,11 @@ void register_setup(unsigned int index, Source& source)
         if (descriptor.name == nullptr) {
             fail(Failure::unsupported_target, "cpu2tensor: QEMU exposes an unnamed register\n");
         }
+        // Upstream x86 system TCG keeps arithmetic flags in lazy internal state.
+        // Its public GDB register reader returns stale eflags inside a block.
+        // Omitting the field is preferable to emitting a false architectural value.
+        if (capture_system && architecture == Architecture::x86_64 &&
+            std::strcmp(descriptor.name, "eflags") == 0) continue;
         if (register_profile == RegisterProfile::general && !general_register(descriptor.name)) {
             continue;
         }
@@ -310,9 +359,11 @@ void release_registers(Source& source)
 
 void source_start(qemu_plugin_id_t, unsigned int index)
 {
-    if ((capture_stdio && index != 0) || index >= max_sources || sources[index].state != State::unused) {
+    if ((capture_stdio && index != 0) || (capture_kernel && index >= system_cpus) ||
+        index >= max_sources || sources[index].state != State::unused) {
         fail(Failure::unsupported_target, "cpu2tensor: too many vCPUs or a reused vCPU index\n");
     }
+    const ColdLock lock(sources[index]);
     sources[index].state = State::active;
     register_setup(index, sources[index]);
 }
@@ -328,7 +379,8 @@ void end_source(unsigned int index, Source& source)
 void source_end(qemu_plugin_id_t, unsigned int index)
 {
     auto& source = active_source(index);
-    if (source.register_count != 0) {
+    const ColdLock lock(source);
+    if (source.register_count != 0 && (!has_start_pc || source.next != 0)) {
         sample_registers(index, source, current_pc(source), Checkpoint::exit);
     }
     end_source(index, source);
@@ -338,6 +390,10 @@ void block_entry(unsigned int index, void* address)
 {
     auto& source = active_source(index);
     const auto pc = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(address));
+    if (has_start_pc && pc == start_pc) recording.store(true, std::memory_order_release);
+    source.recording = !has_start_pc || recording.load(std::memory_order_acquire);
+    if (!source.recording) return;
+    const PublishChanges publication(source);
     // These changes precede this block; they are not effects of its execution.
     sample_registers(index, source, pc, Checkpoint::block);
     store_u64(append(index, source, Kind::blocks, sizeof(uint64_t)), pc);
@@ -349,6 +405,8 @@ void block_entry(unsigned int index, void* address)
 void memory_access(unsigned int index, qemu_plugin_meminfo_t info, uint64_t address, void* pc)
 {
     auto& source = active_source(index);
+    if (!source.recording) return;
+    const PublishChanges publication(source);
     const unsigned int shift = qemu_plugin_mem_size_shift(info);
     if (shift >= 32 || (capture_values && shift > 4)) {
         fail(Failure::unsupported_target, "cpu2tensor: memory access width is unsupported\n");
@@ -406,7 +464,7 @@ void syscall_entry(qemu_plugin_id_t, unsigned int index, int64_t number, uint64_
                    uint64_t second, uint64_t requested, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)
 {
     auto& source = active_source(index);
-    if (source.register_count != 0) {
+    if (source.register_count != 0 && (!has_start_pc || source.recording)) {
         sample_registers(index, source, current_pc(source), Checkpoint::syscall);
     }
     const bool arm = architecture == Architecture::aarch64;
@@ -452,9 +510,57 @@ void syscall_return(qemu_plugin_id_t, unsigned int, int64_t number, int64_t resu
     }
 }
 
+void source_idle(qemu_plugin_id_t, unsigned int index)
+{
+    if (index >= max_sources) return;
+    auto& source = sources[index];
+    const ColdLock lock(source);
+    if (source.state == State::active) flush(index, source);
+}
+
+void* control(void*)
+{
+    while (!closing.load(std::memory_order_acquire)) {
+        pollfd descriptor{control_fd, POLLIN, 0};
+        const int ready = poll(&descriptor, 1, 100);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready < 0) fail(Failure::transport, "cpu2tensor: cannot poll kernel control pipe\n");
+        if (ready == 0) continue;
+        char command = 0;
+        if (read(control_fd, &command, 1) != 1) return nullptr;
+        if (command != 'D') fail(Failure::transport, "cpu2tensor: unknown kernel control command\n");
+        // The sole worker sends D only after QMP confirms every vCPU stopped.
+        // An idle callback may still be flushing: its cold lock gives this
+        // thread exclusive buffer ownership without locking execution callbacks.
+        for (unsigned int index = 0; index < system_cpus; ++index) {
+            auto& source = sources[index];
+            const ColdLock lock(source);
+            if (source.state != State::active)
+                fail(Failure::unsupported_target, "cpu2tensor: kernel boundary needs every configured vCPU to be active\n");
+            // QMP established quiescence. Pair with the owning callback's
+            // final release so its captured bytes are visible to this reader.
+            const auto generation = source.published.load(std::memory_order_acquire);
+            if (source.state == State::active) flush(index, source);
+            // The next execution callback acquires this before reusing the
+            // buffer/count fields changed by the stopped-world drain.
+            source.drained.store(generation, std::memory_order_release);
+        }
+        if (!closing.load(std::memory_order_acquire))
+            send_header({Kind::kernel_request, 0, 0, 0, 127});
+    }
+    return nullptr;
+}
+
 void finish(qemu_plugin_id_t, void*)
 {
+    if (has_start_pc && !recording.load(std::memory_order_acquire))
+        fail(Failure::capture, "cpu2tensor: target exited before the requested capture start block\n");
+    if (capture_kernel) {
+        closing.store(true, std::memory_order_release);
+        pthread_join(control_thread, nullptr);
+    }
     for (unsigned int index = 0; index < max_sources; ++index) {
+        const ColdLock lock(sources[index]);
         if (sources[index].state == State::active) {
             // Atexit cannot read registers. Drain only the events already seen.
             end_source(index, sources[index]);
@@ -472,10 +578,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t* info,
                                           int argc, char** argv)
 {
-    if (info->system_emulation) {
-        std::fputs("cpu2tensor: this capture slice supports Linux user mode only\n", stderr);
-        return 1;
-    }
+    capture_system = info->system_emulation;
     if (std::strcmp(info->target_name, "aarch64") == 0) {
         architecture = Architecture::aarch64;
     } else if (std::strcmp(info->target_name, "x86_64") == 0) {
@@ -488,6 +591,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
     bool memory_seen = false;
     bool values_seen = false;
     bool stdio_seen = false;
+    bool kernel_seen = false;
     for (int index = 0; index < argc; ++index) {
         const char* argument = argv[index];
         if (std::strncmp(argument, "fd=", 3) == 0 && output_fd < 0) {
@@ -500,6 +604,28 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
                 return 1;
             }
             output_fd = static_cast<int>(parsed);
+        } else if (std::strncmp(argument, "control=", 8) == 0 && control_fd < 0) {
+            char* end = nullptr;
+            errno = 0;
+            const long parsed = std::strtol(argument + 8, &end, 10);
+            if (end == argument + 8 || errno != 0 || *end != '\0' || parsed < 3 || parsed > INT_MAX)
+                return 1;
+            control_fd = static_cast<int>(parsed);
+        } else if (std::strncmp(argument, "start=", 6) == 0 && !has_start_pc) {
+            char* end = nullptr;
+            errno = 0;
+            start_pc = std::strtoull(argument + 6, &end, 0);
+            if (end == argument + 6 || errno != 0 || *end != '\0' || argument[6] == '-') {
+                std::fputs("cpu2tensor: start needs a guest block address\n", stderr);
+                return 1;
+            }
+            has_start_pc = true;
+            recording.store(false, std::memory_order_relaxed);
+        } else if (std::strncmp(argument, "kernel=", 7) == 0 && !kernel_seen) {
+            kernel_seen = true;
+            if (std::strcmp(argument + 7, "on") == 0) capture_kernel = true;
+            else if (std::strcmp(argument + 7, "off") == 0) capture_kernel = false;
+            else return 1;
         } else if (std::strncmp(argument, "stdio=", 6) == 0 && !stdio_seen) {
             stdio_seen = true;
             if (std::strcmp(argument + 6, "on") == 0) capture_stdio = true;
@@ -547,6 +673,27 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         std::fputs("cpu2tensor: fd is required, and memory values require memory capture\n", stderr);
         return 1;
     }
+    if ((capture_system && capture_stdio) || (capture_kernel && !capture_system) ||
+        (capture_kernel != (control_fd >= 0))) {
+        std::fputs("cpu2tensor: kernel interaction requires system emulation and its control pipe\n", stderr);
+        return 1;
+    }
+    if (capture_kernel) {
+        if (info->system.smp_vcpus < 1 || info->system.smp_vcpus > static_cast<int>(max_sources) ||
+            info->system.smp_vcpus != info->system.max_vcpus) {
+            std::fputs("cpu2tensor: kernel actions need a fixed vCPU count without hotplug slots\n", stderr);
+            return 1;
+        }
+        system_cpus = static_cast<unsigned int>(info->system.smp_vcpus);
+    }
+    if (capture_system && architecture == Architecture::x86_64 && register_profile != RegisterProfile::none)
+        std::fputs("cpu2tensor: omitting x86 eflags; system TCG exposes lazy flags at block callbacks\n", stderr);
+    if (control_fd >= 0) {
+        struct stat control_status{};
+        const int control_flags = fcntl(control_fd, F_GETFL);
+        if (fstat(control_fd, &control_status) != 0 || !S_ISFIFO(control_status.st_mode) ||
+            control_flags < 0 || (control_flags & O_ACCMODE) != O_RDONLY) return 1;
+    }
     struct stat status{};
     const int flags = fcntl(output_fd, F_GETFL);
     if (fstat(output_fd, &status) != 0 || !S_ISFIFO(status.st_mode) || flags < 0 ||
@@ -556,13 +703,23 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
     }
     const uint64_t features = (capture_memory ? feature_memory : 0) |
         (register_profile != RegisterProfile::none ? feature_registers : 0) |
-        (capture_values ? feature_memory_values : 0) | (capture_stdio ? feature_stdio : 0);
+        (capture_values ? feature_memory_values : 0) | (capture_stdio ? feature_stdio : 0) |
+        (capture_system ? feature_system : 0) | (capture_kernel ? feature_kernel : 0) |
+        (has_start_pc ? feature_window : 0);
     send_header({Kind::hello, 0, 0, 0, static_cast<uint64_t>(architecture) | features});
     qemu_plugin_register_vcpu_init_cb(id, source_start);
     qemu_plugin_register_vcpu_exit_cb(id, source_end);
     qemu_plugin_register_vcpu_tb_trans_cb(id, translate);
-    qemu_plugin_register_vcpu_syscall_cb(id, syscall_entry);
-    qemu_plugin_register_vcpu_syscall_ret_cb(id, syscall_return);
+    if (capture_system) {
+        qemu_plugin_register_vcpu_idle_cb(id, source_idle);
+    } else {
+        qemu_plugin_register_vcpu_syscall_cb(id, syscall_entry);
+        qemu_plugin_register_vcpu_syscall_ret_cb(id, syscall_return);
+    }
+    if (capture_kernel && pthread_create(&control_thread, nullptr, control, nullptr) != 0) {
+        std::fputs("cpu2tensor: cannot start kernel control thread\n", stderr);
+        return 1;
+    }
     qemu_plugin_register_atexit_cb(id, finish, nullptr);
     return 0;
 }

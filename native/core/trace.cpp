@@ -30,6 +30,7 @@ void encode_header(uint8_t* bytes, const Header& header) {
     store_u64(bytes + 24, header.detail);
 }
 size_t payload_size(const Header& header) {
+    if (header.kind == Kind::guest_event) return static_cast<size_t>(header.detail);
     if (header.kind == Kind::blocks) return header.count * sizeof(uint64_t);
     if (header.kind == Kind::register_schema || header.kind == Kind::registers || header.kind == Kind::memory)
         return static_cast<size_t>(header.detail);
@@ -44,6 +45,12 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
     if (h.source >= max_sources || h.count > max_addresses)
         return Result<Header>::failure("Trace exceeds the supported source or batch limit");
     switch (h.kind) {
+    case Kind::kernel_request:
+    case Kind::guest_event:
+        if (h.source != 0 || h.count != 0 || h.sequence != 0 || h.detail == 0 ||
+            h.detail > (h.kind == Kind::kernel_request ? 127u : 1024u))
+            return Result<Header>::failure("Invalid kernel adapter frame fields");
+        break;
     case Kind::blocks:
         if (h.count == 0 || h.detail != 0) return Result<Header>::failure("Invalid block batch fields");
         break;
@@ -73,11 +80,15 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
             return Result<Header>::failure("Invalid control frame fields");
         if (h.kind == Kind::hello) {
             const auto architecture = h.detail & 255;
-            constexpr auto allowed = uint64_t{255} | feature_memory | feature_registers | feature_memory_values | feature_stdio;
+            constexpr auto allowed = uint64_t{255} | feature_memory | feature_registers | feature_memory_values | feature_stdio |
+                feature_system | feature_kernel | feature_window;
             if ((architecture != 1 && architecture != 2) || (h.detail & ~allowed) != 0)
                 return Result<Header>::failure("Unsupported target architecture or features");
             if ((h.detail & feature_memory_values) && !(h.detail & feature_memory))
                 return Result<Header>::failure("Memory values require memory observations");
+            if (((h.detail & feature_kernel) && !(h.detail & feature_system)) ||
+                ((h.detail & feature_stdio) && (h.detail & feature_system)))
+                return Result<Header>::failure("Incompatible system and action features");
         }
         if (h.kind == Kind::complete && h.detail > 255) return Result<Header>::failure("Invalid target exit code");
         if (h.kind == Kind::error && (h.detail < 1 || h.detail > 4)) return Result<Header>::failure("Unknown trace failure");
@@ -170,6 +181,24 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
         return Result<Done>::success({});
     }
     if (h.kind == Kind::hello) return Result<Done>::failure("Duplicate trace Hello");
+    if (h.kind == Kind::kernel_request || h.kind == Kind::guest_event) {
+        if (!(_features & feature_kernel))
+            return Result<Done>::failure("Kernel adapter frame needs an interactive system worker");
+        if (h.kind == Kind::guest_event && bytes == nullptr)
+            return Result<Done>::failure("Guest event payload is missing");
+        if (h.kind == Kind::kernel_request && (_features & feature_registers)) {
+            for (uint32_t source = 0; source < max_sources; ++source) {
+                if (!_data[source]) continue;
+                const auto* registers = _registers[source];
+                if (registers == nullptr) return Result<Done>::failure("Kernel boundary needs a register schema");
+                for (uint32_t id = 0; id < max_registers; ++id)
+                    if (registers->widths[id] != 0 && !registers->sampled[id])
+                        return Result<Done>::failure("Kernel boundary needs complete source register baselines");
+            }
+        }
+        // Adapter events have no vCPU attribution and consume no source sequence.
+        return Result<Done>::success({});
+    }
     if (h.kind == Kind::error) { _finished = true; return Result<Done>::success({}); }
     if (h.kind == Kind::complete) {
         for (uint32_t source = 0; source < max_sources; ++source)

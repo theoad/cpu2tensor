@@ -4,8 +4,9 @@ Operators provision machines, credentials, connectivity, dependencies, and guest
 artifacts. cpu2tensor validates requirements; it does not install QEMU. The project
 contains no cloud provisioning or credential-management runtime.
 
-On 2026-09-07 the user clarified that agents may build AArch64 QEMU as a separate
-development dependency on the VM. This does not authorize bundling QEMU or adding
+On 2026-09-07 the user authorized separate development QEMU builds for the ARM
+VM and the x86 kernel integration. The upstream x86 build and exact API checks
+are recorded in [kernel dependency evidence](kernel-qemu-build.md). This does not authorize bundling QEMU or adding
 QEMU installation to the package. Keep that build outside the source checkout and
 record its source, configuration, and headers.
 

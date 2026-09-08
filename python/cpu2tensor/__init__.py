@@ -5,5 +5,6 @@ from cpu2tensor.batch import Batch, MemoryAccesses, RegisterChanges
 from cpu2tensor.pool import Pool
 
 from cpu2tensor.stdio import StdioEnv
+from cpu2tensor.kernel import KernelEnv
 
-__all__ = ["Batch", "MemoryAccesses", "Pool", "RegisterChanges", "StdioEnv"]
+__all__ = ["Batch", "KernelEnv", "MemoryAccesses", "Pool", "RegisterChanges", "StdioEnv"]

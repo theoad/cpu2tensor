@@ -2,7 +2,7 @@
 
 Start with [trace digits](trace_digits/README.md), then [stdin interaction](stdio_gym/README.md).
 [Kernel pretraining](kernel_pretraining/README.md) and [kernel actions](kernel_gym/README.md)
-track the full-system examples and their current prerequisites.
+show real full-system learning and paused-world actions.
 
 Python examples live in the installed `cpu2tensor.examples` package under `python/`;
 native targets live under `native/examples/`. This directory is the entry point,

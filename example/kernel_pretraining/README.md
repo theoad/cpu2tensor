@@ -1,12 +1,8 @@
 # Kernel pretraining
 
-The benign guest workload boots and completes. Full-system trace capture and a measured
-multiworker training run are pending a compatible operator-provided QEMU and
-backend implementation.
+Run multiple observation-only Linux kernel workers and train a small next-block
+model with bounded batching. Real three-worker MPS learning is recorded in the
+[setup and results](../../docs/kernel-pretraining.md).
 
-See [build, workload, and acceptance instructions](../../docs/kernel-examples.md#observation-only-pretraining).
-The shared target lives in [native/](../../native/examples/kernel_init.c).
-
-The [bounded pretraining learner](../../docs/kernel-pretraining.md) accepts
-operator-started observation endpoints. Its user-process check is separate from
-pending kernel trace capture.
+Build the benign guest using [kernel setup](../../docs/kernel-examples.md).
+AWS hosts and connections are operator-managed; CUDA and DDP remain unverified.

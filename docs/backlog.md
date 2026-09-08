@@ -1,6 +1,6 @@
 # Work board
 
-Updated 2026-09-07. This file owns work status. The first vertical slice is complete:
+Updated 2026-09-08. This file owns work status. The first vertical slice is complete:
 real observation, integration, packaging, and standard-IDE navigation checks pass.
 Core register and memory instrumentation is now implemented and checked on ARM,
 x86 guests, CPU and MPS. CUDA execution and throughput work remain open.
@@ -64,22 +64,23 @@ parallel producer/consumer edits. Preserve retained-tensor ownership; upload
 completion alone does not permit device-buffer reuse. Acceptance and named-host
 measurement requirements are in the capture audit.
 
-## Current iteration: small learning examples
+## Current iteration: kernel integration and learning
 
 | Card | Status | Evidence / remaining work |
 | --- | --- | --- |
 | C2T-12 Trace learning quickstart | Done | Real ARM capture, exact sample-count oracle, unique held-out inputs/features, CPU/MPS training and checkpoint reload; [results](learn-trace.md) |
 | C2T-13 Stdin actions and learning | Done | Single-vCPU stop at real read, reset-by-restart, cancellation, optional Gym; real MPS imitation and REINFORCE, both 40/40 fresh evaluations; [results](stdio-example.md) |
-| C2T-14 Benign kernel guest | Done for guest only | Static PID1 and rootless initramfs; real two-vCPU QEMU boots in observation/command modes, exact results and clean poweroff; [scope](kernel-examples.md) |
-| C2T-15 Kernel rich capture | Pending dependency and implementation | QEMU 8.2 on x86 lacks register/value APIs; separate QEMU 11 build permission requested. System capture, per-vCPU tails/completion and actual kernel traces still required |
-| C2T-16 Kernel pretraining learner | Done for learner; kernel run pending | Bounded concurrent endpoints, separate source pairs, full completion after update budget; real CPU/MPS learning on disjoint ARM target inputs; [results](kernel-pretraining.md) |
-| C2T-17 Kernel Gym adapter | Incomplete | Benign guest command adapter exists; QMP world pause, all-source trace boundary and model/action integration still needed |
+| C2T-14 Benign kernel guest | Done | Static PID1, rootless initramfs, pinned concurrent memory workload, exact checksums and clean poweroff; [scope](kernel-examples.md) |
+| C2T-15 Kernel rich capture | Done | Upstream QEMU 11 developer build; rich baselines/values and exact parallel routine on both CPUs, repeated drain fences, full boot through poweroff; [results](kernel-integration-results.md) |
+| C2T-16 Kernel pretraining learner | Done | Three actual x86 kernel workers, two training and one held out, MPS loss 5.71269→4.67176; full draining and checkpoint reload; [results](kernel-pretraining.md) |
+| C2T-17 Kernel Gym adapter | Done | QMP stop plus explicit all-source drain; KernelEnv/Gym; real CPU/MPS finite policy updates, exact result oracles, reset/reaping, bounded partial actions and fixed-vCPU validation; [results](kernel-gym.md) |
 
 The `example/` directory is the user entry point; native targets stay under
 `native/`, and installed Python modules stay under `python/cpu2tensor/examples/`.
-The stdin challenge uses validated ordinary input, not an exploit target. CUDA,
-AWS endpoints and rich kernel learning have not been demonstrated. Do not promote
-guest-only checks into captured-kernel or training claims.
+The stdin challenge uses validated ordinary input. Kernel learning uses an explicit
+postboot window, block features, and fixed benign syscall workloads. Rich register
+and memory capture has separate correctness evidence. CUDA, AWS execution, DDP,
+and optimized observation throughput remain open; do not claim GPU-bound scale.
 
 ## Following slices
 
@@ -156,3 +157,10 @@ all difficult assumptions until the end.
 - The user selected core instrumentation after the first goal completed. That
   implementation is now recorded above; the old goal remains complete. Next work
   is CUDA execution when a device is available and observation batching overhead.
+
+- 2026-09-08: Kernel integration completed on `codex/kernel-integration`. Full boot
+  block capture, rich postboot observations, both active vCPUs, paused-world
+  actions, repeated reset/reaping, bounded action delivery, observation-only
+  multiworker MPS training and CPU/MPS Gym policy updates are checked. The stress
+  harness now drains diagnostic output independently. See
+  [kernel results](kernel-integration-results.md) for exact scope and open limits.

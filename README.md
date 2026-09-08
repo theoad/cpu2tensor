@@ -7,8 +7,8 @@ execution observations into tensors for learning.
 
 **Status:** early development. ARM/x86 user-process tracing and CPU/MPS learning
 are checked. Single-vCPU stdin interaction is available with a Gymnasium wrapper.
-Kernel guest workloads boot, but rich kernel capture and kernel Gym integration
-remain incomplete. CUDA execution and capture throughput optimization remain open.
+Rich x86 kernel capture, multiworker pretraining, and kernel Gym actions are
+checked with two active vCPUs. CUDA execution and capture throughput optimization remain open.
 
 Start with [the examples](example/README.md):
 
@@ -18,7 +18,7 @@ Start with [the examples](example/README.md):
 - [Stdin Gym](example/stdio_gym/README.md): observe a cue, choose a legal digit,
   and learn from success rewards. Real MPS REINFORCE passed 40/40 fresh decisions.
 - [Kernel pretraining](example/kernel_pretraining/README.md) and
-  [kernel actions](example/kernel_gym/README.md): guest setup and current limits.
+  [kernel actions](example/kernel_gym/README.md): real kernel observation-only training and paused-world Gym actions.
 
 With an [operator-started worker](docs/quickstart.md):
 

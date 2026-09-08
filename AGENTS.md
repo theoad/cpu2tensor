@@ -2,8 +2,7 @@
 
 Read [the current task board](docs/backlog.md), then only the architecture and
 environment sections needed for the task. Block, register and memory observation, simple stdin interaction, and small
-CPU/MPS learning examples are implemented. Kernel guest checks are separate from
-pending kernel capture/Gym integration; see the board for exact evidence.
+CPU/MPS learning examples are implemented. Rich x86 kernel capture, multiworker pretraining, and KernelEnv/Gym now run; see the board for exact evidence.
 Do not report later planned APIs or checks as implemented.
 
 ## Product constraints
@@ -18,7 +17,7 @@ Do not report later planned APIs or checks as implemented.
   memory order. Lossless backpressure and explicit incomplete data are required.
 - Operators supply QEMU, hosts, connections, and dependencies. The distributed
   package and its setup must not build, download, install, or bundle QEMU. The user
-  authorized building a separate development QEMU on the ARM VM on 2026-09-07.
+  authorized separate development QEMU builds on the ARM VM and x86 host on 2026-09-07. Neither is a shipped dependency.
 
 ## Source rules
 

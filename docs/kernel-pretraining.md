@@ -1,10 +1,8 @@
 # Observation-only next-block training
 
-The trainer is implemented and has run against two concurrent AArch64 user-process
-workers, with learning on CPU and Apple MPS. **It has not been validated on a kernel
-trace.** Full-system capture remains a separate backend requirement, described in
-[the kernel examples](kernel-examples.md). This page does not imply that the current
-Linux-user worker can capture a guest kernel.
+The trainer has run on three real x86 Linux kernel workers with learning on
+Apple MPS, as well as earlier AArch64 user-process checks on CPU/MPS. The system
+backend and guest setup are described in [the kernel examples](kernel-examples.md).
 
 The example predicts the next executed block from the previous block. It is a
 small self-supervised starting point: an embedding and linear classifier, ordinary
@@ -14,9 +12,7 @@ come from the operator. There are no model actions, rewards or Gym calls.
 ## Run the trainer
 
 Start compatible observation workers through the operator's normal runner setup.
-Use different prescribed workloads or inputs for training and test runs. A kernel
-runner must provide actual full-system trace support before its endpoint can be
-used here. No kernel-launch command is advertised until that backend is checked.
+Use different prescribed workloads or inputs for training and test runs. Use the kernel worker command below on each operator-managed runner.
 
 With endpoints available on a private connection or operator-provided tunnels:
 
@@ -34,8 +30,8 @@ Use `--device cpu` for CPU execution; CUDA is accepted when the operator supplie
 a CUDA learner, but no CUDA run is claimed here. Workers should finish their
 prescribed workload so that the trainer can validate completion.
 
-The package opens no SSH connections and does not create cloud instances, install
-dependencies or launch QEMU. The operator supplies endpoints for local, remote or
+The learner opens no SSH connections and does not create cloud instances or
+install dependencies. The operator-started native worker launches the supplied QEMU. The operator supplies endpoints for local, remote or
 AWS runners. One learner process owns one device in this example; DDP, multiple
 learner devices and fault-tolerant restart are future integrations.
 
@@ -63,8 +59,8 @@ This is a deliberately lossy feature. Distinct addresses can collide. The raw
 `Batch.addresses` tensor remains unchanged and retains its exact address bits.
 ASLR and different code layouts can change tokens; address-space normalization
 is a separate modeling choice. Memory transactions and register values are not
-model inputs in this first trainer. A later richer kernel example must validate
-those signals before claiming to use them for pretraining.
+model inputs in this first trainer. Rich kernel capture is checked separately; this model intentionally uses block
+transitions only.
 
 The learner combines independent pairs into fixed-size minibatches. The final
 partial minibatch uses its actual size, so there are no padding tokens or masked
@@ -172,3 +168,56 @@ are under the same directory on `trail-arm`. Input SHA-256 values:
 
 - Training: `fe6a630f7337bb38a52e92354e456fccffeb134f6365000d6dfeeace71002729`.
 - Test: `2e935ab46e771cfa0b2bdb735203c09cb3638c286d482f05644ba41f1ea2b196`.
+
+## Real kernel worker
+
+Follow [guest setup](kernel-examples.md) to build the static target, initramfs,
+and worker with matching QEMU headers. In each worker terminal:
+
+```sh
+export C2T_START_PC="$(nm "$C2T_BUILD/kernel_init" | awk '$3 == "cpu2tensor_capture_begin" {print "0x" $1}')"
+"$C2T_BUILD/cpu2tensor-worker" \
+  --qemu "$QEMU_SYSTEM" --plugin "$C2T_BUILD/libcpu2tensor_plugin.so" \
+  --system on --registers none --memory off --start-pc "$C2T_START_PC" \
+  --port 9000 --timeout-ms 120000 -- \
+  -accel tcg,thread=multi -smp 2 -m 256M -nographic -monitor none \
+  -nic none -no-reboot -kernel "$KERNEL" -initrd "$INITRAMFS" \
+  -append 'console=ttyS0 rdinit=/init panic=-1 cpu2tensor.mode=observe cpu2tensor.seed=7'
+```
+
+Use separate ports on the same host, or the same port on distinct hosts. Supply
+seed 11 for another training run and seed 17 for the held-out run. No interactive
+adapter, action request, reward or policy is involved. `--start-pc` selects an
+explicit postboot window; omit it to request capture from QEMU startup. Use
+`--registers general --memory on --memory-values on` to collect rich signals for
+a model that consumes them; the next-block model ignores those extra columns.
+
+The same commands apply to operator-provisioned AWS runners: copy the chosen
+guest artifacts and start one worker per target with the operator's existing
+process manager and secure connection. The package handles neither provisioning
+nor credentials. This release has no AWS execution evidence or multi-device DDP.
+
+## Real kernel evidence
+
+On 2026-09-07, three workers on `trail-x86` (Ubuntu 24.04.2 x86-64) ran upstream
+QEMU 11.0.3 TCG with two vCPUs and Linux 6.9.0-dirty. Two complete seeded runs
+(7, 11) trained the model; a separate seed-17 run supplied the held-out reservoir.
+All used the explicit postboot marker and block-only capture. The learner was
+Apple M2, macOS 15.7.3, PyTorch 2.13.0, MPS.
+
+| Result | Value |
+| --- | ---: |
+| Completed kernel workers | 3 |
+| Observed training pairs | 808,398 |
+| Observed test pairs | 305,167 |
+| Updates / optimized pairs | 100 / 102,400 |
+| Retained test pairs | 16,384 |
+| Initial / final held-out loss | 5.71269 / 4.67176 |
+| Final held-out accuracy | 16.949% |
+
+All streams were drained after the update budget. Each guest logged successful
+completion. The saved weights reproduce held-out metrics on CPU. Artifacts are
+under `~/.cache/cpu2tensor/kernel-integration/pretraining/` on the Mac; worker logs
+are under `~/.cache/cpu2tensor/kernel-integration/` on `trail-x86`.
+This is an integration/learning check, not a throughput result, a comparison
+between host architectures, or evidence of generalization to a different kernel.

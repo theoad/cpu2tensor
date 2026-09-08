@@ -1,5 +1,6 @@
 # QEMU capture
 
-`plugin.cpp` records block entry addresses from an operator-provided QEMU.
-See the [batch contract](../../docs/batches.md) and
-[QEMU findings](../../docs/qemu-probe.md) for ordering and coverage limits.
+`plugin.cpp` records per-vCPU blocks, selected register changes, and successful
+memory transactions from operator-provided user/system QEMU. See the
+[signal contract](../../docs/instrumentation.md) and
+[kernel API review](../../docs/kernel-qemu-build.md) for ordering and coverage.

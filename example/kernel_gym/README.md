@@ -1,8 +1,8 @@
 # Kernel Gym example
 
-The guest side adapter passes real getpid, memory-checksum, and pipe-roundtrip
-checks. A runnable kernel Gym wrapper, whole-machine pause, and trace-tail barrier
-remain pending.
+Observe a two-vCPU Linux guest, check four fixed syscall workloads, and update a
+small command policy through the optional Gym wrapper.
 
-See [adapter and boot instructions](../../docs/kernel-examples.md#named-syscall-adapter).
-The shared target lives in [native/](../../native/examples/kernel_init.c).
+See [setup, commands, semantics, and validation](../../docs/kernel-gym.md).
+The installed client is
+[`cpu2tensor.examples.learn_kernel`](../../python/cpu2tensor/examples/learn_kernel.py).

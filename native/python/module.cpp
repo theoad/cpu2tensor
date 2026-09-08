@@ -126,6 +126,8 @@ PyObject* decode(PyObject*, PyObject* arguments) {
         payload = decode_signals(frame, bytes + header_bytes, stream->memory_values());
     else {
         payload = PyByteArray_FromStringAndSize(nullptr, size);
+        if (payload != nullptr && frame.kind == Kind::guest_event)
+            std::memcpy(PyByteArray_AsString(payload), bytes + header_bytes, size);
         if (payload != nullptr && frame.kind == Kind::blocks) {
             char* destination = PyByteArray_AsString(payload);
             for (uint32_t row = 0; row < frame.count; ++row)
