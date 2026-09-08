@@ -16,6 +16,8 @@ class KernelEnv(StdioEnv):
 
     A reset or step iterator ends only after QEMU has stopped every vCPU and
     the plugin has drained their captured tails, or after the target exits.
+    This is a publication boundary, not a fresh register snapshot. Register
+    changes remain samples at their recorded checkpoints.
     Actions are one ASCII command line for the guest's fixed syscall adapter.
     The most recent result and event are bounded metadata, not trace history.
     Rewards and episode limits remain client decisions through ``as_gym``.
@@ -52,4 +54,5 @@ class KernelEnv(StdioEnv):
         return super().step(action)
 
     def _info(self) -> dict[str, Any]:
-        return {**super()._info(), "event": self.event, "result": self.result}
+        return {**super()._info(), "event": self.event, "result": self.result,
+                "boundary_register_snapshot": "unavailable"}

@@ -8,6 +8,31 @@ from torch import Tensor
 
 
 @dataclass(frozen=True)
+class ExecutableLayout:
+    """Initial user-process layout, owned by the worker rather than a vCPU.
+
+    ``values`` holds code_start, code_end (exclusive), initial_entry in that
+    order. The code span is QEMU's nominal executable segment span, not an ELF
+    load bias or a complete mapping table. A dynamic program's initial entry
+    can belong to its interpreter. Later loads/remaps are not represented.
+    """
+
+    values: Tensor
+
+    @property
+    def code_start(self) -> Tensor:
+        return self.values[0]
+
+    @property
+    def code_end(self) -> Tensor:
+        return self.values[1]
+
+    @property
+    def initial_entry(self) -> Tensor:
+        return self.values[2]
+
+
+@dataclass(frozen=True)
 class RegisterChanges:
     """Register values at checkpoints, with names from this CPU's schema.
 
@@ -23,6 +48,27 @@ class RegisterChanges:
     flags: Tensor
     values: Tensor
     names: Mapping[int, str]
+    sequences: Tensor | None = None
+
+
+@dataclass(frozen=True)
+class AddressContext:
+    """Ordered x86 paging/execution context, scoped to one worker and vCPU.
+
+    ``known`` has bits for cr0, cr3, cr4, efer, cs_base and mode respectively.
+    Unknown fields contain zero, not a measured zero. Mode is 16, 32 or 64.
+    CR3 is raw paging state, not a process ID or a stable address-space ID.
+    """
+
+    pc: Tensor
+    cr0: Tensor
+    cr3: Tensor
+    cr4: Tensor
+    efer: Tensor
+    cs_base: Tensor
+    mode: Tensor
+    known: Tensor
+    sequences: Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -31,6 +77,12 @@ class MemoryAccesses:
 
     Flags use bit 0 for stores and bit 1 for big-endian guest accesses. Optional
     values contain little-endian significance bytes, zero-padded to 16 bytes.
+    System mappings describe only a physical prefix of each transaction; a
+    cross-page tail can be unknown. Mapping flags: bit 0 physical prefix known,
+    bit 1 QEMU I/O-dispatch flag known, bit 2 I/O dispatch. The flag applies to
+    the first address only, not every byte of the prefix. Neither a direct path
+    nor an unknown flag proves RAM: subpage wrappers and ROMD affect dispatch. Context sequences reference preceding AddressContext event sequences
+    on this same source; the decoder verifies each reference.
     """
 
     pc: Tensor
@@ -38,22 +90,37 @@ class MemoryAccesses:
     sizes: Tensor
     flags: Tensor
     values: Tensor | None
+    physical_addresses: Tensor | None = None
+    mapped_sizes: Tensor | None = None
+    mapping_flags: Tensor | None = None
+    context_sequences: Tensor | None = None
+    sequences: Tensor | None = None
 
 
 @dataclass(frozen=True)
 class Batch:
-    """One signal's consecutive events, with independently owned tensor storage.
+    """Events from one CPU, with independently owned tensor storage.
 
     Addresses and PCs keep their raw 64 bits in signed int64 tensor storage.
     A negative address represents its unsigned value modulo 2**64. Source order
     is meaningful; arrival order between different sources is not memory order.
     Retaining a batch keeps its storage alive independently of the pool.
-    ``addresses`` is empty for register and memory batches. A row's source
-    sequence is ``first_sequence`` plus its index in the populated table.
+    Legacy batches populate one table; a row's source sequence is
+    ``first_sequence`` plus its index. Mixed batches can populate several tables:
+    use ``block_sequences`` and each table's ``sequences`` for the original event
+    positions. ``first_sequence`` is the first event across all populated tables.
+    ``worker`` is the endpoint's index in the Pool, stable for that Pool's run.
+    Use (worker, source) together when maintaining per-CPU state.
+    An opt-in ``layout`` batch describes the worker's initial executable instead:
+    ``source`` and ``first_sequence`` are None and no CPU sequence is consumed.
     """
 
-    source: int
-    first_sequence: int
+    source: int | None
+    first_sequence: int | None
     addresses: Tensor
     registers: RegisterChanges | None = None
     memory: MemoryAccesses | None = None
+    context: AddressContext | None = None
+    layout: ExecutableLayout | None = None
+    worker: int = 0
+    block_sequences: Tensor | None = None

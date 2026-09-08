@@ -10,6 +10,8 @@ struct KernelOptions final {
     const char* memory;
     const char* values;
     const char* start_pc;
+    const char* batching;
+    const char* publication;
     int timeout_ms;
     char** arguments;
 };

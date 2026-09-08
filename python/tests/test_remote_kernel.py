@@ -26,28 +26,36 @@ class RemoteKernelTests(unittest.TestCase):
         self.initramfs = os.environ['CPU2TENSOR_KERNEL_INITRAMFS']
         self.worker = None
         self.log = tempfile.TemporaryFile()
-        symbols = self.ssh(['nm', '-n', f'{self.build}/kernel_init']).decode()
+        self.init = os.environ.get('CPU2TENSOR_KERNEL_INIT', f'{self.build}/kernel_init')
+        symbols = self.ssh(['nm', '-n', self.init]).decode()
         self.begin = int(re.search(r'^([0-9a-f]+) T cpu2tensor_capture_begin$', symbols, re.M)[1], 16)
         self.parallel = int(re.search(r'^([0-9a-f]+) T cpu2tensor_parallel_memory$', symbols, re.M)[1], 16)
 
     def ssh(self, args):
         return subprocess.check_output(['ssh', '-o', 'BatchMode=yes', self.host, shlex.join(args)], timeout=20)
 
-    def start(self, *, interactive=True, episodes=1, rich=False, timeout=30000, start=None, full_boot=False, cpus='2'):
+    def start(self, *, interactive=True, episodes=1, rich=False, timeout=30000, start=None, full_boot=False, cpus='2', stop=None, batching='legacy', publication='pipe', workload_bytes=None):
         port = int(self.ssh(['python3', '-c', 'import socket; s=socket.socket(); s.bind(("0.0.0.0",0)); print(s.getsockname()[1])']))
         args = [f'{self.build}/cpu2tensor-worker', '--qemu', self.qemu, '--plugin', f'{self.build}/libcpu2tensor_plugin.so',
                 '--system', 'on', '--host', self.address, '--port', str(port), '--episodes', str(episodes),
                 '--timeout-ms', str(timeout), '--registers', 'general' if rich else 'none',
-                '--memory', 'on' if rich else 'off', '--memory-values', 'on' if rich else 'off']
+                '--memory', 'on' if rich else 'off', '--memory-values', 'on' if rich else 'off',
+                '--batching', batching, '--publication', publication]
         if not full_boot:
             args += ['--start-pc', hex(self.begin if start is None else start)]
+        if stop is not None:
+            args += ['--stop-pc', hex(stop)]
         if interactive:
             args += ['--kernel-adapter', 'on']
         args += ['--', '-accel', 'tcg,thread=multi', '-smp', cpus, '-m', '256M', '-nic', 'none', '-no-reboot',
                  '-kernel', self.image, '-initrd', self.initramfs,
-                 '-append', 'console=ttyS0 rdinit=/init panic=-1 cpu2tensor.mode=' + ('interactive' if interactive else 'observe')]
+                 '-append', 'console=ttyS0 rdinit=/init panic=-1 cpu2tensor.mode=' + ('interactive' if interactive else 'observe')
+                 + (' cpu2tensor.parallel_timeout=300' if rich else '')]
+        if workload_bytes is not None:
+            args[-1] += f' cpu2tensor.bytes={workload_bytes}'
         if not interactive:
             args += ['-nographic', '-monitor', 'none']
+        self.arguments = args
         command = 'echo cpu2tensor-pid:$$; exec ' + shlex.join(args)
         # A full boot can fill an unread stdout pipe. Keep both diagnostic
         # channels in a file, independently of tensor consumption.
@@ -97,9 +105,22 @@ class RemoteKernelTests(unittest.TestCase):
         endpoint = self.start(rich=True, timeout=300000)
         kinds = set()
         sources = set()
+        contexts = {}
+        mapped_sources = set()
         retained = None
+        def check_context(batch):
+            if batch.context is not None:
+                self.assertEqual(batch.context.known.tolist(), [63])
+                contexts[batch.source] = batch.first_sequence
+            if batch.memory is not None:
+                table = batch.memory
+                self.assertTrue(bool((table.context_sequences == contexts[batch.source]).all()))
+                self.assertTrue(bool((table.mapped_sizes <= table.sizes).all()))
+                if bool((table.mapping_flags & 1).any()):
+                    mapped_sources.add(batch.source)
         with KernelEnv(endpoint, timeout=300) as env:
             for batch in env.reset():
+                check_context(batch)
                 if batch.registers is not None:
                     kinds.add('registers')
                     self.assertNotIn('eflags', batch.registers.names.values())
@@ -109,9 +130,11 @@ class RemoteKernelTests(unittest.TestCase):
                     if retained is None:
                         retained = (batch.memory.values, batch.memory.values.clone())
             for batch in env.step(b'parallel 17 4096\n'):
+                check_context(batch)
                 if batch.addresses.numel() and bool((batch.addresses == self.parallel).any()):
                     sources.add(batch.source)
             self.assertEqual(sources, {0, 1})
+            self.assertEqual(mapped_sources, {0, 1})
             self.assertEqual(kinds, {'registers', 'memory'})
             self.assertEqual((env.result['checksum0'], env.result['checksum1']), (520419, 522544))
             self.assertTrue(torch.equal(*retained))

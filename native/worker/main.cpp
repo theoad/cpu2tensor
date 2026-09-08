@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include <cpu2tensor/trace.hpp>
+#include <cpu2tensor/register_selection.hpp>
 #include "kernel.hpp"
 #include <arpa/inet.h>
 #include <cerrno>
@@ -47,7 +48,11 @@ struct Options final {
     bool stdio = false;
     bool system = false;
     bool kernel = false;
+    bool layout = false;
     const char* start_pc = nullptr;
+    const char* stop_pc = nullptr;
+    const char* batching = "legacy";
+    const char* publication = "pipe";
     int episodes = 1;
     char** target = nullptr;
 };
@@ -84,18 +89,34 @@ Result<Options> parse(int argc, char** argv) {
         else if (std::strcmp(key, "--registers") == 0) options.registers = value;
         else if (std::strcmp(key, "--memory") == 0) options.memory = value;
         else if (std::strcmp(key, "--memory-values") == 0) options.values = value;
-        else if (std::strcmp(key, "--start-pc") == 0) {
+        else if (std::strcmp(key, "--publication") == 0) {
+            if (std::strcmp(value, "pipe") != 0 && std::strcmp(value, "ring") != 0)
+                return Result<Options>::failure("--publication needs pipe or ring");
+            options.publication = value;
+        }
+        else if (std::strcmp(key, "--batching") == 0) {
+            if (std::strcmp(value, "legacy") != 0 && std::strcmp(value, "mixed") != 0)
+                return Result<Options>::failure("--batching needs legacy or mixed");
+            options.batching = value;
+        }
+        else if (std::strcmp(key, "--start-pc") == 0 || std::strcmp(key, "--stop-pc") == 0) {
             char* end = nullptr;
             errno = 0;
             (void)std::strtoull(value, &end, 0);
             if (end == value || errno != 0 || *end != '\0' || value[0] == '-')
-                return Result<Options>::failure("--start-pc needs a guest block address");
-            options.start_pc = value;
+                return Result<Options>::failure("Capture boundary needs a guest block address");
+            if (std::strcmp(key, "--start-pc") == 0) options.start_pc = value;
+            else options.stop_pc = value;
         } else if (std::strcmp(key, "--system") == 0 || std::strcmp(key, "--kernel-adapter") == 0) {
             if (std::strcmp(value, "on") != 0 && std::strcmp(value, "off") != 0)
                 return Result<Options>::failure("System settings need on or off");
             if (std::strcmp(key, "--system") == 0) options.system = std::strcmp(value, "on") == 0;
             else options.kernel = std::strcmp(value, "on") == 0;
+        }
+        else if (std::strcmp(key, "--layout") == 0) {
+            if (std::strcmp(value, "on") != 0 && std::strcmp(value, "off") != 0)
+                return Result<Options>::failure("--layout needs on or off");
+            options.layout = std::strcmp(value, "on") == 0;
         }
         else if (std::strcmp(key, "--stdio") == 0) {
             if (std::strcmp(value, "on") != 0 && std::strcmp(value, "off") != 0)
@@ -118,13 +139,16 @@ Result<Options> parse(int argc, char** argv) {
     if (options.kernel && (!options.system || options.stdio || options.input != nullptr))
         return Result<Options>::failure("--kernel-adapter on needs --system on and owns guest input");
     if (options.system && options.stdio) return Result<Options>::failure("System guests use --kernel-adapter, not --stdio");
+    if (options.system && options.layout) return Result<Options>::failure("--layout on requires a user-mode target");
+    if (options.stop_pc != nullptr && (options.stdio || options.kernel))
+        return Result<Options>::failure("--stop-pc requires observation-only capture");
     if (options.system && !options.kernel && options.input == nullptr) options.input = "/dev/null";
     if (options.qemu == nullptr || options.plugin == nullptr || (!options.stdio && !options.kernel && options.input == nullptr) || options.target == nullptr)
         return Result<Options>::failure("Required: --qemu PATH --plugin PATH (--input FILE or --stdio on) -- TARGET [ARGS]");
     if (std::strchr(options.plugin, ',') != nullptr)
         return Result<Options>::failure("Plugin path cannot contain a comma (QEMU option separator)");
-    if (std::strcmp(options.registers, "none") != 0 && std::strcmp(options.registers, "general") != 0 && std::strcmp(options.registers, "all") != 0)
-        return Result<Options>::failure("--registers needs none, general, or all");
+    if (!valid_register_selection(options.registers))
+        return Result<Options>::failure("--registers needs none, general, all, or colon-separated names");
     const char* settings[] = {options.memory, options.values};
     for (const char* setting : settings) {
         if (std::strcmp(setting, "on") != 0 && std::strcmp(setting, "off") != 0)
@@ -347,7 +371,7 @@ Result<int> listen_at(const Options& options) {
 Result<RunOutcome> run(const Options& options, int listener) {
     if (options.kernel) {
         const auto result = run_kernel({options.qemu, options.plugin, options.registers, options.memory,
-            options.values, options.start_pc, options.timeout_ms, options.target}, listener);
+            options.values, options.start_pc, options.batching, options.publication, options.timeout_ms, options.target}, listener);
         if (!result.ok()) return Result<RunOutcome>::failure(result.error());
         return Result<RunOutcome>::success(result.value() ? RunOutcome::cancelled : RunOutcome::completed);
     }
@@ -372,7 +396,7 @@ Result<RunOutcome> run(const Options& options, int listener) {
     const Descriptor reader(pipes[0]);
     // Writer is closed by the parent immediately after fork.
     char plugin_option[PATH_MAX + 256];
-    const int option_size = std::snprintf(plugin_option, sizeof(plugin_option), "%s,fd=%d,registers=%s,memory=%s,values=%s,stdio=%s%s%s", options.plugin, pipes[1], options.registers, options.memory, options.values, options.stdio ? "on" : "off", options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc);
+    const int option_size = std::snprintf(plugin_option, sizeof(plugin_option), "%s,fd=%d,registers=%s,memory=%s,values=%s,stdio=%s,layout=%s,batching=%s,publication=%s%s%s%s%s", options.plugin, pipes[1], options.registers, options.memory, options.values, options.stdio ? "on" : "off", options.layout ? "on" : "off", options.batching, options.publication, options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc, options.stop_pc == nullptr ? "" : ",stop=", options.stop_pc == nullptr ? "" : options.stop_pc);
     if (option_size < 0 || static_cast<size_t>(option_size) >= sizeof(plugin_option)) {
         close(pipes[1]);
         return Result<RunOutcome>::failure("Plugin path is too long");

@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include <cpu2tensor/trace.hpp>
+#include <cpu2tensor/register_selection.hpp>
+#include <cpu2tensor/frame_ring.hpp>
+#include <dlfcn.h>
 #include <qemu-plugin.h>
 
 #include <cerrno>
@@ -30,7 +33,7 @@ constexpr size_t register_prefix_bytes = 16;
 constexpr size_t memory_prefix_bytes = 24;
 constexpr uint16_t initial_register = 1u << 8;
 
-enum class RegisterProfile : uint8_t { none, general, all };
+enum class RegisterProfile : uint8_t { none, general, all, selected };
 enum class Checkpoint : uint16_t { block = 1, syscall = 2, exit = 3 };
 
 struct Register final {
@@ -39,6 +42,7 @@ struct Register final {
     uint8_t* previous = nullptr;
     uint32_t width = 0;
     bool sampled = false;
+    uint8_t raw_field = 255;
 };
 
 enum class State : uint8_t { unused, active, ended };
@@ -46,7 +50,7 @@ enum class State : uint8_t { unused, active, ended };
 // QEMU calls execution and exit callbacks on the owning vCPU. The final callback
 // runs after instrumentation has stopped, so it can drain the remaining sources.
 // A source never shares its event buffer or sequence counter with another vCPU.
-struct alignas(64) Source final {
+struct alignas(frame_ring_cache_line_bytes) Source final {
     // Only lifecycle/idle/drain callbacks take this lock. Execution callbacks
     // own their source while running; external drains require a QMP world stop.
     pthread_mutex_t cold_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -55,9 +59,20 @@ struct alignas(64) Source final {
     uint32_t count = 0;
     uint32_t used = 0;
     Kind kind = Kind::blocks;
+    Kind run_kind = Kind::blocks;
+    uint32_t run_offset = 0;
+    FrameRing<> ring;
+    std::atomic<uint64_t> frames_queued{0};
+    std::atomic<uint64_t> frames_sent{0};
+    uint64_t full_waits = 0;
     Register* registers = nullptr;
     GByteArray* scratch = nullptr;
     uint32_t register_count = 0;
+    Register controls[4]{};
+    uint64_t raw_state[28]{};
+    uint64_t context[6]{};
+    uint64_t context_sequence = 0;
+    bool context_sampled = false;
     // The descriptor at index zero can have a null but valid QEMU handle.
     int32_t pc_register = -1;
     State state = State::unused;
@@ -71,15 +86,28 @@ Source sources[max_sources];
 int output_fd = -1;
 Architecture architecture{};
 RegisterProfile register_profile = RegisterProfile::general;
+char selected_registers[1024]{};
+using ReadX86State = bool (*)(uint64_t*, size_t);
+ReadX86State read_x86_state = nullptr;
+bool capture_context = false;
 bool capture_memory = true;
 bool capture_values = false;
 bool capture_stdio = false;
 bool capture_system = false;
 bool capture_kernel = false;
+bool capture_layout = false;
+pthread_once_t layout_once = PTHREAD_ONCE_INIT;
 unsigned int system_cpus = 0;
 bool has_start_pc = false;
 uint64_t start_pc = 0;
-std::atomic<bool> recording{true};
+bool has_stop_pc = false;
+uint64_t stop_pc = 0;
+bool mixed_batches = false;
+bool ring_publication = false;
+pthread_t collector_thread{};
+std::atomic<bool> collector_done{false};
+enum class CaptureState : uint8_t { waiting, running, stopped };
+std::atomic<CaptureState> capture_state{CaptureState::running};
 int control_fd = -1;
 pthread_t control_thread{};
 std::atomic<bool> closing{false};
@@ -166,6 +194,41 @@ Source& active_source(unsigned int index)
     return sources[index];
 }
 
+void wait_for_frames(Source& source)
+{
+    const auto expected = source.frames_queued.load(std::memory_order_acquire);
+    while (source.frames_sent.load(std::memory_order_acquire) != expected) {
+        if (collector_done.load(std::memory_order_acquire))
+            fail(Failure::transport, "cpu2tensor: collector stopped before draining the source\n");
+        const timespec delay{0, 50000};
+        nanosleep(&delay, nullptr);
+    }
+}
+
+void* collect_frames(void*)
+{
+    unsigned first = 0;
+    for (;;) {
+        bool found = false;
+        for (unsigned step = 0; step < max_sources; ++step) {
+            auto& source = sources[(first + step) % max_sources];
+            const auto frame = source.ring.front();
+            if (frame.data == nullptr) continue;
+            found = true;
+            if (!publish(frame.data, frame.size).ok()) _exit(capture_exit_code);
+            source.ring.pop();
+            source.frames_sent.fetch_add(1, std::memory_order_release);
+        }
+        first = (first + 1) % max_sources;
+        // Finish joins only after every producer has stopped and drained.
+        if (collector_done.load(std::memory_order_acquire)) return nullptr;
+        if (!found) {
+            const timespec delay{0, 50000};
+            nanosleep(&delay, nullptr);
+        }
+    }
+}
+
 void flush(unsigned int index, Source& source)
 {
     if (source.count == 0) {
@@ -175,9 +238,20 @@ void flush(unsigned int index, Source& source)
     encode_header(source.bytes, {source.kind, index, source.count,
                                   schema ? 0 : source.next - source.count,
                                   source.kind == Kind::blocks ? 0 : source.used});
-    const auto sent = publish(source.bytes, header_bytes + source.used);
-    if (!sent.ok()) {
-        _exit(capture_exit_code);
+    if (ring_publication) {
+        for (;;) {
+            const auto queued = source.ring.try_push(source.bytes, header_bytes + source.used);
+            if (!queued.ok()) fail(Failure::capture, queued.error());
+            if (queued.value() == FramePush::stored) break;
+            ++source.full_waits;
+            if (collector_done.load(std::memory_order_acquire))
+                fail(Failure::transport, "cpu2tensor: collector stopped with a full ring\n");
+            const timespec delay{0, 50000};
+            nanosleep(&delay, nullptr);
+        }
+        source.frames_queued.fetch_add(1, std::memory_order_release);
+    } else {
+        if (!publish(source.bytes, header_bytes + source.used).ok()) _exit(capture_exit_code);
     }
     source.count = 0;
     source.used = 0;
@@ -185,6 +259,30 @@ void flush(unsigned int index, Source& source)
 
 uint8_t* append(unsigned int index, Source& source, Kind kind, size_t size)
 {
+    if (mixed_batches && kind != Kind::register_schema) {
+        if (source.kind != Kind::mixed || source.count == max_addresses ||
+            source.used + size + ((source.count == 0 || source.run_kind != kind) ? 8 : 0) > max_payload_bytes)
+            flush(index, source);
+        source.kind = Kind::mixed;
+        if (source.count == 0 || source.run_kind != kind) {
+            source.run_kind = kind;
+            source.run_offset = source.used;
+            uint8_t* run = source.bytes + header_bytes + source.used;
+            store_u16(run, static_cast<uint16_t>(kind));
+            store_u16(run + 2, 0);
+            store_u32(run + 4, 0);
+            source.used += 8;
+        }
+        uint8_t* run = source.bytes + header_bytes + source.run_offset;
+        store_u16(run + 2, load_u16(run + 2) + 1);
+        store_u32(run + 4, load_u32(run + 4) + static_cast<uint32_t>(size));
+        if (source.next == UINT64_MAX) fail(Failure::capture, "cpu2tensor: source sequence overflow\n");
+        ++source.next;
+        ++source.count;
+        uint8_t* row = source.bytes + header_bytes + source.used;
+        source.used += static_cast<uint32_t>(size);
+        return row;
+    }
     if (source.kind != kind || source.used + size > max_payload_bytes ||
         (kind == Kind::blocks && source.count == max_addresses)) {
         flush(index, source);
@@ -229,6 +327,11 @@ bool general_register(const char* name)
 
 void read_register(Source& source, const Register& reg)
 {
+    if (reg.raw_field != 255) {
+        g_byte_array_set_size(source.scratch, 8);
+        store_u64(source.scratch->data, source.raw_state[reg.raw_field]);
+        return;
+    }
     // Public QEMU register readers append. Reserve the largest supported target
     // reader at init so these repeated reads keep the same allocation.
     g_byte_array_set_size(source.scratch, 0);
@@ -247,9 +350,7 @@ void read_register(Source& source, const Register& reg)
 
 void register_setup(unsigned int index, Source& source)
 {
-    if (register_profile == RegisterProfile::none) {
-        return;
-    }
+    if (register_profile == RegisterProfile::none && !capture_context) return;
     source.registers = new (std::nothrow) Register[max_registers];
     source.scratch = g_byte_array_sized_new(register_scratch_bytes);
     if (source.registers == nullptr) {
@@ -264,12 +365,24 @@ void register_setup(unsigned int index, Source& source)
         if (descriptor.name == nullptr) {
             fail(Failure::unsupported_target, "cpu2tensor: QEMU exposes an unnamed register\n");
         }
-        // Upstream x86 system TCG keeps arithmetic flags in lazy internal state.
-        // Its public GDB register reader returns stale eflags inside a block.
-        // Omitting the field is preferable to emitting a false architectural value.
-        if (capture_system && architecture == Architecture::x86_64 &&
-            std::strcmp(descriptor.name, "eflags") == 0) continue;
-        if (register_profile == RegisterProfile::general && !general_register(descriptor.name)) {
+        constexpr const char* controls[] = {"cr0", "cr3", "cr4", "efer"};
+        for (unsigned field = 0; capture_context && field < 4; ++field) {
+            if (std::strcmp(descriptor.name, controls[field]) == 0) {
+                source.controls[field].handle = descriptor.handle;
+                source.controls[field].width = 8;
+                std::strcpy(source.controls[field].name, descriptor.name);
+            }
+        }
+        const bool pc = std::strcmp(descriptor.name,
+            architecture == Architecture::aarch64 ? "pc" : "rip") == 0;
+        const bool selected = register_profile == RegisterProfile::all ||
+            (register_profile == RegisterProfile::general && general_register(descriptor.name)) ||
+            (register_profile == RegisterProfile::selected && (pc || listed_register(selected_registers, descriptor.name)));
+        if (!selected) continue;
+        if (architecture == Architecture::x86_64 && unavailable_x86_register(descriptor.name, capture_system)) {
+            if (register_profile == RegisterProfile::selected && listed_register(selected_registers, descriptor.name))
+                fail(Failure::unsupported_target, "cpu2tensor: requested register has no trustworthy backend value\n");
+            if (index == 0) std::fprintf(stderr, "cpu2tensor: omitting unavailable register %s\n", descriptor.name);
             continue;
         }
         const size_t length = strnlen(descriptor.name, sizeof(Register::name));
@@ -290,6 +403,15 @@ void register_setup(unsigned int index, Source& source)
         }
         auto& reg = source.registers[source.register_count];
         reg.handle = descriptor.handle;
+        if (capture_context && read_x86_state != nullptr) {
+            constexpr const char* raw_names[] = {
+                "cr0", "cr2", "cr3", "cr4", "", "efer", "", "",
+                "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+                "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+                "rip", "fs_base", "gs_base", "k_gs_base"};
+            for (unsigned field = 0; field < 28; ++field)
+                if (std::strcmp(descriptor.name, raw_names[field]) == 0) reg.raw_field = field;
+        }
         std::memcpy(reg.name, descriptor.name, length);
         read_register(source, reg);
         reg.width = source.scratch->len;
@@ -310,10 +432,58 @@ void register_setup(unsigned int index, Source& source)
         ++source.register_count;
     }
     g_array_free(descriptors, true);
-    if (source.register_count == 0 || source.pc_register < 0) {
+    for (unsigned field = 0; capture_context && field < 4; ++field)
+        if (source.controls[field].name[0] == 0)
+            fail(Failure::unsupported_target, "cpu2tensor: x86 paging controls unavailable\n");
+    if (register_profile == RegisterProfile::selected) {
+        char names[sizeof(selected_registers)];
+        std::strcpy(names, selected_registers);
+        for (char* name = names; name != nullptr;) {
+            char* next = std::strchr(name, ':');
+            if (next != nullptr) *next++ = 0;
+            bool found = false;
+            for (uint32_t field = 0; field < source.register_count; ++field)
+                if (std::strcmp(name, source.registers[field].name) == 0) found = true;
+            if (!found) fail(Failure::unsupported_target, "cpu2tensor: requested register unavailable\n");
+            name = next;
+        }
+    }
+    if (register_profile != RegisterProfile::none && (source.register_count == 0 || source.pc_register < 0)) {
         fail(Failure::unsupported_target, "cpu2tensor: selected registers or program counter unavailable\n");
     }
     flush(index, source);
+}
+
+void read_context(Source& source, bool full) {
+    if (!capture_context) return;
+    if (read_x86_state != nullptr) {
+        if (!read_x86_state(source.raw_state, full ? 28 : 8))
+            fail(Failure::capture, "cpu2tensor: x86 state read outside a supported callback\n");
+    } else {
+        constexpr unsigned fields[] = {0, 2, 3, 5};
+        for (unsigned field = 0; field < 4; ++field) {
+            read_register(source, source.controls[field]);
+            source.raw_state[fields[field]] = load_u64(source.scratch->data);
+        }
+    }
+}
+
+void emit_context(unsigned int index, Source& source, uint64_t pc) {
+    if (!capture_context) return;
+    constexpr unsigned fields[] = {0, 2, 3, 5, 6, 7};
+    bool changed = !source.context_sampled;
+    for (unsigned field = 0; field < 6; ++field)
+        changed |= source.context[field] != source.raw_state[fields[field]];
+    if (!changed) return;
+    uint8_t* row = append(index, source, Kind::address_context, context_bytes);
+    source.context_sequence = source.next - 1;
+    store_u64(row, pc);
+    for (unsigned field = 0; field < 6; ++field) {
+        source.context[field] = source.raw_state[fields[field]];
+        store_u64(row + 8 + field * 8, source.context[field]);
+    }
+    store_u64(row + 56, read_x86_state == nullptr ? 15 : 63);
+    source.context_sampled = true;
 }
 
 uint64_t current_pc(Source& source)
@@ -371,6 +541,7 @@ void source_start(qemu_plugin_id_t, unsigned int index)
 void end_source(unsigned int index, Source& source)
 {
     flush(index, source);
+    if (ring_publication) wait_for_frames(source);
     send_header({Kind::source_end, index, 0, source.next, 0});
     release_registers(source);
     source.state = State::ended;
@@ -380,8 +551,14 @@ void source_end(qemu_plugin_id_t, unsigned int index)
 {
     auto& source = active_source(index);
     const ColdLock lock(source);
-    if (source.register_count != 0 && (!has_start_pc || source.next != 0)) {
-        sample_registers(index, source, current_pc(source), Checkpoint::exit);
+    if (source.register_count != 0 && (!has_start_pc || source.next != 0) &&
+        (!has_stop_pc || capture_state.load(std::memory_order_acquire) == CaptureState::running)) {
+        read_context(source, true);
+        const auto offset = current_pc(source);
+        // Register RIP is raw storage; event PCs use the linear code address.
+        const auto pc = offset + ((capture_context && source.raw_state[7] != 64) ? source.raw_state[6] : 0);
+        emit_context(index, source, pc);
+        sample_registers(index, source, pc, Checkpoint::exit);
     }
     end_source(index, source);
 }
@@ -390,10 +567,22 @@ void block_entry(unsigned int index, void* address)
 {
     auto& source = active_source(index);
     const auto pc = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(address));
-    if (has_start_pc && pc == start_pc) recording.store(true, std::memory_order_release);
-    source.recording = !has_start_pc || recording.load(std::memory_order_acquire);
+    if (has_start_pc && pc == start_pc) {
+        auto expected = CaptureState::waiting;
+        capture_state.compare_exchange_strong(expected, CaptureState::running, std::memory_order_acq_rel);
+    }
+    if (has_stop_pc && pc == stop_pc) {
+        auto expected = CaptureState::running;
+        capture_state.compare_exchange_strong(expected, CaptureState::stopped, std::memory_order_acq_rel);
+        // Even an early stop marker racing another CPU's start is excluded.
+        source.recording = false;
+        return;
+    }
+    source.recording = capture_state.load(std::memory_order_acquire) == CaptureState::running;
     if (!source.recording) return;
     const PublishChanges publication(source);
+    read_context(source, true);
+    emit_context(index, source, pc);
     // These changes precede this block; they are not effects of its execution.
     sample_registers(index, source, pc, Checkpoint::block);
     store_u64(append(index, source, Kind::blocks, sizeof(uint64_t)), pc);
@@ -405,29 +594,49 @@ void block_entry(unsigned int index, void* address)
 void memory_access(unsigned int index, qemu_plugin_meminfo_t info, uint64_t address, void* pc)
 {
     auto& source = active_source(index);
-    if (!source.recording) return;
+    if (!source.recording || (has_stop_pc && capture_state.load(std::memory_order_acquire) != CaptureState::running)) return;
     const PublishChanges publication(source);
     const unsigned int shift = qemu_plugin_mem_size_shift(info);
     if (shift >= 32 || (capture_values && shift > 4)) {
         fail(Failure::unsupported_target, "cpu2tensor: memory access width is unsupported\n");
     }
     const uint32_t size = uint32_t{1} << shift;
-    uint8_t* row = append(index, source, Kind::memory,
-                          memory_prefix_bytes + (capture_values ? 16 : 0));
+    read_context(source, false);
+    emit_context(index, source, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pc)));
+    const size_t prefix = capture_context ? 48 : memory_prefix_bytes;
+    uint8_t* row = append(index, source, Kind::memory, prefix + (capture_values ? 16 : 0));
     store_u64(row, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pc)));
     store_u64(row + 8, address);
     store_u32(row + 16, size);
     store_u32(row + 20, (qemu_plugin_mem_is_store(info) ? 1u : 0u) |
                         (qemu_plugin_mem_is_big_endian(info) ? 2u : 0u));
-    if (!capture_values) {
-        return;
+    if (capture_context) {
+        // The API describes the callback address. Do not query another page or
+        // claim the rest of a cross-page transaction is physically contiguous.
+        const auto* mapping = qemu_plugin_get_hwaddr(info, address);
+        uint64_t physical = 0;
+        uint32_t mapped = 0;
+        uint32_t flags = 0;
+        if (mapping != nullptr) {
+            physical = qemu_plugin_hwaddr_phys_addr(mapping);
+            const uint32_t remaining = 4096 - (address & 4095);
+            mapped = size < remaining ? size : remaining;
+            flags = 1; // Physical prefix known; QEMU's dispatch path may be unknown.
+            if (read_x86_state != nullptr)
+                flags |= 2 | (qemu_plugin_hwaddr_is_io(mapping) ? 4 : 0);
+        }
+        store_u64(row + 24, physical);
+        store_u32(row + 32, mapped);
+        store_u32(row + 36, flags);
+        store_u64(row + 40, source.context_sequence);
     }
+    if (!capture_values) return;
     // This returns the actual transaction value, not a subsequent memory read.
     const auto value = qemu_plugin_mem_get_value(info);
     if (static_cast<unsigned int>(value.type) != shift) {
         fail(Failure::capture, "cpu2tensor: QEMU memory value width does not match the access\n");
     }
-    uint8_t* bytes = row + memory_prefix_bytes;
+    uint8_t* bytes = row + prefix;
     std::memset(bytes, 0, 16);
     switch (value.type) {
     case QEMU_PLUGIN_MEM_VALUE_U8: bytes[0] = value.data.u8; break;
@@ -441,12 +650,30 @@ void memory_access(unsigned int index, qemu_plugin_meminfo_t info, uint64_t addr
     }
 }
 
+void emit_layout()
+{
+    // The loader has finished by first translation. These APIs are too early
+    // during plugin installation. This record is outside every vCPU sequence.
+    uint8_t bytes[header_bytes + layout_bytes];
+    encode_header(bytes, {Kind::executable_layout, 0, 1, 0, layout_bytes});
+    store_u64(bytes + header_bytes, qemu_plugin_start_code());
+    store_u64(bytes + header_bytes + 8, qemu_plugin_end_code());
+    store_u64(bytes + header_bytes + 16, qemu_plugin_entry_code());
+    if (load_u64(bytes + header_bytes) >= load_u64(bytes + header_bytes + 8))
+        fail(Failure::capture, "cpu2tensor: QEMU did not provide a nonempty executable code span\n");
+    if (!publish(bytes, sizeof(bytes)).ok()) _exit(capture_exit_code);
+}
+
 void translate(qemu_plugin_id_t, qemu_plugin_tb* block)
 {
+    // Translation is cold compared with execution. Once returns only after the
+    // initial record is published; no execution or memory callback pays this cost.
+    if (capture_layout && pthread_once(&layout_once, emit_layout) != 0)
+        fail(Failure::capture, "cpu2tensor: cannot publish executable layout\n");
     // The userdata is an address bit pattern, never a pointer to dereference.
     // QEMU retains it with the translated block; no per-block allocation exists.
     const auto address = static_cast<uintptr_t>(qemu_plugin_tb_vaddr(block));
-    const auto flags = register_profile == RegisterProfile::none ?
+    const auto flags = register_profile == RegisterProfile::none && !capture_context ?
         QEMU_PLUGIN_CB_NO_REGS : QEMU_PLUGIN_CB_R_REGS;
     qemu_plugin_register_vcpu_tb_exec_cb(block, block_entry, flags,
                                         reinterpret_cast<void*>(address));
@@ -455,7 +682,8 @@ void translate(qemu_plugin_id_t, qemu_plugin_tb* block)
             auto* instruction = qemu_plugin_tb_get_insn(block, index);
             const auto pc = static_cast<uintptr_t>(qemu_plugin_insn_vaddr(instruction));
             qemu_plugin_register_vcpu_mem_cb(instruction, memory_access,
-                QEMU_PLUGIN_CB_NO_REGS, QEMU_PLUGIN_MEM_RW, reinterpret_cast<void*>(pc));
+                capture_context ? QEMU_PLUGIN_CB_R_REGS : QEMU_PLUGIN_CB_NO_REGS,
+                QEMU_PLUGIN_MEM_RW, reinterpret_cast<void*>(pc));
         }
     }
 }
@@ -464,7 +692,8 @@ void syscall_entry(qemu_plugin_id_t, unsigned int index, int64_t number, uint64_
                    uint64_t second, uint64_t requested, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)
 {
     auto& source = active_source(index);
-    if (source.register_count != 0 && (!has_start_pc || source.recording)) {
+    if (source.register_count != 0 && (!has_start_pc || source.recording) &&
+        (!has_stop_pc || capture_state.load(std::memory_order_acquire) == CaptureState::running)) {
         sample_registers(index, source, current_pc(source), Checkpoint::syscall);
     }
     const bool arm = architecture == Architecture::aarch64;
@@ -481,6 +710,7 @@ void syscall_entry(qemu_plugin_id_t, unsigned int index, int64_t number, uint64_
     }
     if (capture_stdio && number == (arm ? 63 : 0) && first == STDIN_FILENO && requested != 0) {
         flush(index, source);
+        if (ring_publication) wait_for_frames(source);
         const auto limit = requested < max_action_bytes ? requested : max_action_bytes;
         send_header({Kind::input_request, index, 0, source.next, limit});
         // The worker waits for WIFSTOPPED before exposing this boundary. Only
@@ -541,6 +771,7 @@ void* control(void*)
             // final release so its captured bytes are visible to this reader.
             const auto generation = source.published.load(std::memory_order_acquire);
             if (source.state == State::active) flush(index, source);
+            if (ring_publication) wait_for_frames(source);
             // The next execution callback acquires this before reusing the
             // buffer/count fields changed by the stopped-world drain.
             source.drained.store(generation, std::memory_order_release);
@@ -553,8 +784,12 @@ void* control(void*)
 
 void finish(qemu_plugin_id_t, void*)
 {
-    if (has_start_pc && !recording.load(std::memory_order_acquire))
+    if (has_start_pc && capture_state.load(std::memory_order_acquire) == CaptureState::waiting)
         fail(Failure::capture, "cpu2tensor: target exited before the requested capture start block\n");
+    if (has_stop_pc && capture_state.load(std::memory_order_acquire) != CaptureState::stopped)
+        fail(Failure::capture, "cpu2tensor: target exited before the requested capture stop block\n");
+    if (has_stop_pc) std::fprintf(stderr, "cpu2tensor: capture stop reached at 0x%llx\n",
+                                 static_cast<unsigned long long>(stop_pc));
     if (capture_kernel) {
         closing.store(true, std::memory_order_release);
         pthread_join(control_thread, nullptr);
@@ -567,6 +802,17 @@ void finish(qemu_plugin_id_t, void*)
         }
     }
     // This seals callbacks only. The worker supplies the actual child exit code.
+    if (ring_publication) {
+        collector_done.store(true, std::memory_order_release);
+        pthread_join(collector_thread, nullptr);
+        uint64_t frames = 0, waits = 0;
+        for (const auto& source : sources) {
+            frames += source.frames_sent.load(std::memory_order_acquire);
+            waits += source.full_waits;
+        }
+        std::fprintf(stderr, "cpu2tensor: ring frames=%llu full_waits=%llu\n",
+                     static_cast<unsigned long long>(frames), static_cast<unsigned long long>(waits));
+    }
     send_header({Kind::complete});
 }
 
@@ -592,6 +838,9 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
     bool values_seen = false;
     bool stdio_seen = false;
     bool kernel_seen = false;
+    bool layout_seen = false;
+    bool batching_seen = false;
+    bool publication_seen = false;
     for (int index = 0; index < argc; ++index) {
         const char* argument = argv[index];
         if (std::strncmp(argument, "fd=", 3) == 0 && output_fd < 0) {
@@ -611,6 +860,20 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
             if (end == argument + 8 || errno != 0 || *end != '\0' || parsed < 3 || parsed > INT_MAX)
                 return 1;
             control_fd = static_cast<int>(parsed);
+        } else if (std::strncmp(argument, "publication=", 12) == 0 && !publication_seen) {
+            publication_seen = true;
+            if (std::strcmp(argument + 12, "ring") == 0) ring_publication = true;
+            else if (std::strcmp(argument + 12, "pipe") != 0) return 1;
+        } else if (std::strncmp(argument, "stop=", 5) == 0 && !has_stop_pc) {
+            char* end = nullptr;
+            errno = 0;
+            stop_pc = std::strtoull(argument + 5, &end, 0);
+            if (end == argument + 5 || errno != 0 || *end != '\0' || argument[5] == '-') return 1;
+            has_stop_pc = true;
+        } else if (std::strncmp(argument, "batching=", 9) == 0 && !batching_seen) {
+            batching_seen = true;
+            if (std::strcmp(argument + 9, "mixed") == 0) mixed_batches = true;
+            else if (std::strcmp(argument + 9, "legacy") != 0) return 1;
         } else if (std::strncmp(argument, "start=", 6) == 0 && !has_start_pc) {
             char* end = nullptr;
             errno = 0;
@@ -620,7 +883,12 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
                 return 1;
             }
             has_start_pc = true;
-            recording.store(false, std::memory_order_relaxed);
+            capture_state.store(CaptureState::waiting, std::memory_order_relaxed);
+        } else if (std::strncmp(argument, "layout=", 7) == 0 && !layout_seen) {
+            layout_seen = true;
+            if (std::strcmp(argument + 7, "on") == 0) capture_layout = true;
+            else if (std::strcmp(argument + 7, "off") == 0) capture_layout = false;
+            else return 1;
         } else if (std::strncmp(argument, "kernel=", 7) == 0 && !kernel_seen) {
             kernel_seen = true;
             if (std::strcmp(argument + 7, "on") == 0) capture_kernel = true;
@@ -640,8 +908,11 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
                 register_profile = RegisterProfile::general;
             } else if (std::strcmp(profile, "all") == 0) {
                 register_profile = RegisterProfile::all;
+            } else if (valid_register_selection(profile)) {
+                register_profile = RegisterProfile::selected;
+                std::strcpy(selected_registers, profile);
             } else {
-                std::fputs("cpu2tensor: registers must be none, general, or all\n", stderr);
+                std::fputs("cpu2tensor: invalid register name list\n", stderr);
                 return 1;
             }
         } else if (std::strncmp(argument, "memory=", 7) == 0 && !memory_seen) {
@@ -673,6 +944,14 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         std::fputs("cpu2tensor: fd is required, and memory values require memory capture\n", stderr);
         return 1;
     }
+    if (capture_layout && capture_system) {
+        std::fputs("cpu2tensor: executable layout is only available for user-mode targets\n", stderr);
+        return 1;
+    }
+    if (has_stop_pc && (capture_stdio || capture_kernel || (has_start_pc && start_pc == stop_pc))) {
+        std::fputs("cpu2tensor: stop requires observation-only capture and distinct start/stop addresses\n", stderr);
+        return 1;
+    }
     if ((capture_system && capture_stdio) || (capture_kernel && !capture_system) ||
         (capture_kernel != (control_fd >= 0))) {
         std::fputs("cpu2tensor: kernel interaction requires system emulation and its control pipe\n", stderr);
@@ -686,8 +965,18 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         }
         system_cpus = static_cast<unsigned int>(info->system.smp_vcpus);
     }
-    if (capture_system && architecture == Architecture::x86_64 && register_profile != RegisterProfile::none)
-        std::fputs("cpu2tensor: omitting x86 eflags; system TCG exposes lazy flags at block callbacks\n", stderr);
+    capture_context = capture_system && architecture == Architecture::x86_64 &&
+        (capture_memory || register_profile != RegisterProfile::none);
+    if (capture_context) {
+        read_x86_state = reinterpret_cast<ReadX86State>(dlsym(RTLD_DEFAULT, "qemu_plugin_cpu2tensor_x86_state_v1"));
+        if (read_x86_state == nullptr && register_profile != RegisterProfile::none) {
+            std::fputs("cpu2tensor: exact x86 system registers require the optional x86-state-v1 QEMU hook; "
+                "see docs/qemu-state-hook.md, or select registers=none\n", stderr);
+            return 1;
+        }
+        if (read_x86_state == nullptr)
+            std::fputs("cpu2tensor: execution mode, CS base and RAM/MMIO classification unavailable in this backend\n", stderr);
+    }
     if (control_fd >= 0) {
         struct stat control_status{};
         const int control_flags = fcntl(control_fd, F_GETFL);
@@ -705,8 +994,16 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         (register_profile != RegisterProfile::none ? feature_registers : 0) |
         (capture_values ? feature_memory_values : 0) | (capture_stdio ? feature_stdio : 0) |
         (capture_system ? feature_system : 0) | (capture_kernel ? feature_kernel : 0) |
-        (has_start_pc ? feature_window : 0);
+        (has_start_pc ? feature_window : 0) |
+        (capture_context ? feature_address_context : 0) |
+        (capture_context && capture_memory ? feature_system_memory : 0) |
+        (capture_layout ? feature_executable_layout : 0) | (mixed_batches ? feature_mixed : 0) |
+        (has_stop_pc ? feature_stop : 0);
     send_header({Kind::hello, 0, 0, 0, static_cast<uint64_t>(architecture) | features});
+    if (ring_publication && pthread_create(&collector_thread, nullptr, collect_frames, nullptr) != 0) {
+        std::fputs("cpu2tensor: cannot start trace collector\n", stderr);
+        return 1;
+    }
     qemu_plugin_register_vcpu_init_cb(id, source_start);
     qemu_plugin_register_vcpu_exit_cb(id, source_end);
     qemu_plugin_register_vcpu_tb_trans_cb(id, translate);

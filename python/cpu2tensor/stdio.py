@@ -166,7 +166,7 @@ class StdioEnv:
                 if kind == _REGISTER_SCHEMA:
                     update = cast(dict[int, str], payload)
                     self._names[source] = MappingProxyType({**self._names.get(source, {}), **update})
-                elif kind in (_BLOCKS, _REGISTERS, _MEMORY):
+                elif kind in (_BLOCKS, _REGISTERS, _MEMORY, 12, 13, 14):
                     yield self._converter._batch(
                         kind, source, count, sequence, payload, self._names.get(source)
                     )

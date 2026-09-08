@@ -61,19 +61,28 @@ rerun successfully. No throughput claim is inferred from their durations.
 The current rich path emits many small single-signal frames and constructs tensors
 per frame. It is not GPU-bound capture and has no measured throughput improvement.
 Per-vCPU rings, mixed column batches and copy/compute overlap remain the next
-performance work. Large captures need suitable consumer and worker timeouts.
+performance work in that 0.4 run. The [0.5 performance results](pipeline-performance-results.md)
+now cover mixed frames, rings and collation; overlap remains open. Large captures
+need suitable consumer and worker timeouts.
 
 Upstream system TCG exposes stale lazy x86 `eflags` at hot callbacks; the plugin
 omits that field with a visible diagnostic. Selected schemas are authoritative.
 Register checkpoints are not every register write or guaranteed final state.
+A follow-up source review also found constant-zero floating-point fields in
+QEMU's `all` profile; the 0.4 plugin had not filtered those fields.
+Successful descriptor reads above do not establish their architectural accuracy.
+The [0.5 state fixes](state-correctness-results.md) supersede these current-limit
+statements; the evidence on this page remains the historical 0.4 run.
 Memory addresses are guest virtual addresses; physical/PID/CR3 context and
 DMA/device-originated writes are not yet columns. Arrival order never claims a
 global memory order, and measurement/backpressure can perturb timing.
 
 Kernel actions require a fixed vCPU count, exclusive worker-owned QMP/serial,
 and reset by restart. Hotplug, migration, rebooted episodes and external monitor
-controllers are unsupported. AWS execution, CUDA validation, DDP, and multiple
-learner devices remain open. None of these dependencies is installed by the package.
+controllers are unsupported. AWS execution and CUDA validation are selected for
+the [next iteration](rich-capture-plan.md); DDP, multiple learner devices, hotplug,
+migration, rebooted episodes and external monitor control are explicitly deferred.
+None of these dependencies is installed by the package.
 
 Evidence artifacts are in `~/.cache/cpu2tensor/kernel-integration/` on the Mac and
 x86 host, plus `kernel-drain-probe/` and `kernel-gym-check/` documented above.

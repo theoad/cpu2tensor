@@ -46,6 +46,11 @@ register exceeds those limits and produces a clear failure. See
 [register and memory semantics](instrumentation.md) before treating samples as
 completed-block effects or final process state.
 
+For initial executable metadata, opt in with `--layout on`. This adds a
+worker-wide `Batch.layout` before execution batches, with `source=None` and
+`first_sequence=None`. See the [normalization notebook](tutorials/normalization.ipynb)
+before using the main executable's span to normalize addresses.
+
 The default listener is loopback. To use the VM from a Mac, either add
 `--host WORKER_PRIVATE_IP` or provide your own tunnel, for example run
 `ssh -N -L 9000:127.0.0.1:9000 trail-arm` in another terminal. The transport has no
@@ -84,11 +89,18 @@ python python/examples/observe.py tcp://127.0.0.1:9000 --device mps
 ```
 
 Use `device="cpu"` (and a CPU accumulator) or `--device cpu` on a CPU learner.
-Batch sizes can vary. `batch.source` identifies a vCPU and `batch.first_sequence`
-is its first entry number. Retained batches keep their own storage. There are no
+Batch sizes can vary. `batch.worker` is the endpoint index and `batch.source`
+identifies its vCPU. `batch.first_sequence` is the first event position; mixed
+batches also carry each table's explicit sequence positions. Retained batches keep their own storage. There are no
 policy calls or action requests; the consumer chooses when to request another batch.
 
 Slow consumption applies bounded backpressure. Leaving the `with` block early
 cancels the run. Disconnects, sequence gaps, and failed targets raise errors; do
 not treat the last yielded batch as evidence of successful completion. See the
 [instrumentation contract](instrumentation.md) and [validation](validation.md) for exact limits.
+
+For larger observation-only captures, start the worker with `--batching mixed`
+and use `Pool(endpoints, device="mps", batch_bytes=65536)`. This opt-in collation
+trades extra CPU copies and buffering latency for fewer device transfers. See
+[capture performance](capture-performance.md) for bounds and
+[measured results](pipeline-performance-results.md) before choosing a target size.

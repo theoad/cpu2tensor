@@ -49,9 +49,10 @@ def result_for(action: int, step: int) -> dict:
 
 class KernelTests(unittest.TestCase):
     def test_boundary_requires_complete_baselines_on_each_source(self) -> None:
-        data = (frame(1, detail=2 | FEATURES | REGISTERS)
+        data = (frame(1, detail=2 | FEATURES | REGISTERS | (1 << 16))
                 + signal_frame(6, schema_row() + schema_row(register=1, name=b"x1"), count=2, source=1)
-                + signal_frame(7, register_row(bytes(8)), source=1)
+                + signal_frame(12, struct.pack('<8Q', 0x1000, 0, 0, 0, 0, 0, 64, 63), source=1)
+                + signal_frame(7, register_row(bytes(8)), source=1, sequence=1)
                 + frame(10, detail=127))
         with worker(data) as endpoint, KernelEnv(endpoint) as env:
             with self.assertRaisesRegex(ValueError, "complete source register baselines"):

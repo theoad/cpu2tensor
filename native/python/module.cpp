@@ -50,7 +50,7 @@ PyObject* decode_schema(const Header& h, const uint8_t* bytes) {
     }
     return result;
 }
-PyObject* decode_signals(const Header& h, const uint8_t* bytes, bool memory_values) {
+PyObject* decode_signals(const Header& h, const uint8_t* bytes, bool memory_values, bool system_memory) {
     const bool registers = h.kind == Kind::registers;
     const char* names[4] = {"pc", registers ? "ids" : "addresses", registers ? "widths" : "sizes", "flags"};
     PyObject* result = PyDict_New();
@@ -83,6 +83,19 @@ PyObject* decode_signals(const Header& h, const uint8_t* bytes, bool memory_valu
         Py_XDECREF(width);
         if (!added) { Py_DECREF(result); return nullptr; }
     }
+    char* mapping[4]{};
+    constexpr const char* mapping_names[] = {"physical_addresses", "mapped_sizes", "mapping_flags", "context_sequences"};
+    if (!registers) {
+        for (unsigned column = 0; column < 4; ++column) {
+            if (system_memory) {
+                const auto added = add_buffer(result, mapping_names[column], h.count * sizeof(uint64_t));
+                if (!added.ok()) { Py_DECREF(result); return nullptr; }
+                mapping[column] = added.value();
+            } else if (PyDict_SetItemString(result, mapping_names[column], Py_None) != 0) {
+                Py_DECREF(result); return nullptr;
+            }
+        }
+    }
     size_t offset = 0;
     for (uint32_t row = 0; row < h.count; ++row) {
         const auto* item = bytes + offset;
@@ -98,12 +111,112 @@ PyObject* decode_signals(const Header& h, const uint8_t* bytes, bool memory_valu
             native_integer(columns[1], row, load_u64(item + 8));
             native_integer(columns[2], row, load_u32(item + 16));
             native_integer(columns[3], row, load_u32(item + 20));
-            if (values != nullptr) std::memcpy(values + row * value_width, item + 24, 16);
-            offset += memory_values ? 40 : 24;
+            const size_t prefix = system_memory ? 48 : 24;
+            if (system_memory) {
+                native_integer(mapping[0], row, load_u64(item + 24));
+                native_integer(mapping[1], row, load_u32(item + 32));
+                native_integer(mapping[2], row, load_u32(item + 36));
+                native_integer(mapping[3], row, load_u64(item + 40));
+            }
+            if (values != nullptr) std::memcpy(values + row * value_width, item + prefix, 16);
+            offset += prefix + (memory_values ? 16 : 0);
         }
     }
     return result;
 }
+PyObject* decode_context(const Header& h, const uint8_t* bytes) {
+    constexpr const char* names[] = {"pc", "cr0", "cr3", "cr4", "efer", "cs_base", "mode", "known"};
+    PyObject* result = PyDict_New();
+    if (result == nullptr) return nullptr;
+    for (unsigned column = 0; column < 8; ++column) {
+        const auto added = add_buffer(result, names[column], h.count * sizeof(uint64_t));
+        if (!added.ok()) { Py_DECREF(result); return nullptr; }
+        for (uint32_t row = 0; row < h.count; ++row)
+            native_integer(added.value(), row, load_u64(bytes + row * context_bytes + column * 8));
+    }
+    return result;
+}
+
+struct MixedTable final {
+    size_t size = 0;
+    uint32_t count = 0;
+    uint8_t bytes[max_payload_bytes];
+    uint64_t sequences[max_addresses];
+};
+
+bool add_sequences(PyObject* columns, const char* name, const MixedTable& table) {
+    const auto added = add_buffer(columns, name, table.count * sizeof(uint64_t));
+    if (!added.ok()) return false;
+    for (uint32_t row = 0; row < table.count; ++row)
+        native_integer(added.value(), row, table.sequences[row]);
+    return true;
+}
+
+PyObject* decode_mixed(const Header& h, const uint8_t* bytes, bool memory_values, bool system_memory) {
+    constexpr Kind kinds[] = {Kind::blocks, Kind::registers, Kind::memory, Kind::address_context};
+    constexpr const char* names[] = {"blocks", "registers", "memory", "context"};
+    MixedTable tables[4];
+    size_t offset = 0;
+    uint32_t event_offset = 0;
+    // Stream::accept has checked every run. Gather only used bytes on the stack;
+    // Python receives one owned column buffer per field, never an object per event.
+    while (offset < h.detail) {
+        if (h.detail - offset < 8) {
+            PyErr_SetString(PyExc_ValueError, "Mixed trace run header is truncated");
+            return nullptr;
+        }
+        const auto kind = static_cast<Kind>(load_u16(bytes + offset));
+        const uint32_t count = load_u16(bytes + offset + 2);
+        const uint32_t size = load_u32(bytes + offset + 4);
+        offset += 8;
+        unsigned index = 0;
+        while (index < 4 && kinds[index] != kind) ++index;
+        if (index == 4 || size > h.detail - offset ||
+            size > max_payload_bytes - tables[index].size ||
+            count > max_addresses - tables[index].count) {
+            PyErr_SetString(PyExc_ValueError, "Mixed trace table exceeds its validated bounds");
+            return nullptr;
+        }
+        auto& table = tables[index];
+        std::memcpy(table.bytes + table.size, bytes + offset, size);
+        for (uint32_t row = 0; row < count; ++row)
+            table.sequences[table.count + row] = h.sequence + event_offset + row;
+        table.count += count;
+        table.size += size;
+        event_offset += count;
+        offset += size;
+    }
+
+    PyObject* result = PyDict_New();
+    if (result == nullptr) return nullptr;
+    for (unsigned index = 0; index < 4; ++index) {
+        const auto& table = tables[index];
+        if (table.count == 0) continue;
+        const Header header{kinds[index], h.source, table.count, h.sequence, table.size};
+        PyObject* columns = nullptr;
+        if (kinds[index] == Kind::blocks) {
+            columns = PyByteArray_FromStringAndSize(nullptr, table.count * sizeof(uint64_t));
+            if (columns != nullptr) {
+                char* destination = PyByteArray_AsString(columns);
+                for (uint32_t row = 0; row < table.count; ++row)
+                    native_integer(destination, row, load_u64(table.bytes + row * sizeof(uint64_t)));
+            }
+        } else if (kinds[index] == Kind::address_context) {
+            columns = decode_context(header, table.bytes);
+        } else {
+            columns = decode_signals(header, table.bytes, memory_values, system_memory);
+        }
+        if (columns == nullptr) { Py_DECREF(result); return nullptr; }
+        const bool sequences_added = kinds[index] == Kind::blocks
+            ? add_sequences(result, "block_sequences", table)
+            : add_sequences(columns, "sequences", table);
+        const bool added = sequences_added && PyDict_SetItemString(result, names[index], columns) == 0;
+        Py_DECREF(columns);
+        if (!added) { Py_DECREF(result); return nullptr; }
+    }
+    return result;
+}
+
 PyObject* decode(PyObject*, PyObject* arguments) {
     PyObject* capsule = nullptr;
     Py_buffer view{};
@@ -123,14 +236,17 @@ PyObject* decode(PyObject*, PyObject* arguments) {
     PyObject* payload = nullptr;
     if (frame.kind == Kind::register_schema) payload = decode_schema(frame, bytes + header_bytes);
     else if (frame.kind == Kind::registers || frame.kind == Kind::memory)
-        payload = decode_signals(frame, bytes + header_bytes, stream->memory_values());
+        payload = decode_signals(frame, bytes + header_bytes, stream->memory_values(), stream->system_memory());
+    else if (frame.kind == Kind::address_context) payload = decode_context(frame, bytes + header_bytes);
+    else if (frame.kind == Kind::mixed)
+        payload = decode_mixed(frame, bytes + header_bytes, stream->memory_values(), stream->system_memory());
     else {
         payload = PyByteArray_FromStringAndSize(nullptr, size);
         if (payload != nullptr && frame.kind == Kind::guest_event)
             std::memcpy(PyByteArray_AsString(payload), bytes + header_bytes, size);
-        if (payload != nullptr && frame.kind == Kind::blocks) {
+        if (payload != nullptr && (frame.kind == Kind::blocks || frame.kind == Kind::executable_layout)) {
             char* destination = PyByteArray_AsString(payload);
-            for (uint32_t row = 0; row < frame.count; ++row)
+            for (size_t row = 0; row < size / sizeof(uint64_t); ++row)
                 native_integer(destination, row, load_u64(bytes + header_bytes + row * sizeof(uint64_t)));
         }
     }

@@ -26,8 +26,11 @@ enum {
     max_kernel_command_bytes = 4096,
     default_memory_bytes = 4096,
     default_seed = 17,
-    parallel_timeout_seconds = 30
+    default_parallel_timeout_seconds = 30
 };
+
+// Guest wall-clock budgets include delays caused by lossless trace backpressure.
+static uint32_t parallel_timeout_seconds = default_parallel_timeout_seconds;
 
 struct options {
     bool interactive;
@@ -491,6 +494,8 @@ static bool read_options(struct options *options)
     bool mode_seen = false;
     bool seed_seen = false;
     bool bytes_seen = false;
+    bool timeout_seen = false;
+    const char timeout_key[] = "cpu2tensor.parallel_timeout=";
     for (char *word = strtok_r(line, " \t\r\n", &position); word != NULL;
          word = strtok_r(NULL, " \t\r\n", &position)) {
         if (strncmp(word, "cpu2tensor.mode=", 16) == 0) {
@@ -508,6 +513,10 @@ static bool read_options(struct options *options)
                 return false;
             }
             seed_seen = true;
+        } else if (strncmp(word, timeout_key, sizeof(timeout_key) - 1) == 0) {
+            if (timeout_seen || !parse_number(word + sizeof(timeout_key) - 1, 3600, &parallel_timeout_seconds) ||
+                parallel_timeout_seconds == 0) return false;
+            timeout_seen = true;
         } else if (strncmp(word, "cpu2tensor.bytes=", 17) == 0) {
             if (bytes_seen || !parse_number(word + 17, max_memory_bytes, &options->bytes) ||
                 options->bytes == 0) {

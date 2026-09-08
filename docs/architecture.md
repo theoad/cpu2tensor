@@ -128,6 +128,13 @@ remain deferred. Minimal internal sequencing and stale-response protection still
 belong to correctness. Kernel support and multiworker observation-only throughput
 are required milestones, not optional extensions.
 
+For the rich-capture iteration requested on 2026-09-08, use one learner device and
+support one worker, multiple local workers, and multiple remote workers. AWS
+execution and CUDA validation are in scope. DDP, multiple learner devices,
+hotplug, migration, rebooted episodes, and external monitor control are explicitly
+deferred. See [the iteration proposal](rich-capture-plan.md) for unresolved trace
+semantics and measurement requirements.
+
 ## Implemented kernel boundary
 
 The system adapter reuses the same signal frames, native tensor conversion, and
@@ -146,3 +153,28 @@ The observation-only path does not start that control thread or execute action
 callbacks. An optional explicit start block selects a postboot capture window;
 other vCPUs join at their next block entry without a scheduling barrier. See
 [kernel setup](kernel-examples.md) for exact semantics and backend limits.
+
+## Contributor signals and measured costs
+
+The 2026-09-08 correctness agreement requires explicit checkpoint semantics and
+known/unknown attribution, not complete RAM reconstruction. Context is now a
+separate ordered tensor event. See [adding a signal](adding-a-signal.md) for the
+small native/wire/Python path and load-mapping scope considerations. Benchmark
+changes against vanilla QEMU with the same supplied-input workload, then isolate
+selected signal costs. Do not silently reduce coverage to advertise throughput.
+
+
+### Bounded observation pooling and publication
+
+Observation Pool accepts several distinct endpoints through the same synchronous
+iterator. Internal CPU readers keep one ready batch and one in-progress batch per
+worker; the caller thread performs device transfers. Ready workers are served in
+rotating order without an all-worker step barrier. `Batch.worker` identifies the
+endpoint index for this Pool. An endpoint failure fails the group explicitly.
+Advanced action scheduling and state placement remain deferred.
+
+Optional mixed frames and per-vCPU rings preserve source event positions and
+owned learner tensors. The first ring collector lives in the plugin and still
+writes the existing worker pipe. It is a measured intermediate implementation,
+not shared-memory column-page transport. See [capture performance](capture-performance.md)
+for the precise buffering and ownership contract.

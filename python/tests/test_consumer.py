@@ -8,6 +8,7 @@ import socket
 import struct
 import threading
 import unittest
+from unittest import mock
 import weakref
 
 import torch
@@ -187,13 +188,76 @@ class ConsumerTests(unittest.TestCase):
                     list(pool.read())
 
     def test_reject_unsupported_configuration(self) -> None:
-        for endpoints in ([], ["tcp://host:1", "tcp://host:2"], "tcp://host:1", ["ssh://host:1"], ["tcp://host:1/path"]):
+        for endpoints in ([], ["tcp://host:1", "tcp://host:1"], "tcp://host:1", ["ssh://host:1"], ["tcp://host:1/path"]):
             with self.subTest(endpoints=endpoints), self.assertRaises(ValueError):
                 Pool(endpoints)
         with self.assertRaises(ValueError):
             Pool(["tcp://host:1"], device="meta")
         with self.assertRaises(ValueError):
             Pool(["tcp://host:1"], timeout=0)
+
+    def test_close_interrupts_a_published_connection_attempt(self) -> None:
+        connecting = threading.Event()
+        interrupted = threading.Event()
+        finished = threading.Event()
+        errors = []
+
+        def connect(address) -> None:
+            self.assertEqual(address, ("127.0.0.1", 12345))
+            connecting.set()
+            if not interrupted.wait(5):
+                raise AssertionError("Connection attempt was not interrupted")
+            raise OSError("Connection was closed")
+
+        connection = mock.Mock(spec=socket.socket)
+        connection.connect.side_effect = connect
+        connection.shutdown.side_effect = lambda _: interrupted.set()
+        connection.close.side_effect = interrupted.set
+        pool = Pool(["tcp://127.0.0.1:12345"])
+
+        def read() -> None:
+            try:
+                list(pool.read())
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        with mock.patch("cpu2tensor.pool.socket.socket", return_value=connection):
+            reader = threading.Thread(target=read)
+            reader.start()
+            try:
+                self.assertTrue(connecting.wait(2))
+                pool.close()
+                self.assertTrue(finished.wait(2), "close left the connection attempt blocked")
+            finally:
+                interrupted.set()
+                reader.join(5)
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], RuntimeError)
+        self.assertIn("closed while connecting", str(errors[0]))
+        connection.shutdown.assert_called_once_with(socket.SHUT_RDWR)
+
+    def test_failed_address_candidate_does_not_prevent_a_later_connection(self) -> None:
+        data = frame(1, detail=1) + frame(2, addresses=(91,)) + frame(3, sequence=1) + frame(4)
+        original_socket = socket.socket
+
+        def without_ipv6(family=socket.AF_INET, *arguments, **keywords):
+            if family == socket.AF_INET6:
+                raise OSError("IPv6 is unavailable")
+            return original_socket(family, *arguments, **keywords)
+
+        with worker(data) as endpoint:
+            port = int(endpoint.rsplit(":", 1)[1])
+            addresses = [
+                (socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("::1", port, 0, 0)),
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port)),
+            ]
+            with mock.patch("cpu2tensor.pool.socket.getaddrinfo", return_value=addresses), \
+                    mock.patch("cpu2tensor.pool.socket.socket", side_effect=without_ipv6), \
+                    Pool([endpoint]) as pool:
+                self.assertEqual([batch.addresses.item() for batch in pool.read()], [91])
 
 
 if __name__ == "__main__":

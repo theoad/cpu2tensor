@@ -23,12 +23,20 @@ inline constexpr uint64_t feature_stdio = 1 << 11;
 inline constexpr uint64_t feature_system = 1 << 12;
 inline constexpr uint64_t feature_kernel = 1 << 13;
 inline constexpr uint64_t feature_window = 1 << 14;
+inline constexpr uint64_t feature_system_memory = 1 << 15;
+inline constexpr size_t context_bytes = 64;
+inline constexpr uint64_t feature_address_context = 1 << 16;
+inline constexpr uint64_t feature_executable_layout = 1 << 17;
+inline constexpr uint64_t feature_mixed = 1 << 18;
+inline constexpr uint64_t feature_stop = 1 << 19;
+inline constexpr size_t layout_bytes = 24;
 inline constexpr uint32_t max_action_bytes = 256;
 
 enum class Kind : uint16_t {
     hello = 1, blocks = 2, source_end = 3, complete = 4, error = 5,
     register_schema = 6, registers = 7, memory = 8, input_request = 9,
-    kernel_request = 10, guest_event = 11
+    kernel_request = 10, guest_event = 11, address_context = 12, executable_layout = 13,
+    mixed = 14
 };
 enum class Architecture : uint64_t { aarch64 = 1, x86_64 = 2 };
 enum class Failure : uint64_t { capture = 1, target_killed = 2, unsupported_target = 3, transport = 4 };
@@ -60,6 +68,7 @@ public:
     Result<Done> accept(const Header& header, const uint8_t* payload = nullptr);
     bool finished() const { return _finished; }
     bool memory_values() const { return (_features & feature_memory_values) != 0; }
+    bool system_memory() const { return (_features & feature_system_memory) != 0; }
 private:
     struct Registers final {
         uint16_t widths[max_registers]{};
@@ -75,8 +84,12 @@ private:
     bool _data[max_sources]{};
     bool _baseline_complete[max_sources]{};
     bool _ended[max_sources]{};
+    bool _has_context[max_sources]{};
+    uint64_t _context_sequence[max_sources]{};
     uint64_t _features = 0;
     bool _started = false;
     bool _finished = false;
+    bool _layout_seen = false;
+    bool _source_data_seen = false;
 };
 } // namespace cpu2tensor

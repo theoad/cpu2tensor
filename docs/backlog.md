@@ -2,8 +2,9 @@
 
 Updated 2026-09-08. This file owns work status. The first vertical slice is complete:
 real observation, integration, packaging, and standard-IDE navigation checks pass.
-Core register and memory instrumentation is now implemented and checked on ARM,
-x86 guests, CPU and MPS. CUDA execution and throughput work remain open.
+Core register and memory instrumentation is checked on ARM, x86 guests, CPU and
+MPS. Mixed frames, bounded multiworker collation and packed MPS uploads are now
+measured. AWS/CUDA and sustained multi-host scaling remain open.
 Later milestones are outcomes, not schedule promises.
 
 ## Completed first iteration: AArch64 observation to MPS
@@ -50,21 +51,15 @@ VS Code; successful integration was not substituted for that check.
 | C2T-08 Tensor columns | Done | Consumer builder | Owned register/memory tensors; CPU and MPS bit patterns, widths, retention and model checks |
 | C2T-09 Real signal integration | Done | Coordinator | ARM and x86 guest checks, rich pthread/fault checks, separately installed wheel; [results](instrumentation-results.md) |
 | C2T-10 CUDA execution | Pending device | Consumer builder | Run the existing CUDA check on an operator-provided CUDA learner |
-| C2T-11 Observation throughput | Investigation complete; implementation open | Coordinator | [Capture audit](capture-efficiency.md): per-vCPU SPSC capture and owned column pages proposed; ARM trace shape counted, no timing gains claimed |
+| C2T-11 Observation throughput | Measured first optimization | Coordinator | See current iteration below: mixed frames, experimental rings and packed/collated CPU-to-device path |
 
-The current API yields one signal kind per batch. This keeps ownership and client
-control flow simple, but switching signal kinds flushes small frames. It is a
-correctness baseline, not a demonstrated high-throughput implementation. Preserve
-per-vCPU event sequence when improving batching; do not impose global event order.
-Checkpoint register samples do not cover every write or promise final exit state.
+The original baseline yielded one signal kind per batch. Version 0.5 adds opt-in
+mixed frames and CPU collation, preserving per-vCPU event sequences and owned
+columns. Register samples remain checkpoints rather than every write or final
+state. [Capture performance](capture-performance.md) describes current buffering;
+the original [capture audit](capture-efficiency.md) remains design history.
 
-C2T-11 next: replace callback pipe publication with cancellable per-vCPU rings
-and a fair native worker collector, then settle ordered mixed column pages before
-parallel producer/consumer edits. Preserve retained-tensor ownership; upload
-completion alone does not permit device-buffer reuse. Acceptance and named-host
-measurement requirements are in the capture audit.
-
-## Current iteration: kernel integration and learning
+## Completed iteration: kernel integration and learning
 
 | Card | Status | Evidence / remaining work |
 | --- | --- | --- |
@@ -161,6 +156,42 @@ all difficult assumptions until the end.
 - 2026-09-08: Kernel integration completed on `codex/kernel-integration`. Full boot
   block capture, rich postboot observations, both active vCPUs, paused-world
   actions, repeated reset/reaping, bounded action delivery, observation-only
-  multiworker MPS training and CPU/MPS Gym policy updates are checked. The stress
+multiworker MPS training and CPU/MPS Gym policy updates are checked. The stress
   harness now drains diagnostic output independently. See
   [kernel results](kernel-integration-results.md) for exact scope and open limits.
+
+## Current iteration: rich-capture correctness and throughput
+
+Requested 2026-09-08. The [iteration proposal](rich-capture-plan.md) separates
+accepted scope from open decisions. Preserve simple synchronous clients and an
+observation-only path. One learner device consumes one worker, multiple local
+workers, or multiple remote workers. AWS execution and actual CUDA validation
+are required evidence. DDP, multiple learner devices, hotplug, migration,
+rebooted episodes, and external monitor control are deferred.
+
+| Card | Status | Exit evidence |
+| --- | --- | --- |
+| C2T-18 Trace semantics | Initial fixes implemented and checked | [State results](state-correctness-results.md): unavailable fields filtered, exact named selections, raw system GPR/mode hook, ordered context and physical-prefix coverage; optional fresh snapshots remain C2T-22 |
+| C2T-19 Rich performance baseline | Capture matrix and learner isolation measured | Original [signal costs](benchmark-capture-results.md), [30-run framing/publication matrix](performance-matrix-results.md) and [matched MPS replay plus live rich training](pipeline-performance-results.md) |
+| C2T-11 Observation throughput | First optimization checked; native collector work remains | Mixed/pipe framing share 28.85%→10.04%; packed upload plus 64 KiB collation cuts matched MPS drain median 12.101→0.350 s. Rings implemented/tested but not a measured improvement; native shared-memory column pages and overlap remain open |
+| C2T-20 Multiple endpoint pool | Implemented and checked | Synchronous endpoint Pool, explicit worker/source identity, bounded CPU readers and caller-thread upload; three real ARM workers train on CPU/MPS; one/two x86 kernel workers deliver rich captures to MPS |
+| C2T-10 CUDA execution | Pending assigned learner | Exact rich columns, retained storage, packed upload lifetimes, forward/backward and checkpoint reload on real CUDA hardware |
+| C2T-22 Optional boundary state | Mechanism pending | Fresh validated all-vCPU register acquisition at action/end boundaries, separately acknowledged from trace drain |
+| C2T-21 AWS scale evidence | Pending assigned infrastructure; local pilot complete | One/two-process x86-to-MPS rich drain completes; repeated sustained scaling and actual multi-host AWS runs remain required |
+| C2T-23 Native tensor notebook | Done | [Executed tutorial](tutorials/normalization.ipynb): initial three-field executable layout, real same-binary relocation across 11 locations, CPU/MPS learning curves and controls; [evidence](normalization-results.md) |
+
+The user agreed to explicit sampled state and attributed transactions, while
+full RAM reconstruction remains deferred. Runtime fixes, probes, contributor
+extension guidance and initial named-host overhead evidence are in
+[state results](state-correctness-results.md). New events must state scope,
+validity and cost; do not fabricate CPU attribution for worker-wide metadata.
+Optional paused-world snapshots remain unavailable, and cross-page physical
+coverage is deliberately partial. Opt-in mixed frames and bounded tensor collation now address small-frame overhead.
+[Measured results](pipeline-performance-results.md) distinguish matched learner
+improvements from single live runs and the native ring regression. No GPU-bound
+claim is made. One learner device remains the supported scope.
+
+The user then requested a notebook built around a useful new normalization tensor.
+The initial user-process layout is now implemented as an opt-in worker-wide event;
+general load/unload mappings and cross-worker synchronization remain future work.
+No hot-path framework or async client machinery was introduced for the tutorial.

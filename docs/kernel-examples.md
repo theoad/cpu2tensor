@@ -9,7 +9,10 @@ memory, pipe, and parallel-memory commands.
 Use [kernel pretraining](kernel-pretraining.md) for observation-only workers or
 [Kernel Gym](kernel-gym.md) for streamed reset/step and client-defined rewards.
 The [QEMU build and API evidence](kernel-qemu-build.md) records the compatible
-external development dependency and its limitations. The package installs no QEMU.
+external development dependency and its limitations. For current exact system
+register capture, use the separate [state-hook build](qemu-state-hook.md). The
+original unmodified build remains a block-only or public-memory backend. The
+package installs no QEMU.
 
 The [integration checks](kernel-integration-results.md) include full boot through
 poweroff. The checked learning runs select an explicit postboot start marker. This excludes
@@ -214,3 +217,12 @@ external monitor controllers, and rebooted episodes are outside this version's
 contract. A guest `complete(ok=true)`, plugin seal, closed channels, and successful
 QEMU exit are all required before interactive completion. A kernel panic followed
 by QEMU exit zero is not sufficient.
+
+## Guest deadline under rich backpressure
+
+The example's parallel startup/result deadline defaults to 30 guest-clock seconds.
+For slow tensor consumers, set `cpu2tensor.parallel_timeout=300` in the kernel
+command line (seconds, accepted range 1..3600). This changes only the example
+workload's failure budget. It does not freeze guest clocks, alter the plugin's
+scheduling, or remove backpressure cost. A missed deadline remains an explicit
+unsuccessful workload, never a complete training sample.

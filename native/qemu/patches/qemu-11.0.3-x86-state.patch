@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+--- a/target/i386/gdbstub.c
++++ b/target/i386/gdbstub.c
+@@ -22,6 +22,9 @@
+ #include "cpu.h"
+ #include "exec/gdbstub.h"
+ #include "gdbstub/helpers.h"
++#ifdef CONFIG_PLUGIN
++#include "qemu/plugin.h"
++#endif
+ #ifdef CONFIG_LINUX_USER
+ #include "linux-user/qemu.h"
+ #endif
+@@ -37,6 +40,48 @@
+ #define gpr_map gpr_map32
+ #endif
+ static const int gpr_map32[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
++
++#if defined(CONFIG_PLUGIN) && defined(TARGET_X86_64) && !defined(CONFIG_USER_ONLY)
++/*
++ * Optional cpu2tensor v1 state hook. The caller must request R_REGS so TCG
++ * synchronizes architectural state before this callback. This copies raw
++ * storage; the execution width describes how to interpret subregisters.
++ * The same patch fixes the public memory API's MMIO classification.
++ */
++bool qemu_plugin_cpu2tensor_x86_state_v1(uint64_t *out, size_t count)
++{
++    CPUX86State *env;
++    X86CPU *cpu;
++    size_t i;
++
++    if (!out || (count != 8 && count != 28) || !current_cpu ||
++        qemu_plugin_get_cb_flags() == QEMU_PLUGIN_CB_NO_REGS) {
++        return false;
++    }
++    cpu = X86_CPU(current_cpu);
++    env = &cpu->env;
++    out[0] = env->cr[0];
++    out[1] = env->cr[2];
++    out[2] = env->cr[3];
++    out[3] = env->cr[4];
++    out[4] = 0; /* Reserved, not a CR8 sample: no implicit VAPIC access. */
++    out[5] = env->efer;
++    out[6] = env->segs[R_CS].base;
++    out[7] = (env->hflags & HF_CS64_MASK) ? 64 :
++             (env->hflags & HF_CS32_MASK) ? 32 : 16;
++    if (count == 28) {
++        for (i = 0; i < 16; i++) {
++            out[8 + i] = env->regs[gpr_map[i]];
++        }
++        out[24] = env->eip;
++        out[25] = env->segs[R_FS].base;
++        out[26] = env->segs[R_GS].base;
++        out[27] = env->kernelgsbase;
++    }
++    return true;
++}
++#endif
++
+ 
+ /*
+  * Keep these in sync with the machine description
+--- a/include/plugins/qemu-plugin.h
++++ b/include/plugins/qemu-plugin.h
+@@ -1109,6 +1109,21 @@
+                                GByteArray *buf);
+ 
+ /**
++ * qemu_plugin_cpu2tensor_x86_state_v1() - optional developer x86 system hook
++ * @out: caller-owned array of exactly @count uint64_t elements
++ * @count: 8 for paging/mode context, or 28 including raw register storage
++ *
++ * Requires a current x86-64 system vCPU callback with register-read permission.
++ * The function does not allocate, synchronize other vCPUs, or read lazy flags.
++ * Returns false without writing output for invalid arguments or callback context.
++ * Exported only by the optional cpu2tensor x86 system developer patch. Its
++ * presence also identifies the accompanying public MMIO classification fix.
++ */
++QEMU_PLUGIN_API
++bool qemu_plugin_cpu2tensor_x86_state_v1(uint64_t *out, size_t count);
++
++
++/**
+  * qemu_plugin_write_register() - write register for current vCPU
+  *
+  * @handle: a @qemu_plugin_reg_handle handle
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -1592,7 +1592,7 @@
+     data->phys_addr = full->phys_addr | (addr & ~TARGET_PAGE_MASK);
+ 
+     /* We must have an iotlb entry for MMIO */
+-    if (tlb_addr & TLB_MMIO) {
++    if (full->slow_flags[access_type] & TLB_MMIO) {
+         MemoryRegionSection *section = full->section;
+         data->is_io = true;
+         data->mr = section->mr;

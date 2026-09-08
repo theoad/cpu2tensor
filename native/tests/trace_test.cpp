@@ -2,10 +2,21 @@
 #include <cassert>
 #include <cstring>
 #include <cpu2tensor/trace.hpp>
+#include <cpu2tensor/register_selection.hpp>
 
 using namespace cpu2tensor;
 
 int main() {
+    assert(valid_register_selection("rax:rip"));
+    assert(!valid_register_selection("rax::rip"));
+    assert(!valid_register_selection("rax,memory=off"));
+    assert(!valid_register_selection(":rax"));
+    assert(!valid_register_selection("rax:"));
+    assert(listed_register("rax:rip", "rip"));
+    assert(!listed_register("rax:rip", "ra"));
+    assert(unavailable_x86_register("ftag", false));
+    assert(unavailable_x86_register("eflags", true));
+    assert(!unavailable_x86_register("eflags", false));
     uint8_t bytes[header_bytes];
     Header batch{Kind::blocks, 2, 2, 0, 0};
     encode_header(bytes, batch);

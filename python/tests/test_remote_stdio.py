@@ -50,8 +50,15 @@ class RemoteStdioTests(unittest.TestCase):
         self.assertEqual((code, errors), (0, b""))
 
     def test_two_reads_and_rich_signals(self):
+        self.check_two_reads()
+
+    def test_two_reads_with_mixed_ring_signals(self):
+        self.check_two_reads(batching="mixed", publication="ring")
+
+    def check_two_reads(self, *, batching="legacy", publication="pipe"):
         endpoint = self.start(stdio=True, target=[f"{self.build}/stdio_test_target", "twice"],
-                              registers="general", memory="on", values="on")
+                              registers="general", memory="on", values="on",
+                              batching=batching, publication=publication)
         with StdioEnv(endpoint, device="mps") as env:
             initial = list(env.reset())
             self.assertTrue(env.needs_input)

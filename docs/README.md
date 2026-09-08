@@ -5,6 +5,9 @@
 - [Stdin learning](stdio-example.md): streamed reset/step, Gym and real policy results.
 - [Next-block pretraining](kernel-pretraining.md): bounded multi-endpoint learner and its validation scope.
 - [Kernel guest](kernel-examples.md): verified benign guest workloads and missing integration.
+- [State correctness](state-correctness-results.md): current checkpoint and paging validation.
+- [Capture benchmark](benchmark-capture.md): reproducible signal overhead and [x86 results](benchmark-capture-results.md).
+- [Adding a signal notebook](tutorials/normalization.ipynb): executable layout, owned tensors and measured learning across relocation.
 - [Instrumentation](instrumentation.md): current register/memory contract and limits.
 - [Instrumentation probe](instrumentation-probe.md): reviewed AlphaFlow and QEMU evidence.
 - [Instrumentation results](instrumentation-results.md): current validation evidence.
@@ -29,3 +32,9 @@
 Open this directory as an Obsidian vault. Product requirements come from the
 2026-09-07 design interview. Structure and delivery sequence are initial proposals
 to revise as experiments produce evidence.
+
+- [Capture performance](capture-performance.md): mixed frames, per-vCPU rings, bounded endpoint pools and measurement.
+- [Kernel window acceptance](kernel-window-results.md): one-shot start/stop on the fixed getpid workload.
+- [Tensor pipeline benchmark](benchmark-pipeline.md): rich uploads and bounded model updates across supplied endpoints.
+
+- [Measured performance](pipeline-performance-results.md): matched MPS transfer/collation results and live rich workers; [native matrix](performance-matrix-results.md).

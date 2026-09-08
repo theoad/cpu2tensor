@@ -32,7 +32,8 @@ void encode_header(uint8_t* bytes, const Header& header) {
 size_t payload_size(const Header& header) {
     if (header.kind == Kind::guest_event) return static_cast<size_t>(header.detail);
     if (header.kind == Kind::blocks) return header.count * sizeof(uint64_t);
-    if (header.kind == Kind::register_schema || header.kind == Kind::registers || header.kind == Kind::memory)
+    if (header.kind == Kind::register_schema || header.kind == Kind::registers || header.kind == Kind::memory ||
+        header.kind == Kind::address_context || header.kind == Kind::executable_layout || header.kind == Kind::mixed)
         return static_cast<size_t>(header.detail);
     return 0;
 }
@@ -45,6 +46,14 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
     if (h.source >= max_sources || h.count > max_addresses)
         return Result<Header>::failure("Trace exceeds the supported source or batch limit");
     switch (h.kind) {
+    case Kind::mixed:
+        if (h.count == 0 || h.detail < 16 || h.detail > max_payload_bytes)
+            return Result<Header>::failure("Invalid mixed batch size");
+        break;
+    case Kind::executable_layout:
+        if (h.source != 0 || h.sequence != 0 || h.count != 1 || h.detail != layout_bytes)
+            return Result<Header>::failure("Invalid executable layout fields");
+        break;
     case Kind::kernel_request:
     case Kind::guest_event:
         if (h.source != 0 || h.count != 0 || h.sequence != 0 || h.detail == 0 ||
@@ -64,13 +73,17 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
     case Kind::register_schema:
     case Kind::registers:
     case Kind::memory:
+    case Kind::address_context:
         if (h.count == 0 || h.detail > max_payload_bytes || h.detail == 0)
             return Result<Header>::failure("Invalid signal payload size");
         if (h.kind == Kind::register_schema && (h.sequence != 0 || h.detail != h.count * register_schema_bytes))
             return Result<Header>::failure("Invalid register schema size or sequence");
         if (h.kind == Kind::registers && h.detail < h.count * 17)
             return Result<Header>::failure("Register payload is too short");
-        if (h.kind == Kind::memory && h.detail != h.count * 24 && h.detail != h.count * 40)
+        if (h.kind == Kind::address_context && (h.count != 1 || h.detail != context_bytes))
+            return Result<Header>::failure("Invalid address context size");
+        if (h.kind == Kind::memory && h.detail != h.count * 24 && h.detail != h.count * 40 &&
+            h.detail != h.count * 48 && h.detail != h.count * 64)
             return Result<Header>::failure("Invalid memory payload size");
         break;
     case Kind::hello:
@@ -81,11 +94,22 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
         if (h.kind == Kind::hello) {
             const auto architecture = h.detail & 255;
             constexpr auto allowed = uint64_t{255} | feature_memory | feature_registers | feature_memory_values | feature_stdio |
-                feature_system | feature_kernel | feature_window;
+                feature_system | feature_kernel | feature_window | feature_system_memory | feature_address_context |
+                feature_executable_layout | feature_mixed | feature_stop;
             if ((architecture != 1 && architecture != 2) || (h.detail & ~allowed) != 0)
                 return Result<Header>::failure("Unsupported target architecture or features");
             if ((h.detail & feature_memory_values) && !(h.detail & feature_memory))
                 return Result<Header>::failure("Memory values require memory observations");
+            if ((h.detail & feature_executable_layout) && (h.detail & feature_system))
+                return Result<Header>::failure("Executable layout requires user-mode capture");
+            if ((h.detail & feature_system_memory) &&
+                (!(h.detail & feature_address_context) || !(h.detail & feature_memory)))
+                return Result<Header>::failure("System memory context needs x86 system memory capture");
+            if ((h.detail & feature_address_context) && (!(h.detail & feature_system) || architecture != 2))
+                return Result<Header>::failure("Address context needs x86 system capture");
+            if (architecture == 2 && (h.detail & feature_system) && (h.detail & feature_registers) &&
+                !(h.detail & feature_address_context))
+                return Result<Header>::failure("System x86 register capture requires address context; update the worker");
             if (((h.detail & feature_kernel) && !(h.detail & feature_system)) ||
                 ((h.detail & feature_stdio) && (h.detail & feature_system)))
                 return Result<Header>::failure("Incompatible system and action features");
@@ -152,7 +176,8 @@ Result<Done> Stream::registers(const Header& h, const uint8_t* bytes) {
 }
 Result<Done> Stream::memory(const Header& h, const uint8_t* bytes) {
     if (!(_features & feature_memory)) return Result<Done>::failure("Memory observations are disabled");
-    const size_t stride = memory_values() ? 40 : 24;
+    const size_t prefix = system_memory() ? 48 : 24;
+    const size_t stride = prefix + (memory_values() ? 16 : 0);
     if (h.detail != h.count * stride) return Result<Done>::failure("Memory value setting does not match payload");
     for (uint32_t row = 0; row < h.count; ++row) {
         const auto* item = bytes + row * stride;
@@ -160,10 +185,23 @@ Result<Done> Stream::memory(const Header& h, const uint8_t* bytes) {
         const auto flags = load_u32(item + 20);
         if (width == 0 || (width & (width - 1)) != 0 || flags > 3)
             return Result<Done>::failure("Invalid memory access size or flags");
+        if (system_memory()) {
+            const auto physical = load_u64(item + 24);
+            const auto mapped = load_u32(item + 32);
+            const auto mapping = load_u32(item + 36);
+            if (!_has_context[h.source] || load_u64(item + 40) != _context_sequence[h.source])
+                return Result<Done>::failure("Memory access needs its current address context");
+            const auto virtual_address = load_u64(item + 8);
+            if ((mapping != 0 && mapping != 1 && mapping != 3 && mapping != 7) ||
+                (mapping == 0 && (mapped != 0 || physical != 0)) ||
+                ((mapping & 1) && (mapped == 0 || mapped > width ||
+                mapped > 4096 - (virtual_address & 4095) || physical > UINT64_MAX - (mapped - 1))))
+                return Result<Done>::failure("Invalid physical mapping coverage");
+        }
         if (memory_values()) {
             if (width > 16) return Result<Done>::failure("Unsupported memory value width");
             for (uint32_t i = width; i < 16; ++i)
-                if (item[24 + i] != 0) return Result<Done>::failure("Memory value padding must be zero");
+                if (item[prefix + i] != 0) return Result<Done>::failure("Memory value padding must be zero");
         }
     }
     return Result<Done>::success({});
@@ -181,6 +219,45 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
         return Result<Done>::success({});
     }
     if (h.kind == Kind::hello) return Result<Done>::failure("Duplicate trace Hello");
+    if (h.kind == Kind::mixed) {
+        if (!(_features & feature_mixed) || bytes == nullptr)
+            return Result<Done>::failure("Mixed capture needs its feature and payload");
+        size_t offset = 0;
+        uint32_t count = 0;
+        while (offset < h.detail) {
+            if (h.detail - offset < 8) return Result<Done>::failure("Truncated mixed run header");
+            const auto kind = static_cast<Kind>(load_u16(bytes + offset));
+            const auto rows = load_u16(bytes + offset + 2);
+            const auto size = load_u32(bytes + offset + 4);
+            offset += 8;
+            if ((kind != Kind::blocks && kind != Kind::registers && kind != Kind::memory &&
+                 kind != Kind::address_context) || rows == 0 || rows > h.count - count ||
+                size > h.detail - offset || (kind == Kind::blocks && size != rows * 8u))
+                return Result<Done>::failure("Invalid mixed run kind, count or length");
+            if (h.sequence > UINT64_MAX - count)
+                return Result<Done>::failure("Mixed sequence overflow");
+            const auto result = accept({kind, h.source, rows, h.sequence + count,
+                                        kind == Kind::blocks ? 0 : size}, bytes + offset);
+            if (!result.ok()) return result;
+            count += rows;
+            offset += size;
+        }
+        if (count != h.count) return Result<Done>::failure("Mixed event count does not match its runs");
+        return Result<Done>::success({});
+    }
+    if (h.kind == Kind::executable_layout) {
+        if (!(_features & feature_executable_layout) || _layout_seen || _source_data_seen)
+            return Result<Done>::failure("Executable layout must appear once before source data");
+        if (bytes == nullptr || load_u64(bytes) >= load_u64(bytes + 8))
+            return Result<Done>::failure("Executable layout needs a nonempty code span");
+        _layout_seen = true;
+        // This describes the worker's initial process, not CPU zero. It consumes
+        // no source sequence and can follow schemas emitted during vCPU init.
+        return Result<Done>::success({});
+    }
+    if ((_features & feature_executable_layout) && !_layout_seen &&
+        h.kind != Kind::register_schema && h.kind != Kind::error)
+        return Result<Done>::failure("Trace data needs its initial executable layout");
     if (h.kind == Kind::kernel_request || h.kind == Kind::guest_event) {
         if (!(_features & feature_kernel))
             return Result<Done>::failure("Kernel adapter frame needs an interactive system worker");
@@ -212,7 +289,8 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
     if (h.kind == Kind::input_request && !(_features & feature_stdio))
         return Result<Done>::failure("Stdin request needs interactive capture");
     if (_ended[source]) return Result<Done>::failure("Frame received after source end");
-    if (h.kind == Kind::register_schema || h.kind == Kind::registers || h.kind == Kind::memory) {
+    if (h.kind == Kind::register_schema || h.kind == Kind::registers || h.kind == Kind::memory ||
+        h.kind == Kind::address_context) {
         if (bytes == nullptr) return Result<Done>::failure("Signal payload is missing");
     }
     if (h.kind == Kind::register_schema) {
@@ -222,8 +300,21 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
     }
     if (h.sequence != _next[source]) return Result<Done>::failure("Missing or repeated source entries");
     if (h.count > UINT64_MAX - h.sequence) return Result<Done>::failure("Source sequence overflow");
+    if (h.kind == Kind::address_context) {
+        if (!(_features & feature_address_context)) return Result<Done>::failure("Address context is not enabled");
+        const auto mode = load_u64(bytes + 48);
+        const auto known = load_u64(bytes + 56);
+        if ((known != 15 && known != 63) ||
+            (known == 15 && (mode != 0 || load_u64(bytes + 40) != 0)) ||
+            (known == 63 && mode != 16 && mode != 32 && mode != 64))
+            return Result<Done>::failure("Invalid address context availability or execution mode");
+        _has_context[source] = true;
+        _context_sequence[source] = h.sequence;
+    }
     const bool needs_baseline = h.kind == Kind::blocks || h.kind == Kind::memory || h.kind == Kind::input_request ||
         (h.kind == Kind::source_end && _data[source]);
+    if ((_features & feature_address_context) && h.kind == Kind::blocks && !_has_context[source])
+        return Result<Done>::failure("System blocks need an initial address context");
     if ((_features & feature_registers) && needs_baseline && !_baseline_complete[source]) {
         const auto* registers = _registers[source];
         if (registers == nullptr) return Result<Done>::failure("Source data needs a register schema");
@@ -233,6 +324,8 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
         _baseline_complete[source] = true;
     }
     if (h.kind == Kind::registers) {
+        if ((_features & feature_address_context) && !_has_context[source])
+            return Result<Done>::failure("System register state needs an address context");
         const auto result = registers(h, bytes);
         if (!result.ok()) return result;
     }
@@ -241,6 +334,7 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
         if (!result.ok()) return result;
     }
     _seen[source] = true;
+    _source_data_seen = true;
     _data[source] = true;
     _next[source] += h.count;
     if (h.kind == Kind::source_end) _ended[source] = true;

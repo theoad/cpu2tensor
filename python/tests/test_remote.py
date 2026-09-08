@@ -30,14 +30,18 @@ class RemoteTests(unittest.TestCase):
             check=True, capture_output=True, timeout=20, **kwargs,
         )
 
-    def start(self, data=b"cpu2tensor\n", target=None, closed_stdin=False, qemu=None, port=0, registers="none", memory="off", values="off", stdio=False, episodes=1, timeout_ms=30000):
+    def start(self, data=b"cpu2tensor\n", target=None, closed_stdin=False, qemu=None, port=0, registers="none", memory="off", values="off", stdio=False, episodes=1, timeout_ms=30000, start_pc=None, stop_pc=None, batching="legacy", publication="pipe"):
         self.ssh(f"umask 077; cat > {shlex.quote(self.input_path)}", input=data)
         arguments = [
             f"{self.build}/cpu2tensor-worker", "--qemu", qemu or self.qemu,
             "--plugin", f"{self.build}/libcpu2tensor_plugin.so",
             *(["--stdio", "on"] if stdio else ["--input", self.input_path]),
             "--episodes", str(episodes), "--host", self.address, "--port", str(port),
-            "--timeout-ms", str(timeout_ms), "--registers", registers, "--memory", memory, "--memory-values", values, "--", *(target or [f"{self.build}/checksum"]),
+            "--timeout-ms", str(timeout_ms), "--registers", registers, "--memory", memory, "--memory-values", values,
+            "--batching", batching, "--publication", publication,
+            *([] if start_pc is None else ['--start-pc', hex(start_pc)]),
+            *([] if stop_pc is None else ['--stop-pc', hex(stop_pc)]),
+            "--", *(target or [f"{self.build}/checksum"]),
         ]
         command = "ulimit -c 0; echo cpu2tensor-pid:$$ >&2; "
         if closed_stdin:
@@ -286,8 +290,14 @@ class RemoteTests(unittest.TestCase):
         self.assertNotIn(("unchanged", changed_name), changes)
         self.assertEqual(changes["zero_again", changed_name], 0)
         code, output, errors = self.finish()
+        expected_errors = b""
+        if architecture == "x86" and profile == "all":
+            omitted = ("ftag", "fiseg", "fioff", "foseg", "fooff", "fop")
+            expected_errors = b"".join(f"cpu2tensor: omitting unavailable register {name}\n".encode()
+                                       for name in omitted)
+            self.assertFalse(set(omitted) & {name for source, name in baseline})
         self.assertEqual((code, output, errors),
-                         (0, b"signals: ok checksum=0123456751428186\n", b""))
+                         (0, b"signals: ok checksum=0123456751428186\n", expected_errors))
         print(f"{architecture} {device} values={values}: {counts}, {len(baseline)} baselines")
 
     def test_arm_signals_values_off(self):

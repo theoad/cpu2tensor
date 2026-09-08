@@ -81,8 +81,10 @@ addresses in a block-only frame and at most 4,096 bytes per wire frame.
 Register capture reserves bounded per-source metadata, previous values, and scratch
 space at source initialization (up to 512 registers, 256 bytes per register).
 There is one frame in the worker, a bounded pipe, and a 64 KiB requested
-socket send buffer (Linux may double it). The pool has no receive queue and keeps
-no history of consumed batches. QEMU's own translation cache and tensors retained
+socket send buffer (Linux may double it). A single endpoint with default collation has no receive queue or consumed-batch
+history. Multiple endpoints add one ready and one in-progress CPU batch per
+reader; opt-in collation has separate byte/frame limits documented in
+[capture performance](capture-performance.md). QEMU's own translation cache and tensors retained
 by the client are separate memory owners. Backpressure changes timing and does
 not promise to preserve race probabilities or establish a total guest memory order.
 
@@ -140,3 +142,23 @@ The kernel adapter additionally owns two bounded 8 KiB line readers for QMP and
 serial diagnostics and one 127-byte action. A separate QMP/drain deadline cannot
 be extended by ongoing trace or console traffic. Cancellation reaps the target
 before another connection is served.
+
+## Version 0.5 performance integration evidence
+
+Recorded 2026-09-08. The complete default Python suite passed 158 tests with 52
+explicit skips for unavailable backends or unconfigured real-worker fixtures.
+The same 158 passed / 52 skipped from a copied test directory outside the checkout
+against a separately installed regular wheel. Package modules, native extension,
+new helper modules and typing files resolved from that wheel environment.
+Wheel SHA-256:
+`cdbd5b96cfb9c19eca8669f2b3b976b2bd0b58e07228c81f8a5b9d0e3a403065`.
+
+Ten separately configured real ARM tests passed: eight capture-window checks
+and CPU/MPS training from three worker processes. Additional focused real checks
+covered ring backpressure/disconnect and mixed/ring stdin boundaries. Native
+CTest passed 2/2 on Mac, ARM Linux and x86 Linux; the ring stress test also passed
+ThreadSanitizer on Mac. The current native plugin and worker source hashes match
+the measured x86 binaries. See [pipeline results](pipeline-performance-results.md)
+for actual rich kernel delivery and training, and the
+[30-run matrix](performance-matrix-results.md) for native performance evidence.
+No skipped CUDA test is counted as backend validation.

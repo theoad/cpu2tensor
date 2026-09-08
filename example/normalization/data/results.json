@@ -1,0 +1,613 @@
+{
+  "format": 1,
+  "reports": [
+    {
+      "device": "cpu",
+      "epochs": 80,
+      "seeds": [
+        7,
+        17,
+        29
+      ],
+      "samples": 1408,
+      "runs": [
+        {
+          "mode": "raw",
+          "seed": 7,
+          "vocabulary_size": 28,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 1.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.5748215913772583,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.5699362754821777,
+            "heldout_correct_probability": 0.2499999701976776
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 5.769068229710683e-05,
+            "train_accuracy": 1.0,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 2.0468130111694336,
+            "heldout_correct_probability": 0.25
+          }
+        },
+        {
+          "mode": "normalized",
+          "seed": 7,
+          "vocabulary_size": 4,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 0.0,
+          "wrong_metadata_accuracy": 0.25,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.5908572673797607,
+            "train_accuracy": 0.5,
+            "heldout_accuracy": 0.5,
+            "heldout_loss": 1.5908572673797607,
+            "heldout_correct_probability": 0.2694273293018341
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 4.660902050090954e-05,
+            "train_accuracy": 1.0,
+            "heldout_accuracy": 1.0,
+            "heldout_loss": 4.6609024138888344e-05,
+            "heldout_correct_probability": 0.9999535083770752
+          }
+        },
+        {
+          "mode": "metadata_only",
+          "seed": 7,
+          "vocabulary_size": 7,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 1.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.4997693300247192,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.5699362754821777,
+            "heldout_correct_probability": 0.2499999701976776
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 1.3862966299057007,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.4508731365203857,
+            "heldout_correct_probability": 0.25
+          }
+        },
+        {
+          "mode": "shuffled_labels",
+          "seed": 7,
+          "vocabulary_size": 4,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 0.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.5504891872406006,
+            "train_accuracy": 0.2488839328289032,
+            "heldout_accuracy": 0.5,
+            "heldout_loss": 1.5908572673797607,
+            "heldout_correct_probability": 0.2694273293018341
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 1.3840010166168213,
+            "train_accuracy": 0.2689732015132904,
+            "heldout_accuracy": 0.5,
+            "heldout_loss": 1.3314214944839478,
+            "heldout_correct_probability": 0.2641267478466034
+          }
+        },
+        {
+          "mode": "raw",
+          "seed": 17,
+          "vocabulary_size": 28,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 1.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.694970726966858,
+            "train_accuracy": 0.1785714328289032,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.4275845289230347,
+            "heldout_correct_probability": 0.2499999850988388
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 7.094258035067469e-05,
+            "train_accuracy": 1.0,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 2.1644067764282227,
+            "heldout_correct_probability": 0.25
+          }
+        },
+        {
+          "mode": "normalized",
+          "seed": 17,
+          "vocabulary_size": 4,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 0.0,
+          "wrong_metadata_accuracy": 0.25,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.517364740371704,
+            "train_accuracy": 0.0,
+            "heldout_accuracy": 0.0,
+            "heldout_loss": 1.517364740371704,
+            "heldout_correct_probability": 0.22191178798675537
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 6.77379866829142e-05,
+            "train_accuracy": 1.0,
+            "heldout_accuracy": 1.0,
+            "heldout_loss": 6.773799395887181e-05,
+            "heldout_correct_probability": 0.9999322891235352
+          }
+        },
+        {
+          "mode": "metadata_only",
+          "seed": 17,
+          "vocabulary_size": 7,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 1.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.4939625263214111,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.4275845289230347,
+            "heldout_correct_probability": 0.2499999850988388
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 1.3862979412078857,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.3933815956115723,
+            "heldout_correct_probability": 0.25
+          }
+        },
+        {
+          "mode": "shuffled_labels",
+          "seed": 17,
+          "vocabulary_size": 4,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 0.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.416904091835022,
+            "train_accuracy": 0.2589285671710968,
+            "heldout_accuracy": 0.0,
+            "heldout_loss": 1.517364740371704,
+            "heldout_correct_probability": 0.22191178798675537
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 1.3816388845443726,
+            "train_accuracy": 0.2801339328289032,
+            "heldout_accuracy": 0.0,
+            "heldout_loss": 1.4389454126358032,
+            "heldout_correct_probability": 0.23776301741600037
+          }
+        },
+        {
+          "mode": "raw",
+          "seed": 29,
+          "vocabulary_size": 28,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 1.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.5865631103515625,
+            "train_accuracy": 0.2142857164144516,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.4653674364089966,
+            "heldout_correct_probability": 0.2499999701976776
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 6.0470130847534165e-05,
+            "train_accuracy": 1.0,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 2.9072329998016357,
+            "heldout_correct_probability": 0.2499999701976776
+          }
+        },
+        {
+          "mode": "normalized",
+          "seed": 29,
+          "vocabulary_size": 4,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 0.0,
+          "wrong_metadata_accuracy": 0.25,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.3669430017471313,
+            "train_accuracy": 0.5,
+            "heldout_accuracy": 0.5,
+            "heldout_loss": 1.3669432401657104,
+            "heldout_correct_probability": 0.2743978798389435
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 4.3569922127062455e-05,
+            "train_accuracy": 1.0,
+            "heldout_accuracy": 1.0,
+            "heldout_loss": 4.3569922127062455e-05,
+            "heldout_correct_probability": 0.999956488609314
+          }
+        },
+        {
+          "mode": "metadata_only",
+          "seed": 29,
+          "vocabulary_size": 7,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 1.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.4706300497055054,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.4653674364089966,
+            "heldout_correct_probability": 0.2499999701976776
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 1.3862966299057007,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.456653118133545,
+            "heldout_correct_probability": 0.2499999701976776
+          }
+        },
+        {
+          "mode": "shuffled_labels",
+          "seed": 29,
+          "vocabulary_size": 4,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 0.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.4963511228561401,
+            "train_accuracy": 0.2522321343421936,
+            "heldout_accuracy": 0.5,
+            "heldout_loss": 1.3669432401657104,
+            "heldout_correct_probability": 0.2743978798389435
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 1.3820613622665405,
+            "train_accuracy": 0.2756696343421936,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.3492506742477417,
+            "heldout_correct_probability": 0.2600055932998657
+          }
+        }
+      ],
+      "full_metrics_sha256": "53b44cc11618951ceee3b20a3acbab595cd35bd505ac7f3fc99779ff515d3e72"
+    },
+    {
+      "device": "mps",
+      "epochs": 80,
+      "seeds": [
+        7,
+        17,
+        29
+      ],
+      "samples": 1408,
+      "runs": [
+        {
+          "mode": "raw",
+          "seed": 7,
+          "vocabulary_size": 28,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 1.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.5748214721679688,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.5699363946914673,
+            "heldout_correct_probability": 0.25
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 5.768642222392373e-05,
+            "train_accuracy": 1.0,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 2.046813488006592,
+            "heldout_correct_probability": 0.25
+          }
+        },
+        {
+          "mode": "normalized",
+          "seed": 7,
+          "vocabulary_size": 4,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 0.0,
+          "wrong_metadata_accuracy": 0.25,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.5908575057983398,
+            "train_accuracy": 0.5,
+            "heldout_accuracy": 0.5,
+            "heldout_loss": 1.5908575057983398,
+            "heldout_correct_probability": 0.2694273293018341
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 4.660902777686715e-05,
+            "train_accuracy": 1.0,
+            "heldout_accuracy": 1.0,
+            "heldout_loss": 4.660902777686715e-05,
+            "heldout_correct_probability": 0.9999533891677856
+          }
+        },
+        {
+          "mode": "metadata_only",
+          "seed": 7,
+          "vocabulary_size": 7,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 1.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.4997694492340088,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.5699363946914673,
+            "heldout_correct_probability": 0.25
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 1.3862966299057007,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.4508737325668335,
+            "heldout_correct_probability": 0.25
+          }
+        },
+        {
+          "mode": "shuffled_labels",
+          "seed": 7,
+          "vocabulary_size": 4,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 0.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.5504893064498901,
+            "train_accuracy": 0.2488839328289032,
+            "heldout_accuracy": 0.5,
+            "heldout_loss": 1.5908575057983398,
+            "heldout_correct_probability": 0.2694273293018341
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 1.3840007781982422,
+            "train_accuracy": 0.2689732015132904,
+            "heldout_accuracy": 0.5,
+            "heldout_loss": 1.3314213752746582,
+            "heldout_correct_probability": 0.2641267776489258
+          }
+        },
+        {
+          "mode": "raw",
+          "seed": 17,
+          "vocabulary_size": 28,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 1.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.6949704885482788,
+            "train_accuracy": 0.1785714328289032,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.4275846481323242,
+            "heldout_correct_probability": 0.2499999850988388
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 7.093832391547039e-05,
+            "train_accuracy": 1.0,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 2.1644067764282227,
+            "heldout_correct_probability": 0.25
+          }
+        },
+        {
+          "mode": "normalized",
+          "seed": 17,
+          "vocabulary_size": 4,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 0.0,
+          "wrong_metadata_accuracy": 0.25,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.517364740371704,
+            "train_accuracy": 0.0,
+            "heldout_accuracy": 0.0,
+            "heldout_loss": 1.517364740371704,
+            "heldout_correct_probability": 0.22191178798675537
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 6.773799395887181e-05,
+            "train_accuracy": 1.0,
+            "heldout_accuracy": 1.0,
+            "heldout_loss": 6.77379866829142e-05,
+            "heldout_correct_probability": 0.9999322295188904
+          }
+        },
+        {
+          "mode": "metadata_only",
+          "seed": 17,
+          "vocabulary_size": 7,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 1.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.4939625263214111,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.4275846481323242,
+            "heldout_correct_probability": 0.2499999850988388
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 1.3862978219985962,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.3933820724487305,
+            "heldout_correct_probability": 0.25
+          }
+        },
+        {
+          "mode": "shuffled_labels",
+          "seed": 17,
+          "vocabulary_size": 4,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 0.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.4169037342071533,
+            "train_accuracy": 0.2589285671710968,
+            "heldout_accuracy": 0.0,
+            "heldout_loss": 1.517364740371704,
+            "heldout_correct_probability": 0.22191178798675537
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 1.381638765335083,
+            "train_accuracy": 0.2801339328289032,
+            "heldout_accuracy": 0.0,
+            "heldout_loss": 1.4389452934265137,
+            "heldout_correct_probability": 0.23776300251483917
+          }
+        },
+        {
+          "mode": "raw",
+          "seed": 29,
+          "vocabulary_size": 28,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 1.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.5865631103515625,
+            "train_accuracy": 0.2142857164144516,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.4653675556182861,
+            "heldout_correct_probability": 0.25
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 6.047012720955536e-05,
+            "train_accuracy": 1.0,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 2.907233238220215,
+            "heldout_correct_probability": 0.25
+          }
+        },
+        {
+          "mode": "normalized",
+          "seed": 29,
+          "vocabulary_size": 4,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 0.0,
+          "wrong_metadata_accuracy": 0.25,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.366943120956421,
+            "train_accuracy": 0.5,
+            "heldout_accuracy": 0.5,
+            "heldout_loss": 1.366943120956421,
+            "heldout_correct_probability": 0.27439790964126587
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 4.3569922127062455e-05,
+            "train_accuracy": 1.0,
+            "heldout_accuracy": 1.0,
+            "heldout_loss": 4.356992576504126e-05,
+            "heldout_correct_probability": 0.9999564290046692
+          }
+        },
+        {
+          "mode": "metadata_only",
+          "seed": 29,
+          "vocabulary_size": 7,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 1.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.4706300497055054,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.4653675556182861,
+            "heldout_correct_probability": 0.25
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 1.3862966299057007,
+            "train_accuracy": 0.25,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.4566519260406494,
+            "heldout_correct_probability": 0.25
+          }
+        },
+        {
+          "mode": "shuffled_labels",
+          "seed": 29,
+          "vocabulary_size": 4,
+          "parameter_capacity": 29,
+          "heldout_unknown_fraction": 0.0,
+          "checkpoint_reload": true,
+          "first": {
+            "epoch": 0,
+            "train_loss": 1.4963510036468506,
+            "train_accuracy": 0.2522321343421936,
+            "heldout_accuracy": 0.5,
+            "heldout_loss": 1.366943120956421,
+            "heldout_correct_probability": 0.27439790964126587
+          },
+          "final": {
+            "epoch": 80,
+            "train_loss": 1.382061243057251,
+            "train_accuracy": 0.2756696343421936,
+            "heldout_accuracy": 0.25,
+            "heldout_loss": 1.3492507934570312,
+            "heldout_correct_probability": 0.26000553369522095
+          }
+        }
+      ],
+      "full_metrics_sha256": "30cf932b7a8cb9e45729bf7e07764909b8cbefde3035922e15c039ef6882275c"
+    }
+  ]
+}
