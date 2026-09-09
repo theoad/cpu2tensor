@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -16,6 +18,7 @@
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -24,6 +27,7 @@ enum {
     max_pipe_bytes = 256,
     max_command_bytes = 128,
     max_kernel_command_bytes = 4096,
+    max_event_bytes = 1024,
     default_memory_bytes = 4096,
     default_seed = 17,
     default_parallel_timeout_seconds = 30
@@ -31,6 +35,8 @@ enum {
 
 // Guest wall-clock budgets include delays caused by lossless trace backpressure.
 static uint32_t parallel_timeout_seconds = default_parallel_timeout_seconds;
+static bool event_channel_failed = false;
+static int event_channel = STDOUT_FILENO;
 
 struct options {
     bool interactive;
@@ -43,6 +49,107 @@ struct options {
 __attribute__((noinline)) void cpu2tensor_capture_begin(void)
 {
     __asm__ volatile("" ::: "memory");
+}
+
+static bool emit_event(const char *format, ...)
+{
+    if (event_channel_failed) {
+        return false;
+    }
+    char bytes[max_event_bytes];
+    va_list arguments;
+    va_start(arguments, format);
+    const int formatted = vsnprintf(bytes, sizeof(bytes), format, arguments);
+    va_end(arguments);
+    if (formatted <= 0 || (size_t)formatted >= sizeof(bytes)) {
+        event_channel_failed = true;
+        return false;
+    }
+    const size_t size = (size_t)formatted;
+    if (size < 5 || memcmp(bytes, "C2T ", 4) != 0 || bytes[size - 1] != '\n') {
+        event_channel_failed = true;
+        return false;
+    }
+    // POSIX reports EINTR only when write transferred no bytes. A short
+    // positive result is fatal; never append to a truncated protocol stream.
+    // The dedicated adapter UART, not this syscall boundary, excludes printk.
+    ssize_t written;
+    do {
+        written = write(event_channel, bytes, size);
+    } while (written < 0 && errno == EINTR);
+    if (written != (ssize_t)size) {
+        event_channel_failed = true;
+        return false;
+    }
+    return true;
+}
+
+static bool open_event_channel(void)
+{
+    const int descriptor = open("/dev/ttyS1", O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    if (descriptor < 0) {
+        return false;
+    }
+    struct termios settings;
+    const int flags = fcntl(descriptor, F_GETFL);
+    if (tcgetattr(descriptor, &settings) != 0 || flags < 0) {
+        close(descriptor);
+        return false;
+    }
+    settings.c_cflag |= CLOCAL | CREAD;
+    settings.c_iflag &= ~INLCR;
+    settings.c_lflag |= ICANON;
+    settings.c_lflag &= ~(ECHO | ECHONL);
+    if (tcsetattr(descriptor, TCSANOW, &settings) != 0 ||
+        fcntl(descriptor, F_SETFL, flags & ~O_NONBLOCK) != 0) {
+        close(descriptor);
+        return false;
+    }
+    event_channel = descriptor;
+    return true;
+}
+
+enum command_read {
+    command_read_ok,
+    command_read_too_long,
+    command_read_failed
+};
+
+static enum command_read read_command(char *line, size_t capacity)
+{
+    size_t used = 0;
+    while (used + 1 < capacity) {
+        const size_t offset = used;
+        ssize_t size;
+        do {
+            size = read(event_channel, line + used, capacity - 1 - used);
+        } while (size < 0 && errno == EINTR);
+        if (size <= 0) {
+            return command_read_failed;
+        }
+        used += (size_t)size;
+        const char *newline = memchr(line + offset, '\n', (size_t)size);
+        if (newline != NULL) {
+            if (newline != line + used - 1) {
+                return command_read_failed;
+            }
+            line[used] = 0;
+            return command_read_ok;
+        }
+    }
+    char discard[64];
+    for (;;) {
+        ssize_t size;
+        do {
+            size = read(event_channel, discard, sizeof(discard));
+        } while (size < 0 && errno == EINTR);
+        if (size <= 0) {
+            return command_read_failed;
+        }
+        if (memchr(discard, '\n', (size_t)size) != NULL) {
+            return command_read_too_long;
+        }
+    }
 }
 
 static bool parse_number(const char *text, uint32_t limit, uint32_t *value)
@@ -60,11 +167,11 @@ static bool parse_number(const char *text, uint32_t limit, uint32_t *value)
     return true;
 }
 
-static void error_event(uint64_t step, const char *message)
+static bool error_event(uint64_t step, const char *message)
 {
     // Messages are fixed strings without JSON control characters.
-    printf("C2T {\"event\":\"error\",\"step\":%" PRIu64
-           ",\"message\":\"%s\"}\n", step, message);
+    return emit_event("C2T {\"event\":\"error\",\"step\":%" PRIu64
+                      ",\"message\":\"%s\"}\n", step, message);
 }
 
 static uint8_t next_byte(uint32_t *state)
@@ -99,11 +206,10 @@ static bool memory_action(uint64_t step, uint32_t seed, uint32_t count)
         error_event(step, "cannot release guest memory");
         return false;
     }
-    printf("C2T {\"event\":\"result\",\"step\":%" PRIu64
-           ",\"action\":\"memory\",\"seed\":%" PRIu32
-           ",\"bytes\":%" PRIu32 ",\"checksum\":%" PRIu64 "}\n",
-           step, seed, count, checksum);
-    return true;
+    return emit_event("C2T {\"event\":\"result\",\"step\":%" PRIu64
+                      ",\"action\":\"memory\",\"seed\":%" PRIu32
+                      ",\"bytes\":%" PRIu32 ",\"checksum\":%" PRIu64 "}\n",
+                      step, seed, count, checksum);
 }
 
 static bool pipe_action(uint64_t step, uint32_t seed, uint32_t count)
@@ -157,11 +263,10 @@ static bool pipe_action(uint64_t step, uint32_t seed, uint32_t count)
         total += (size_t)size;
     }
     close(descriptors[0]);
-    printf("C2T {\"event\":\"result\",\"step\":%" PRIu64
-           ",\"action\":\"pipe\",\"seed\":%" PRIu32
-           ",\"bytes\":%" PRIu32 ",\"checksum\":%" PRIu64 "}\n",
-           step, seed, count, checksum);
-    return true;
+    return emit_event("C2T {\"event\":\"result\",\"step\":%" PRIu64
+                      ",\"action\":\"pipe\",\"seed\":%" PRIu32
+                      ",\"bytes\":%" PRIu32 ",\"checksum\":%" PRIu64 "}\n",
+                      step, seed, count, checksum);
 }
 
 struct start_gate {
@@ -376,44 +481,45 @@ cleanup:
         error_event(step, error);
         return false;
     }
-    printf("C2T {\"event\":\"result\",\"step\":%" PRIu64
-           ",\"action\":\"parallel\",\"seed\":%" PRIu32
-           ",\"bytes\":%" PRIu32 ",\"cpu0\":%d,\"cpu1\":%d"
-           ",\"checksum0\":%" PRIu64 ",\"checksum1\":%" PRIu64 "}\n",
-           step, seed, count, parent_result.cpu, child_result.cpu,
-           parent_result.checksum, child_result.checksum);
-    return true;
+    return emit_event("C2T {\"event\":\"result\",\"step\":%" PRIu64
+                      ",\"action\":\"parallel\",\"seed\":%" PRIu32
+                      ",\"bytes\":%" PRIu32 ",\"cpu0\":%d,\"cpu1\":%d"
+                      ",\"checksum0\":%" PRIu64 ",\"checksum1\":%" PRIu64 "}\n",
+                      step, seed, count, parent_result.cpu, child_result.cpu,
+                      parent_result.checksum, child_result.checksum);
 }
 
-static void getpid_action(uint64_t step)
+static bool getpid_action(uint64_t step)
 {
-    printf("C2T {\"event\":\"result\",\"step\":%" PRIu64
-           ",\"action\":\"getpid\",\"value\":%jd}\n", step, (intmax_t)getpid());
+    return emit_event("C2T {\"event\":\"result\",\"step\":%" PRIu64
+                      ",\"action\":\"getpid\",\"value\":%jd}\n",
+                      step, (intmax_t)getpid());
 }
 
-static void complete_event(uint64_t steps, bool ok)
+static bool complete_event(uint64_t steps, bool ok)
 {
-    printf("C2T {\"event\":\"complete\",\"steps\":%" PRIu64
-           ",\"ok\":%s}\n", steps, ok ? "true" : "false");
+    return emit_event("C2T {\"event\":\"complete\",\"steps\":%" PRIu64
+                      ",\"ok\":%s}\n", steps, ok ? "true" : "false");
 }
 
 static bool observe(const struct options *options)
 {
-    getpid_action(0);
+    if (!getpid_action(0)) {
+        return false;
+    }
     if (!memory_action(1, options->seed, options->bytes)) {
-        complete_event(1, false);
+        (void)complete_event(1, false);
         return false;
     }
     if (!pipe_action(2, options->seed, max_pipe_bytes)) {
-        complete_event(2, false);
+        (void)complete_event(2, false);
         return false;
     }
     if (!parallel_action(3, options->seed, options->bytes)) {
-        complete_event(3, false);
+        (void)complete_event(3, false);
         return false;
     }
-    complete_event(4, true);
-    return true;
+    return complete_event(4, true);
 }
 
 static bool interact(void)
@@ -421,17 +527,19 @@ static bool interact(void)
     uint64_t step = 0;
     char line[max_command_bytes];
     for (;;) {
-        printf("C2T {\"event\":\"ready\",\"step\":%" PRIu64 "}\n", step);
-        if (fgets(line, sizeof(line), stdin) == NULL) {
-            error_event(step, "guest command input closed");
-            complete_event(step, false);
+        if (!emit_event("C2T {\"event\":\"ready\",\"step\":%" PRIu64 "}\n", step)) {
             return false;
         }
-        if (strchr(line, '\n') == NULL) {
-            int byte;
-            while ((byte = getchar()) != '\n' && byte != EOF) {
+        const enum command_read received = read_command(line, sizeof(line));
+        if (received == command_read_failed) {
+            (void)error_event(step, "guest command input closed");
+            (void)complete_event(step, false);
+            return false;
+        }
+        if (received == command_read_too_long) {
+            if (!error_event(step, "command must fit one short line")) {
+                return false;
             }
-            error_event(step, "command must fit one short line");
             continue;
         }
         char *position = NULL;
@@ -440,11 +548,14 @@ static bool interact(void)
         char *second = strtok_r(NULL, " \t\r\n", &position);
         char *extra = strtok_r(NULL, " \t\r\n", &position);
         if (action != NULL && strcmp(action, "quit") == 0 && first == NULL) {
-            complete_event(step, true);
-            return true;
+            return complete_event(step, true);
         }
         if (action != NULL && strcmp(action, "getpid") == 0 && first == NULL) {
-            getpid_action(step++);
+            if (!getpid_action(step)) {
+                (void)complete_event(step, false);
+                return false;
+            }
+            ++step;
             continue;
         }
         const bool memory = action != NULL && strcmp(action, "memory") == 0;
@@ -456,14 +567,16 @@ static bool interact(void)
         if ((!memory && !pipe && !parallel) || extra != NULL ||
             !parse_number(first, UINT32_MAX, &seed) ||
             !parse_number(second, limit, &count) || count == 0) {
-            error_event(step, "expected getpid, memory/pipe/parallel SEED BYTES, or quit");
+            if (!error_event(step, "expected getpid, memory/pipe/parallel SEED BYTES, or quit")) {
+                return false;
+            }
             continue;
         }
         const bool ok = memory ? memory_action(step, seed, count) :
                         parallel ? parallel_action(step, seed, count) :
                         pipe_action(step, seed, count);
         if (!ok) {
-            complete_event(step, false);
+            (void)complete_event(step, false);
             return false;
         }
         ++step;
@@ -555,19 +668,28 @@ int main(int argc, char **argv)
         fputs("kernel_init: run as guest PID 1, or use --check for the fixed workload\n", stderr);
         return 1;
     }
+    if (!open_event_channel()) {
+        event_channel_failed = true;
+        fputs("kernel_init: cannot open dedicated adapter channel\n", stderr);
+        poweroff();
+    }
     if (!read_options(&options)) {
-        error_event(0, "cannot read valid guest workload options");
-        complete_event(0, false);
+        (void)error_event(0, "cannot read valid guest workload options");
+        (void)complete_event(0, false);
         poweroff();
     }
     cpu2tensor_capture_begin();
-    printf("C2T {\"event\":\"start\",\"mode\":\"%s\",\"seed\":%" PRIu32
-           ",\"bytes\":%" PRIu32 "}\n",
-           options.interactive ? "interactive" : "observe", options.seed, options.bytes);
+    if (!emit_event("C2T {\"event\":\"start\",\"mode\":\"%s\",\"seed\":%" PRIu32
+                    ",\"bytes\":%" PRIu32 "}\n",
+                    options.interactive ? "interactive" : "observe",
+                    options.seed, options.bytes)) {
+        poweroff();
+    }
     if (options.interactive) {
         interact();
     } else {
         observe(&options);
     }
     poweroff();
+    return 0;
 }

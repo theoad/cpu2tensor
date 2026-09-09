@@ -46,7 +46,7 @@ def _entry(
 
 
 def build_initramfs(init: Path, output: Path) -> None:
-    """Include only the supplied ELF init, its console, and a proc directory."""
+    """Include only the supplied ELF init, its serial devices, and proc."""
     data = init.read_bytes()
     if not data.startswith(b"\x7fELF"):
         raise ValueError("The guest init must be a statically linked Linux ELF executable")
@@ -65,8 +65,16 @@ def build_initramfs(init: Path, output: Path) -> None:
                 device_major=5,
                 device_minor=1,
             )
-            _entry(archive, 4, "proc", stat.S_IFDIR | 0o555)
-            _entry(archive, 5, "TRAILER!!!", 0)
+            _entry(
+                archive,
+                4,
+                "dev/ttyS1",
+                stat.S_IFCHR | 0o600,
+                device_major=4,
+                device_minor=65,
+            )
+            _entry(archive, 5, "proc", stat.S_IFDIR | 0o555)
+            _entry(archive, 6, "TRAILER!!!", 0)
 
 
 def main() -> None:

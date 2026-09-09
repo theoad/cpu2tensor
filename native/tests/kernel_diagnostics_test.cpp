@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -36,35 +37,73 @@ static void read_all(int fd, void* output, size_t size) {
     }
 }
 
+static void answer_qmp_command(int qmp) {
+    Lines lines;
+    while (lines.line_size() == 0) assert(lines.read_from(qmp).ok() && !lines.eof);
+    const Json command(lines.bytes, lines.line_size());
+    assert(command.value != nullptr);
+    char response[64];
+    const int size = std::snprintf(response, sizeof(response), "{\"return\":{},\"id\":%d}\n",
+                                   json_object_get_int(command.get("id")));
+    write_all(qmp, response, static_cast<size_t>(size));
+}
+
 // A protocol fixture, not QEMU: negotiate startup, then send one chosen serial
 // record. Remaining alive lets the test verify the worker owns child cleanup.
 static int producer(int argc, char** argv) {
+    const char* control_field = std::strstr(argv[2], ",control=");
+    assert(control_field != nullptr);
     const int trace = std::atoi(std::strstr(argv[2], ",fd=") + 4);
-    int serial = -1, qmp = -1;
+    const int control = std::atoi(control_field + std::strlen(",control="));
+    const char* record = argv[argc - 1];
+    int console = -1, serial = -1, qmp = -1;
+    int console_index = -1, serial_index = -1;
     for (int i = 1; i < argc; ++i) {
+        if (std::strstr(argv[i], "socket,id=c2tconsole,fd=") == argv[i])
+            console = std::atoi(std::strstr(argv[i], ",fd=") + 4);
         if (std::strstr(argv[i], "socket,id=c2tserial,fd=") == argv[i])
             serial = std::atoi(std::strstr(argv[i], ",fd=") + 4);
         if (std::strstr(argv[i], "socket,id=c2tqmp,fd=") == argv[i])
             qmp = std::atoi(std::strstr(argv[i], ",fd=") + 4);
+        if (std::strcmp(argv[i], "chardev:c2tconsole") == 0) console_index = i;
+        if (std::strcmp(argv[i], "chardev:c2tserial") == 0) serial_index = i;
     }
-    assert(serial >= 0 && qmp >= 0);
+    assert(console >= 0 && serial >= 0 && qmp >= 0);
+    assert(console_index >= 0 && console_index < serial_index);
     std::fprintf(stderr, "fixture-child:%d\n", getpid());
+    constexpr char diagnostic[] = "C2T {\"event\":\"console-only-diagnostic\"}\n";
+    write_all(console, diagnostic, sizeof(diagnostic) - 1);
     uint8_t header[header_bytes];
     encode_header(header, {Kind::hello, 0, 0, 0, 2 | feature_system | feature_kernel});
     write_all(trace, reinterpret_cast<const char*>(header), sizeof(header));
     constexpr char greeting[] = "{\"QMP\":{}}\n";
     write_all(qmp, greeting, sizeof(greeting) - 1);
-    for (int i = 0; i < 2; ++i) {
-        Lines lines;
-        while (lines.line_size() == 0) assert(lines.read_from(qmp).ok() && !lines.eof);
-        const Json command(lines.bytes, lines.line_size());
-        assert(command.value != nullptr);
-        char response[64];
-        const int size = std::snprintf(response, sizeof(response), "{\"return\":{},\"id\":%d}\n",
-                                       json_object_get_int(command.get("id")));
-        write_all(qmp, response, static_cast<size_t>(size));
+    answer_qmp_command(qmp);
+    answer_qmp_command(qmp);
+    if (std::strcmp(record, "action-routing") == 0) {
+        constexpr char events[] =
+            "C2T {\"event\":\"start\",\"mode\":\"interactive\"}\n"
+            "C2T {\"event\":\"ready\",\"step\":0}\n";
+        write_all(serial, events, sizeof(events) - 1);
+        answer_qmp_command(qmp);
+        char drain;
+        read_all(control, &drain, 1);
+        assert(drain == 'D');
+        encode_header(header, {Kind::kernel_request, 0, 0, 0, 127});
+        write_all(trace, reinterpret_cast<const char*>(header), sizeof(header));
+        pollfd channels[] = {{serial, POLLIN, 0}, {console, POLLIN, 0}};
+        assert(poll(channels, 2, 2000) == 1);
+        assert(channels[0].revents & POLLIN);
+        assert(!(channels[1].revents & POLLIN));
+        char action[7];
+        read_all(serial, action, sizeof(action));
+        assert(std::memcmp(action, "getpid\n", sizeof(action)) == 0);
+        std::fprintf(stderr, "fixture-action:on-adapter\n");
+        constexpr char result[] =
+            "C2T {\"event\":\"result\",\"step\":0,\"action\":\"getpid\",\"value\":1}\n";
+        write_all(serial, result, sizeof(result) - 1);
+        for (;;) pause();
     }
-    const char* record = argv[argc - 1];
     if (std::strcmp(record, "oversize") == 0) {
         char bytes[event_capacity + 16];
         std::memset(bytes, 'x', sizeof(bytes));
@@ -200,6 +239,7 @@ static void check_recovered_printk_suffix(const char* self) {
     int status;
     assert(waitpid(worker, &status, 0) == worker);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(std::strstr(output, "C2T {\"event\":\"console-only-diagnostic\"}") != nullptr);
     assert(std::strstr(output, "guest-event suffix class=kernel-printk") != nullptr);
     assert(std::strstr(output, "[    6.795768] input: ImExPS/2 Generic Explorer Mouse") !=
            nullptr);
@@ -211,10 +251,89 @@ static void check_recovered_printk_suffix(const char* self) {
     assert(kill(child, 0) == -1 && errno == ESRCH);
 }
 
+static void check_action_uses_adapter_channel(const char* self) {
+    int logs[2];
+    assert(pipe(logs) == 0);
+    const int listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    assert(bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    assert(listen(listener, 1) == 0);
+    socklen_t length = sizeof(address);
+    assert(getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length) == 0);
+    const pid_t worker = fork();
+    assert(worker >= 0);
+    if (worker == 0) {
+        close(logs[0]);
+        assert(dup2(logs[1], STDERR_FILENO) >= 0);
+        close(logs[1]);
+        char* arguments[] = {const_cast<char*>("action-routing"), nullptr};
+        const KernelOptions options{self, "/unused-plugin", "none", "off", "off", "auto",
+                                    nullptr, "legacy", "pipe", 2000, arguments};
+        const auto result = run_kernel(options, listener);
+        if (!result.ok()) std::fprintf(stderr, "worker-error:%s\n", result.error());
+        _exit(result.ok() ? 0 : 1);
+    }
+    close(logs[1]);
+    close(listener);
+    const int client = socket(AF_INET, SOCK_STREAM, 0);
+    assert(client >= 0);
+    assert(connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+
+    bool action_sent = false;
+    bool result_seen = false;
+    while (!result_seen) {
+        uint8_t encoded[header_bytes];
+        read_all(client, encoded, sizeof(encoded));
+        const auto decoded = decode_header(encoded, sizeof(encoded));
+        assert(decoded.ok());
+        const auto size = payload_size(decoded.value());
+        assert(size <= event_capacity);
+        char payload[event_capacity + 1]{};
+        if (size != 0) read_all(client, payload, size);
+        if (decoded.value().kind == Kind::kernel_request) {
+            assert(!action_sent && decoded.value().detail == 127);
+            uint8_t action[4 + 7];
+            store_u32(action, 7);
+            std::memcpy(action + 4, "getpid\n", 7);
+            write_all(client, reinterpret_cast<const char*>(action), sizeof(action));
+            action_sent = true;
+        } else if (decoded.value().kind == Kind::guest_event &&
+                   std::strstr(payload, "\"event\":\"result\"") != nullptr) {
+            assert(std::strstr(payload, "\"action\":\"getpid\"") != nullptr);
+            result_seen = true;
+        }
+    }
+    assert(action_sent);
+    close(client);
+
+    char output[8192]{};
+    size_t used = 0;
+    ssize_t count;
+    while ((count = read(logs[0], output + used, sizeof(output) - 1 - used)) > 0) {
+        used += static_cast<size_t>(count);
+        assert(used < sizeof(output) - 1);
+    }
+    assert(count == 0);
+    close(logs[0]);
+    int status;
+    assert(waitpid(worker, &status, 0) == worker);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(std::strstr(output, "fixture-action:on-adapter") != nullptr);
+    const char* child_line = std::strstr(output, "fixture-child:");
+    assert(child_line != nullptr);
+    const pid_t child = std::atoi(child_line + std::strlen("fixture-child:"));
+    assert(child > 0);
+    assert(kill(child, 0) == -1 && errno == ESRCH);
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "-plugin") == 0) return producer(argc, argv);
     alarm(30);
     check_recovered_printk_suffix(argv[0]);
+    check_action_uses_adapter_channel(argv[0]);
     check_failure(argv[0], "C2T {broken}\n", "reason=malformed-json");
     check_failure(argv[0], "C2T {\n", "reason=incomplete-json");
     check_failure(argv[0], "C2T []\n", "reason=non-object-json");
