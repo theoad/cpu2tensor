@@ -339,22 +339,26 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
             }
         }
         while (const size_t size = serial_lines.line_size()) {
+            bool log_complete_line = true;
             if (size >= 4 && std::memcmp(serial_lines.bytes, "C2T ", 4) == 0) {
                 const char* bytes = serial_lines.bytes + 4;
                 size_t length = size - 4;
                 while (length > 0 && (bytes[length - 1] == '\n' || bytes[length - 1] == '\r')) --length;
+                const auto payload = split_guest_payload(bytes, length);
                 const auto fail_event = [&](const char* reason, const char* error, const Json* event = nullptr) {
                     log_guest_failure(stderr, reason, bytes, length, event);
                     std::fprintf(stderr, "cpu2tensor: guest-event state hello=%d started=%d requested=%d draining=%d complete=%d pending_qmp=%d\n",
                                  hello, guest_started, requested, draining, guest_complete, pending);
                     return Result<bool>::failure(error);
                 };
-                if (length == 0 || length > event_capacity)
+                if (payload.json_size == 0 || payload.json_size > event_capacity)
                     return fail_event("payload-size", "Invalid guest event size or ordering");
                 if (!hello) return fail_event("before-plugin-hello", "Invalid guest event size or ordering");
-                const Json event(bytes, length);
+                const Json event(bytes, payload.json_size);
                 if (event.event_problem() != nullptr)
                     return fail_event(event.event_problem(), "Invalid guest adapter event", &event);
+                if (payload.suffix == GuestSuffix::invalid)
+                    return fail_event("unexpected-event-suffix", "Invalid guest adapter event", &event);
                 const char* name = string_value(event.get("event"));
                 if (std::strcmp(name, "start") == 0) {
                     if (guest_started) return fail_event("repeated-start", "Guest reboot or repeated adapter start is unsupported", &event);
@@ -370,14 +374,20 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
                 } else if (std::strcmp(name, "result") != 0 && std::strcmp(name, "error") != 0)
                     return fail_event("unknown-event-name", "Unknown guest adapter event", &event);
                 uint8_t event_frame[header_bytes + event_capacity];
-                const Header header{Kind::guest_event, 0, 0, 0, length};
+                const Header header{Kind::guest_event, 0, 0, 0, payload.json_size};
                 encode_header(event_frame, header);
-                std::memcpy(event_frame + header_bytes, bytes, length);
-                const auto sent = send_bytes(client.value, event_frame, header_bytes + length, options.timeout_ms);
+                std::memcpy(event_frame + header_bytes, bytes, payload.json_size);
+                if (payload.suffix == GuestSuffix::kernel_printk) {
+                    log_guest_suffix(stderr, bytes + payload.suffix_offset, payload.suffix_size);
+                    log_complete_line = false;
+                }
+                const auto sent = send_bytes(client.value, event_frame,
+                                             header_bytes + payload.json_size,
+                                             options.timeout_ms);
                 if (!sent.ok() || sent.value()) return sent;
             }
             // Boot diagnostics stay in the worker log, never in model tensors.
-            std::fwrite(serial_lines.bytes, 1, size, stderr);
+            if (log_complete_line) std::fwrite(serial_lines.bytes, 1, size, stderr);
             serial_lines.consume(size);
             deadline = now_ms() + options.timeout_ms;
         }

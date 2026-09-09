@@ -25,7 +25,18 @@ static void write_all(int fd, const char* bytes, size_t size) {
     }
 }
 
-// A protocol fixture, not QEMU: negotiate startup, then send one bad serial
+static void read_all(int fd, void* output, size_t size) {
+    auto* bytes = static_cast<uint8_t*>(output);
+    while (size != 0) {
+        const auto count = read(fd, bytes, size);
+        if (count < 0 && errno == EINTR) continue;
+        assert(count > 0);
+        bytes += count;
+        size -= static_cast<size_t>(count);
+    }
+}
+
+// A protocol fixture, not QEMU: negotiate startup, then send one chosen serial
 // record. Remaining alive lets the test verify the worker owns child cleanup.
 static int producer(int argc, char** argv) {
     const int trace = std::atoi(std::strstr(argv[2], ",fd=") + 4);
@@ -126,9 +137,84 @@ static void check_failure(const char* self, const char* record, const char* reas
     assert(kill(child, 0) == -1 && errno == ESRCH);
 }
 
+static void check_recovered_printk_suffix(const char* self) {
+    constexpr char payload[] =
+        "{\"event\":\"result\",\"step\":2,\"action\":\"getpid\",\"value\":1}";
+    constexpr char record[] =
+        "C2T {\"event\":\"result\",\"step\":2,\"action\":\"getpid\",\"value\":1}"
+        "[    6.795768] input: ImExPS/2 Generic Explorer Mouse as "
+        "/devices/platform/i8042/serio1/input/input3\n";
+    int logs[2];
+    assert(pipe(logs) == 0);
+    const int listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    assert(bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    assert(listen(listener, 1) == 0);
+    socklen_t length = sizeof(address);
+    assert(getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length) == 0);
+    const pid_t worker = fork();
+    assert(worker >= 0);
+    if (worker == 0) {
+        close(logs[0]);
+        assert(dup2(logs[1], STDERR_FILENO) >= 0);
+        close(logs[1]);
+        char* arguments[] = {const_cast<char*>(record), nullptr};
+        const KernelOptions options{self, "/unused-plugin", "none", "off", "off", "auto",
+                                    nullptr, "legacy", "pipe", 2000, arguments};
+        const auto result = run_kernel(options, listener);
+        if (!result.ok()) std::fprintf(stderr, "worker-error:%s\n", result.error());
+        _exit(result.ok() ? 0 : 1);
+    }
+    close(logs[1]);
+    close(listener);
+    const int client = socket(AF_INET, SOCK_STREAM, 0);
+    assert(client >= 0);
+    assert(connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+
+    uint8_t header_bytes_buffer[header_bytes];
+    read_all(client, header_bytes_buffer, sizeof(header_bytes_buffer));
+    auto decoded = decode_header(header_bytes_buffer, sizeof(header_bytes_buffer));
+    assert(decoded.ok() && decoded.value().kind == Kind::hello);
+    assert(payload_size(decoded.value()) == 0);
+    read_all(client, header_bytes_buffer, sizeof(header_bytes_buffer));
+    decoded = decode_header(header_bytes_buffer, sizeof(header_bytes_buffer));
+    assert(decoded.ok() && decoded.value().kind == Kind::guest_event);
+    assert(payload_size(decoded.value()) == sizeof(payload) - 1);
+    char forwarded[sizeof(payload)]{};
+    read_all(client, forwarded, sizeof(payload) - 1);
+    assert(std::strcmp(forwarded, payload) == 0);
+    close(client);
+
+    char output[8192]{};
+    size_t used = 0;
+    ssize_t count;
+    while ((count = read(logs[0], output + used, sizeof(output) - 1 - used)) > 0) {
+        used += static_cast<size_t>(count);
+        assert(used < sizeof(output) - 1);
+    }
+    assert(count == 0);
+    close(logs[0]);
+    int status;
+    assert(waitpid(worker, &status, 0) == worker);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(std::strstr(output, "guest-event suffix class=kernel-printk") != nullptr);
+    assert(std::strstr(output, "[    6.795768] input: ImExPS/2 Generic Explorer Mouse") !=
+           nullptr);
+    assert(std::strstr(output, payload) == nullptr);
+    const char* child_line = std::strstr(output, "fixture-child:");
+    assert(child_line != nullptr);
+    const pid_t child = std::atoi(child_line + std::strlen("fixture-child:"));
+    assert(child > 0);
+    assert(kill(child, 0) == -1 && errno == ESRCH);
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "-plugin") == 0) return producer(argc, argv);
     alarm(30);
+    check_recovered_printk_suffix(argv[0]);
     check_failure(argv[0], "C2T {broken}\n", "reason=malformed-json");
     check_failure(argv[0], "C2T {\n", "reason=incomplete-json");
     check_failure(argv[0], "C2T []\n", "reason=non-object-json");
@@ -137,6 +223,11 @@ int main(int argc, char** argv) {
     check_failure(argv[0], "C2T {\"event\":\"ready\\u0000extra\"}\n", "reason=embedded-null-event-field");
     check_failure(argv[0], "C2T {\"event\":\"unknown\"}\n", "reason=unknown-event-name");
     check_failure(argv[0], "C2T {\"event\":\"ready\"}\n", "reason=unexpected-ready");
+    check_failure(argv[0], "C2T {\"event\":\"result\"}garbage\n",
+                  "reason=unexpected-event-suffix");
+    check_failure(argv[0],
+                  "C2T {\"event\":\"result\"}C2T {\"event\":\"ready\"}\n",
+                  "reason=unexpected-event-suffix");
     check_failure(argv[0], "oversize", "reason=payload-size");
     check_failure(argv[0], "unterminated", "reason=unterminated-serial-line");
 }

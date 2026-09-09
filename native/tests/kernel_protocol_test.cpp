@@ -129,8 +129,57 @@ static void test_fragmented_and_coalesced_lines() {
     close(descriptors[0]);
 }
 
+static void test_guest_payload_framing() {
+    constexpr char json[] =
+        "{\"event\":\"result\",\"step\":2,\"action\":\"getpid\",\"value\":1}";
+    constexpr char printk[] =
+        "[    6.795768] input: ImExPS/2 Generic Explorer Mouse as "
+        "/devices/platform/i8042/serio1/input/input3";
+    char observed[sizeof(json) + sizeof(printk) - 1];
+    std::memcpy(observed, json, sizeof(json) - 1);
+    std::memcpy(observed + sizeof(json) - 1, printk, sizeof(printk));
+    const auto recovered = split_guest_payload(observed, sizeof(observed) - 1);
+    assert(recovered.json_size == sizeof(json) - 1);
+    assert(recovered.suffix == GuestSuffix::kernel_printk);
+    assert(recovered.suffix_offset == sizeof(json) - 1);
+    assert(recovered.suffix_size == sizeof(printk) - 1);
+    const Json event(observed, recovered.json_size);
+    assert(event.event_problem() == nullptr);
+
+    constexpr char nested[] =
+        "{\"event\":\"result\",\"nested\":{\"text\":\"} C2T \\\" [\"}}"
+        "[0.000001] nested braces stayed inside the JSON string";
+    const auto nested_split = split_guest_payload(nested, sizeof(nested) - 1);
+    const Json nested_event(nested, nested_split.json_size);
+    assert(nested_event.event_problem() == nullptr);
+    assert(nested_split.suffix == GuestSuffix::kernel_printk);
+
+    constexpr char arbitrary[] = "{\"event\":\"result\"}garbage";
+    assert(split_guest_payload(arbitrary, sizeof(arbitrary) - 1).suffix ==
+           GuestSuffix::invalid);
+    constexpr char second[] =
+        "{\"event\":\"result\"}C2T {\"event\":\"ready\"}";
+    assert(split_guest_payload(second, sizeof(second) - 1).suffix == GuestSuffix::invalid);
+    constexpr char hidden_second[] =
+        "{\"event\":\"result\"}[0.000001] message contains C2T {\"event\":\"ready\"}";
+    assert(split_guest_payload(hidden_second, sizeof(hidden_second) - 1).suffix ==
+           GuestSuffix::invalid);
+    constexpr char empty_printk[] = "{\"event\":\"result\"}[0.000001] ";
+    assert(split_guest_payload(empty_printk, sizeof(empty_printk) - 1).suffix ==
+           GuestSuffix::invalid);
+    constexpr char malformed[] = "{broken}[0.000001] diagnostic";
+    const auto malformed_split = split_guest_payload(malformed, sizeof(malformed) - 1);
+    const Json malformed_event(malformed, malformed_split.json_size);
+    assert(malformed_event.event_problem() != nullptr);
+    constexpr char ordinary[] = "{\"event\":\"result\"}\t ";
+    const auto ordinary_split = split_guest_payload(ordinary, sizeof(ordinary) - 1);
+    assert(ordinary_split.json_size == sizeof(ordinary) - 1);
+    assert(ordinary_split.suffix == GuestSuffix::none);
+}
+
 int main() {
     test_json_classification();
     test_escaped_diagnostic();
     test_fragmented_and_coalesced_lines();
+    test_guest_payload_framing();
 }
