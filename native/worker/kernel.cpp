@@ -22,6 +22,7 @@ namespace cpu2tensor {
 namespace {
 using namespace kernel_protocol;
 constexpr size_t argument_capacity = 256;
+constexpr size_t console_chunk_capacity = 4096;
 constexpr int socket_capacity = 65536;
 
 int64_t now_ms() {
@@ -171,12 +172,18 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
         return Result<bool>::failure("Cannot create QMP channel");
     const Fd qmp(qmp_pair[0]);
     Fd qmp_guest(qmp_pair[1]);
+    int console_pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, console_pair) != 0)
+        return Result<bool>::failure("Cannot create guest console channel");
+    const Fd console(console_pair[0]);
+    Fd console_guest(console_pair[1]);
     int serial_pair[2];
     if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, serial_pair) != 0)
         return Result<bool>::failure("Cannot create guest serial channel");
     const Fd serial(serial_pair[0]);
     Fd serial_guest(serial_pair[1]);
-    if (!nonblocking(trace_read.value).ok() || !nonblocking(qmp.value).ok() || !nonblocking(serial.value).ok())
+    if (!nonblocking(trace_read.value).ok() || !nonblocking(qmp.value).ok() ||
+        !nonblocking(console.value).ok() || !nonblocking(serial.value).ok())
         return Result<bool>::failure("Cannot configure kernel channels");
     char plugin[PATH_MAX + 256];
     const int length = std::snprintf(plugin, sizeof(plugin), "%s,fd=%d,control=%d,kernel=on,registers=%s,memory=%s,values=%s,context=%s,batching=%s,publication=%s%s%s",
@@ -184,12 +191,17 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
         options.batching, options.publication,
         options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc);
     if (length < 0 || static_cast<size_t>(length) >= sizeof(plugin)) return Result<bool>::failure("Kernel plugin options too long");
-    char qmp_spec[128], serial_spec[128];
+    char qmp_spec[128], console_spec[128], serial_spec[128];
     std::snprintf(qmp_spec, sizeof(qmp_spec), "socket,id=c2tqmp,fd=%d", qmp_guest.value);
+    std::snprintf(console_spec, sizeof(console_spec), "socket,id=c2tconsole,fd=%d", console_guest.value);
     std::snprintf(serial_spec, sizeof(serial_spec), "socket,id=c2tserial,fd=%d", serial_guest.value);
     char* arguments[argument_capacity]{};
     const char* fixed[] = {options.qemu, "-plugin", plugin, "-chardev", qmp_spec, "-mon", "chardev=c2tqmp,mode=control",
-                          "-chardev", serial_spec, "-serial", "chardev:c2tserial", "-display", "none", "-monitor", "none", "-S"};
+                          // Ordered ISA serial devices make ttyS0 diagnostics and
+                          // ttyS1 the adapter-only protocol transport.
+                          "-chardev", console_spec, "-serial", "chardev:c2tconsole",
+                          "-chardev", serial_spec, "-serial", "chardev:c2tserial",
+                          "-display", "none", "-monitor", "none", "-S"};
     size_t count = 0;
     for (const char* value : fixed) arguments[count++] = const_cast<char*>(value);
     for (size_t i = 0; options.arguments[i] != nullptr; ++i) {
@@ -200,7 +212,8 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
     const auto pid = fork();
     if (pid == 0) {
         if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != parent || setpgid(0, 0) != 0) _exit(126);
-        const int inherited[] = {trace_write.value, control_read.value, qmp_guest.value, serial_guest.value};
+        const int inherited[] = {trace_write.value, control_read.value, qmp_guest.value,
+                                 console_guest.value, serial_guest.value};
         for (int fd : inherited) if (fcntl(fd, F_SETFD, 0) < 0) _exit(126);
         const int empty = open("/dev/null", O_RDONLY);
         if (empty < 0 || dup2(empty, STDIN_FILENO) < 0) _exit(126);
@@ -209,21 +222,22 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
     }
     if (pid < 0) return Result<bool>::failure("Cannot start system QEMU");
     Process process(pid);
-    Fd* child_fds[] = {&trace_write, &control_read, &qmp_guest, &serial_guest};
+    Fd* child_fds[] = {&trace_write, &control_read, &qmp_guest, &console_guest, &serial_guest};
     for (auto* fd : child_fds) { close(fd->value); fd->value = -1; }
     Stream stream;
     Lines qmp_lines, serial_lines;
     uint8_t frame[max_frame_bytes];
     size_t frame_used = 0, frame_needed = header_bytes;
     bool hello = false, greeting = false, requested = false, draining = false;
-    bool seal = false, trace_eof = false, guest_complete = false, child_done = false;
+    bool seal = false, trace_eof = false, console_eof = false;
+    bool guest_complete = false, child_done = false;
     bool guest_started = false;
     int child_status = 0, pending = 0, next_id = 1;
     enum class Command { none, capabilities, resume, stop } command = Command::none;
     auto deadline = now_ms() + options.timeout_ms;
     int64_t control_deadline = 0;
     for (;;) {
-        if (seal && trace_eof && child_done && serial_lines.eof) {
+        if (seal && trace_eof && child_done && console_eof && serial_lines.eof) {
             if (serial_lines.used != 0 || !guest_complete)
                 return Result<bool>::failure("Guest exited without a successful adapter completion");
             if (!WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0)
@@ -237,13 +251,16 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
         if (remaining <= 0) return Result<bool>::failure("Kernel run timed out before capture or action boundary");
         if (control_deadline != 0 && now_ms() >= control_deadline)
             return Result<bool>::failure("Kernel QMP command or trace drain timed out");
-        pollfd watches[] = {{trace_eof ? -1 : trace_read.value, POLLIN, 0}, {qmp_lines.eof ? -1 : qmp.value, POLLIN, 0},
-                            {serial_lines.eof ? -1 : serial.value, POLLIN, 0}, {client.value, POLLIN | POLLRDHUP, 0}};
-        const int ready = poll(watches, 4, static_cast<int>(remaining > 100 ? 100 : remaining));
+        pollfd watches[] = {{trace_eof ? -1 : trace_read.value, POLLIN, 0},
+                            {qmp_lines.eof ? -1 : qmp.value, POLLIN, 0},
+                            {serial_lines.eof ? -1 : serial.value, POLLIN, 0},
+                            {console_eof ? -1 : console.value, POLLIN, 0},
+                            {client.value, POLLIN | POLLRDHUP, 0}};
+        const int ready = poll(watches, 5, static_cast<int>(remaining > 100 ? 100 : remaining));
         if (ready < 0 && errno == EINTR) continue;
         if (ready < 0) return Result<bool>::failure("Cannot poll kernel channels");
-        if (watches[3].revents & (POLLRDHUP | POLLHUP | POLLERR)) return Result<bool>::success(true);
-        if (watches[3].revents & POLLIN) return Result<bool>::failure("Kernel action arrived before a paused boundary");
+        if (watches[4].revents & (POLLRDHUP | POLLHUP | POLLERR)) return Result<bool>::success(true);
+        if (watches[4].revents & POLLIN) return Result<bool>::failure("Kernel action arrived before a paused boundary");
         if (watches[0].revents && !trace_eof) {
             const auto read_count = read(trace_read.value, frame + frame_used, frame_needed - frame_used);
             if (read_count > 0) { frame_used += static_cast<size_t>(read_count); deadline = now_ms() + options.timeout_ms; }
@@ -326,6 +343,17 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
             } else if (message.get("event") == nullptr) return Result<bool>::failure("Unknown QMP message");
             qmp_lines.consume(size);
             deadline = now_ms() + options.timeout_ms;
+        }
+        if (watches[3].revents && !console_eof) {
+            char bytes[console_chunk_capacity];
+            const auto count = read(console.value, bytes, sizeof(bytes));
+            if (count > 0) {
+                // Console diagnostics are a separate raw stream. They never
+                // enter adapter framing or extend the protocol deadline.
+                std::fwrite(bytes, 1, static_cast<size_t>(count), stderr);
+            } else if (count == 0) console_eof = true;
+            else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+                return Result<bool>::failure("Cannot read guest console channel");
         }
         if (watches[2].revents && !serial_lines.eof) {
             const auto read_result = serial_lines.read_from(serial.value);
