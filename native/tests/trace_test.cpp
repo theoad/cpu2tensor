@@ -30,6 +30,49 @@ int main() {
     assert(load_u64(bytes) == UINT64_MAX);
     store_u64(bytes, uint64_t{1} << 63);
     assert(load_u64(bytes) == uint64_t{1} << 63);
+    assert(payload_size({Kind::hello}) == 0);
+
+    // Exercise every accepted compound frame shape as well as combinations
+    // that would give a client ambiguous trace semantics.
+    encode_header(bytes, {Kind::mixed, 0, 1, 0, 16});
+    assert(decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::executable_layout, 0, 1, 0, layout_bytes});
+    assert(decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::transition_window, 0, 1, 1, transition_window_bytes});
+    assert(decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::memory, 0, 1, 0, 24});
+    assert(decode_header(bytes, sizeof(bytes)).ok());
+
+    encode_header(bytes, {Kind::input_request, 1, 0, 0, 1});
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::complete, 1, 0, 0, 0});
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::hello, 0, 0, 0,
+                          2 | feature_system | feature_memory | feature_system_memory});
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::hello, 0, 0, 0, 2 | feature_address_context});
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::hello, 0, 0, 0,
+                          2 | feature_system | feature_registers});
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::hello, 0, 0, 0, 2 | feature_transition_windows});
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {static_cast<Kind>(UINT16_MAX), 0, 0, 0, 0});
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+
+    Stream disabled_adapter;
+    assert(disabled_adapter.accept({Kind::hello, 0, 0, 0, 2}).ok());
+    assert(!disabled_adapter.accept({Kind::kernel_request, 0, 0, 0, 1}).ok());
+    Stream missing_guest_event;
+    assert(missing_guest_event.accept({Kind::hello, 0, 0, 0,
+                                       2 | feature_system | feature_kernel}).ok());
+    assert(!missing_guest_event.accept({Kind::guest_event, 0, 0, 0, 1}).ok());
+    Stream multi_source_stdio;
+    assert(multi_source_stdio.accept({Kind::hello, 0, 0, 0, 1 | feature_stdio}).ok());
+    assert(!multi_source_stdio.accept({Kind::blocks, 1, 1, 0, 0}).ok());
+    Stream disabled_stdio;
+    assert(disabled_stdio.accept({Kind::hello, 0, 0, 0, 1}).ok());
+    assert(!disabled_stdio.accept({Kind::input_request, 0, 0, 0, 1}).ok());
 
     Stream stream;
     assert(!stream.accept(batch).ok());
@@ -160,6 +203,37 @@ int main() {
     assert(duplicate_rows.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
     assert(!duplicate_rows.accept({Kind::block_transitions, 0, 2, 1,
                                    sizeof(duplicate)}, duplicate).ok());
+
+    // More than 256 distinct rows grows the validation table. Split them at
+    // the wire payload limit to also prove uniqueness spans frame boundaries.
+    constexpr uint32_t first_rows = max_payload_bytes / transition_count_bytes;
+    constexpr uint32_t second_rows = 257 - first_rows;
+    uint8_t first_transitions[first_rows * transition_count_bytes];
+    uint8_t second_transitions[second_rows * transition_count_bytes];
+    for (uint32_t row = 0; row < 257; ++row) {
+        uint8_t* item = row < first_rows ?
+            first_transitions + row * transition_count_bytes :
+            second_transitions + (row - first_rows) * transition_count_bytes;
+        store_u64(item, 1000 + row);
+        store_u64(item + 8, 2000 + row);
+        store_u64(item + 16, 1);
+    }
+    Stream grown_transition_table;
+    assert(grown_transition_table.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                                          feature_kernel | feature_transition_windows}).ok());
+    assert(grown_transition_table.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    assert(grown_transition_table.accept({Kind::block_transitions, 0, first_rows, 1,
+                                          sizeof(first_transitions)}, first_transitions).ok());
+    assert(grown_transition_table.accept({Kind::block_transitions, 0, second_rows, 1,
+                                          sizeof(second_transitions)}, second_transitions).ok());
+    uint8_t grown_summary[transition_window_bytes]{};
+    store_u32(grown_summary, static_cast<uint32_t>(WindowStatus::ended));
+    store_u32(grown_summary + 4, 1);
+    store_u32(grown_summary + 8, 512);
+    store_u64(grown_summary + 16, 257);
+    store_u64(grown_summary + 24, 257);
+    assert(grown_transition_table.accept({Kind::transition_window, 0, 1, 1,
+                                          transition_window_bytes}, grown_summary).ok());
 
     uint8_t too_many_rows[transition_count_bytes * 3];
     for (uint32_t row = 0; row < 3; ++row) {

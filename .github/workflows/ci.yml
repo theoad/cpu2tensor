@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests and selected system tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      coverage: ${{ steps.coverage.outputs.value }}
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build the pinned test image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ci/Dockerfile
+          load: true
+          tags: cpu2tensor-ci:local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run unit tests with coverage
+        run: |
+          mkdir -p "$RUNNER_TEMP/cpu2tensor-coverage"
+          docker run --rm \
+            --env CPU2TENSOR_COVERAGE_DIR=/coverage \
+            --volume "$PWD:/workspace" \
+            --volume "$RUNNER_TEMP/cpu2tensor-coverage:/coverage" \
+            cpu2tensor-ci:local \
+            ./ci/run-unit-tests.sh
+
+      - name: Read combined coverage
+        id: coverage
+        run: echo "value=$(cat "$RUNNER_TEMP/cpu2tensor-coverage/total.txt")" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether system tests are required
+        id: system
+        env:
+          TESTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: ./ci/should-run-system-tests.sh "$GITHUB_EVENT_NAME" "$TESTED_COMMIT" "$GITHUB_OUTPUT"
+
+      - name: Run real local worker system tests
+        if: steps.system.outputs.run == 'true'
+        run: >-
+          docker run --rm
+          --volume "$PWD:/workspace"
+          cpu2tensor-ci:local
+          ./ci/run-system-tests.sh
+
+  badge:
+    name: Update coverage badge
+    needs: test
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the badge branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ci-badges
+
+      - name: Write the latest successful coverage
+        env:
+          COVERAGE: ${{ needs.test.outputs.coverage }}
+        run: |
+          [[ "$COVERAGE" =~ ^[0-9]+\.[0-9]$ ]]
+          cat > coverage.svg <<EOF
+          <svg xmlns="http://www.w3.org/2000/svg" width="120" height="20" role="img" aria-label="coverage: ${COVERAGE}%">
+            <title>coverage: ${COVERAGE}%</title>
+            <linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient>
+            <clipPath id="r"><rect width="120" height="20" rx="3"/></clipPath>
+            <g clip-path="url(#r)"><rect width="70" height="20" fill="#555"/><rect x="70" width="50" height="20" fill="#4c1"/><rect width="120" height="20" fill="url(#s)"/></g>
+            <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
+              <text x="35" y="15" fill="#010101" fill-opacity=".3">coverage</text><text x="35" y="14">coverage</text>
+              <text x="95" y="15" fill="#010101" fill-opacity=".3">${COVERAGE}%</text><text x="95" y="14">${COVERAGE}%</text>
+            </g>
+          </svg>
+          EOF
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add coverage.svg
+          if ! git diff --cached --quiet; then
+            git commit -m "Update coverage badge to ${COVERAGE}%"
+            git push
+          fi

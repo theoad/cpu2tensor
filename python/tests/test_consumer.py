@@ -195,6 +195,15 @@ class ConsumerTests(unittest.TestCase):
             Pool(["tcp://host:1"], device="meta")
         with self.assertRaises(ValueError):
             Pool(["tcp://host:1"], timeout=0)
+        with mock.patch("cpu2tensor.pool.torch.backends.mps.is_available", return_value=False), \
+                self.assertRaisesRegex(RuntimeError, "MPS is not available"):
+            Pool(["tcp://host:1"], device="mps")
+
+    def test_enter_rejects_a_closed_pool(self) -> None:
+        pool = Pool(["tcp://host:1"])
+        pool.close()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            pool.__enter__()
 
     def test_close_interrupts_a_published_connection_attempt(self) -> None:
         connecting = threading.Event()

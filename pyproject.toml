@@ -27,3 +27,13 @@ BUILD_TESTING = "OFF"
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
+
+[tool.coverage.run]
+source = ["cpu2tensor"]
+omit = ["*/cpu2tensor/examples/*"]
+relative_files = true
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
+skip_covered = true

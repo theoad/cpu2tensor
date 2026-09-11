@@ -8,6 +8,7 @@ import socket
 import struct
 import threading
 import unittest
+from unittest import mock
 
 import torch
 
@@ -191,6 +192,14 @@ class StdioTests(unittest.TestCase):
         env.close()
         env.close()
         with self.assertRaisesRegex(RuntimeError, "closed"):
+            env.__enter__()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            env.reset()
+
+    def test_reset_reports_connection_failure(self) -> None:
+        with StdioEnv("tcp://127.0.0.1:9000") as env, \
+                mock.patch("cpu2tensor.stdio.socket.create_connection", side_effect=OSError("offline")), \
+                self.assertRaisesRegex(ConnectionError, "connection failed"):
             env.reset()
 
     @unittest.skipUnless(importlib.util.find_spec("gymnasium"), "Gymnasium is optional")

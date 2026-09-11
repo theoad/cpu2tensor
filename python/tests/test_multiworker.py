@@ -8,6 +8,7 @@ import socket
 import struct
 import threading
 import unittest
+from unittest import mock
 
 import torch
 
@@ -65,6 +66,17 @@ def worker(serve: Callable[[socket.socket], None]) -> Iterator[str]:
 
 
 class MultiworkerTests(unittest.TestCase):
+    def test_endpoint_group_rejects_unsupported_devices_before_connecting(self) -> None:
+        endpoints = ["tcp://host:1", "tcp://host:2"]
+        with self.assertRaisesRegex(ValueError, "CPU, MPS, and CUDA"):
+            EndpointReaders(endpoints, "meta", 1)
+        with mock.patch("cpu2tensor._multipool.torch.backends.mps.is_available", return_value=False), \
+                self.assertRaisesRegex(RuntimeError, "MPS is not available"):
+            EndpointReaders(endpoints, "mps", 1)
+        with mock.patch("cpu2tensor._multipool.torch.cuda.is_available", return_value=False), \
+                self.assertRaisesRegex(RuntimeError, "CUDA is not available"):
+            EndpointReaders(endpoints, "cuda", 1)
+
     def test_ready_worker_does_not_wait_for_first_endpoint(self) -> None:
         slow_connected = threading.Event()
         release_slow = threading.Event()
