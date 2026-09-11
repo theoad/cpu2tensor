@@ -193,6 +193,29 @@ class ObservationSummary:
 
 
 @dataclass(frozen=True)
+class ContextFilterSummary:
+    """Final worker-wide accounting for paging-context rich filtering.
+
+    ``cr3`` is the raw value latched when ``gate_pc`` ran on ``gate_source``.
+    It is an address-space relation inside this run, not a process identifier.
+    Matching, foreign and unknown partition all candidate memory transactions;
+    kept and dropped report the policy result for the same candidates.
+    """
+
+    policy: str
+    latch_known: bool
+    gate_source: int
+    gate_pc: int
+    cr3: int
+    paging_root: int
+    kept: int
+    dropped: int
+    matching: int
+    foreign: int
+    unknown: int
+
+
+@dataclass(frozen=True)
 class Batch:
     """Events from one CPU, with independently owned tensor storage.
 
@@ -229,3 +252,4 @@ class Batch:
     observation_transitions: ObservationTransitions | None = None
     observation_context: ObservationContext | None = None
     observation_summary: ObservationSummary | None = None
+    context_filter: ContextFilterSummary | None = None

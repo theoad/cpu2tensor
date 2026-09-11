@@ -123,6 +123,8 @@ struct Options final {
     bool layout = false;
     const char* start_pc = nullptr;
     const char* stop_pc = nullptr;
+    const char* rich_context_start_pc = nullptr;
+    const char* rich_context_policy = "drop";
     const char* window_start_pc = nullptr;
     const char* window_end_pc = nullptr;
     const char* window_abort_pc = nullptr;
@@ -183,6 +185,7 @@ Result<Options> parse(int argc, char** argv) {
             options.batching = value;
         }
         else if (std::strcmp(key, "--start-pc") == 0 || std::strcmp(key, "--stop-pc") == 0 ||
+                 std::strcmp(key, "--rich-context-start-pc") == 0 ||
                  std::strcmp(key, "--window-start-pc") == 0 ||
                  std::strcmp(key, "--window-end-pc") == 0 ||
                  std::strcmp(key, "--window-abort-pc") == 0) {
@@ -193,9 +196,15 @@ Result<Options> parse(int argc, char** argv) {
                 return Result<Options>::failure("Capture boundary needs a guest block address");
             if (std::strcmp(key, "--start-pc") == 0) options.start_pc = value;
             else if (std::strcmp(key, "--stop-pc") == 0) options.stop_pc = value;
+            else if (std::strcmp(key, "--rich-context-start-pc") == 0)
+                options.rich_context_start_pc = value;
             else if (std::strcmp(key, "--window-start-pc") == 0) options.window_start_pc = value;
             else if (std::strcmp(key, "--window-end-pc") == 0) options.window_end_pc = value;
             else options.window_abort_pc = value;
+        } else if (std::strcmp(key, "--rich-context-policy") == 0) {
+            if (std::strcmp(value, "drop") != 0 && std::strcmp(value, "keep") != 0)
+                return Result<Options>::failure("--rich-context-policy needs drop or keep");
+            options.rich_context_policy = value;
         } else if (std::strcmp(key, "--reducer") == 0) {
             if (std::strcmp(value, "none") != 0 && std::strcmp(value, "block-transitions") != 0)
                 return Result<Options>::failure("--reducer needs none or block-transitions");
@@ -263,6 +272,14 @@ Result<Options> parse(int argc, char** argv) {
                             options.window_abort_pc != nullptr;
     const bool all_window = options.window_start_pc != nullptr && options.window_end_pc != nullptr &&
                             options.window_abort_pc != nullptr;
+    if (options.rich_context_start_pc != nullptr && (!options.system || options.stdio))
+        return Result<Options>::failure("--rich-context-start-pc requires x86 system capture");
+    if (options.rich_context_start_pc != nullptr &&
+        (options.start_pc != nullptr || options.stop_pc != nullptr || any_window || options.kernel))
+        return Result<Options>::failure("Rich context filtering needs an observation-only global block stream");
+    if (options.rich_context_start_pc == nullptr &&
+        std::strcmp(options.rich_context_policy, "drop") != 0)
+        return Result<Options>::failure("--rich-context-policy needs --rich-context-start-pc");
     if (any_window && !all_window)
         return Result<Options>::failure("Action windows need start, end, and abort guest block addresses");
     if (all_window && !options.kernel)
@@ -521,7 +538,8 @@ Result<int> listen_at(const Options& options) {
 Result<RunOutcome> run(const Options& options, int listener) {
     if (options.kernel_protocol) {
         const auto result = run_kernel({options.qemu, options.plugin, options.registers, options.memory,
-            options.values, options.context, options.start_pc, options.stop_pc, options.window_start_pc,
+            options.values, options.context, options.start_pc, options.stop_pc,
+            options.rich_context_start_pc, options.rich_context_policy, options.window_start_pc,
             options.window_end_pc, options.window_abort_pc, options.reducer, options.blocks,
             options.transition_capacity, options.batching, options.publication,
             options.timeout_ms, options.max_run_ms, options.kernel, options.target}, listener);
@@ -549,7 +567,7 @@ Result<RunOutcome> run(const Options& options, int listener) {
     const Descriptor reader(pipes[0]);
     // Writer is closed by the parent immediately after fork.
     char plugin_option[PATH_MAX + 384];
-    const int option_size = std::snprintf(plugin_option, sizeof(plugin_option), "%s,fd=%d,registers=%s,memory=%s,values=%s,context=%s,stdio=%s,layout=%s,batching=%s,publication=%s,blocks=%s,reducer=%s,transition_capacity=%d%s%s%s%s", options.plugin, pipes[1], options.registers, options.memory, options.values, options.context, options.stdio ? "on" : "off", options.layout ? "on" : "off", options.batching, options.publication, options.blocks, options.reducer, options.transition_capacity, options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc, options.stop_pc == nullptr ? "" : ",stop=", options.stop_pc == nullptr ? "" : options.stop_pc);
+    const int option_size = std::snprintf(plugin_option, sizeof(plugin_option), "%s,fd=%d,registers=%s,memory=%s,values=%s,context=%s,stdio=%s,layout=%s,batching=%s,publication=%s,blocks=%s,reducer=%s,transition_capacity=%d%s%s%s%s%s%s%s%s", options.plugin, pipes[1], options.registers, options.memory, options.values, options.context, options.stdio ? "on" : "off", options.layout ? "on" : "off", options.batching, options.publication, options.blocks, options.reducer, options.transition_capacity, options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc, options.stop_pc == nullptr ? "" : ",stop=", options.stop_pc == nullptr ? "" : options.stop_pc, options.rich_context_start_pc == nullptr ? "" : ",rich_context_start=", options.rich_context_start_pc == nullptr ? "" : options.rich_context_start_pc, options.rich_context_start_pc == nullptr ? "" : ",rich_context_policy=", options.rich_context_start_pc == nullptr ? "" : options.rich_context_policy);
     if (option_size < 0 || static_cast<size_t>(option_size) >= sizeof(plugin_option)) {
         close(pipes[1]);
         return Result<RunOutcome>::failure("Plugin path is too long");

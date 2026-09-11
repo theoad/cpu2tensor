@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include <cpu2tensor/trace.hpp>
+#include <cpu2tensor/context_filter.hpp>
 #include <cpu2tensor/register_selection.hpp>
 #include <cpu2tensor/frame_ring.hpp>
 #include <cpu2tensor/transition_window.hpp>
@@ -67,6 +68,7 @@ struct alignas(frame_ring_cache_line_bytes) Source final {
     std::atomic<uint64_t> frames_queued{0};
     std::atomic<uint64_t> frames_sent{0};
     uint64_t full_waits = 0;
+    ContextFilterCounts filter_counts;
     Register* registers = nullptr;
     GByteArray* scratch = nullptr;
     uint32_t register_count = 0;
@@ -83,6 +85,7 @@ struct alignas(frame_ring_cache_line_bytes) Source final {
     int32_t pc_register = -1;
     State state = State::unused;
     bool recording = false;
+    bool rich_recording = true;
     uint64_t generation = 0;
     std::atomic<uint64_t> published{0};
     std::atomic<uint64_t> drained{0};
@@ -113,6 +116,10 @@ bool has_start_pc = false;
 uint64_t start_pc = 0;
 bool has_stop_pc = false;
 uint64_t stop_pc = 0;
+bool has_rich_context_start_pc = false;
+uint64_t rich_context_start_pc = 0;
+ContextFilter context_filter;
+ContextFilterPolicy context_filter_policy = ContextFilterPolicy::drop;
 bool has_window_start_pc = false;
 bool has_window_end_pc = false;
 bool has_window_abort_pc = false;
@@ -609,7 +616,8 @@ void source_end(qemu_plugin_id_t, unsigned int index)
         // Register RIP is raw storage; event PCs use the linear code address.
         const auto pc = offset + ((capture_context && source.raw_state[7] != 64) ? source.raw_state[6] : 0);
         emit_context(index, source, pc);
-        sample_registers(index, source, pc, Checkpoint::exit);
+        if (!has_rich_context_start_pc || context_filter.keep_registers(source.raw_state[2], true))
+            sample_registers(index, source, pc, Checkpoint::exit);
     }
     // Continuous reduction is sealed once every vCPU callback has stopped in
     // finish(). Keep this source active so its summary can precede source_end.
@@ -669,9 +677,13 @@ void block_entry(unsigned int index, void* address)
     }
     const PublishChanges publication(source);
     read_context(source, source.register_count != 0);
+    if (has_rich_context_start_pc && pc == rich_context_start_pc)
+        context_filter.latch(index, pc, source.raw_state[2], true);
     emit_context(index, source, pc);
     // These changes precede this block; they are not effects of its execution.
-    sample_registers(index, source, pc, Checkpoint::block);
+    source.rich_recording = !has_rich_context_start_pc ||
+        context_filter.keep_registers(source.raw_state[2], true);
+    if (source.rich_recording) sample_registers(index, source, pc, Checkpoint::block);
     if (capture_blocks) {
         store_u64(append(index, source, Kind::blocks, sizeof(uint64_t)), pc);
         if (source.count == max_addresses) {
@@ -685,14 +697,25 @@ void memory_access(unsigned int index, qemu_plugin_meminfo_t info, uint64_t addr
     auto& source = active_source(index);
     if (!source.recording ||
         (has_stop_pc && capture_state.load(std::memory_order_acquire) != CaptureState::running)) return;
-    const PublishChanges publication(source);
     const unsigned int shift = qemu_plugin_mem_size_shift(info);
     if (shift >= 32 || (capture_values && shift > 4)) {
         fail(Failure::unsupported_target, "cpu2tensor: memory access width is unsupported\n");
     }
     const uint32_t size = uint32_t{1} << shift;
-    read_context(source, false);
-    emit_context(index, source, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pc)));
+    if (has_rich_context_start_pc) {
+        // x86 ends a translation block when paging state changes. The next
+        // memory instruction therefore follows block_entry and its refreshed
+        // CR3. This keeps filter admission off the per-access register path.
+        if (!context_filter.keep_memory(source.filter_counts, source.raw_state[2],
+                                        source.context_sampled)) return;
+    }
+    const PublishChanges publication(source);
+    if (!has_rich_context_start_pc) {
+        // Unfiltered capture retains the stronger historical contract: helpers
+        // that affect paging within an instruction are visible at this callback.
+        read_context(source, false);
+        emit_context(index, source, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pc)));
+    }
     const size_t prefix = capture_context ? 48 : memory_prefix_bytes;
     uint8_t* row = append(index, source, Kind::memory, prefix + (capture_values ? 16 : 0));
     store_u64(row, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pc)));
@@ -993,6 +1016,8 @@ void finish(qemu_plugin_id_t, void*)
         fail(Failure::capture, "cpu2tensor: target exited before the requested capture start block\n");
     if (has_stop_pc && capture_state.load(std::memory_order_acquire) != CaptureState::stopped)
         fail(Failure::capture, "cpu2tensor: target exited before the requested capture stop block\n");
+    if (has_rich_context_start_pc && context_filter.summary().latch == ContextLatch::waiting)
+        fail(Failure::capture, "cpu2tensor: target exited before the rich context start block\n");
     if (has_stop_pc) std::fprintf(stderr, "cpu2tensor: capture stop reached at 0x%llx\n",
                                  static_cast<unsigned long long>(stop_pc));
     if (capture_kernel) {
@@ -1047,6 +1072,27 @@ void finish(qemu_plugin_id_t, void*)
         std::fprintf(stderr, "cpu2tensor: ring frames=%llu full_waits=%llu\n",
                      static_cast<unsigned long long>(frames), static_cast<unsigned long long>(waits));
     }
+    if (has_rich_context_start_pc) {
+        ContextFilterCounts counts;
+        for (const auto& source : sources) counts.add(source.filter_counts);
+        const auto summary = context_filter.summary(counts);
+        uint8_t frame[header_bytes + context_filter_bytes]{};
+        encode_header(frame, {Kind::context_filter, 0, 1, 0, context_filter_bytes});
+        uint8_t* output = frame + header_bytes;
+        store_u32(output, static_cast<uint32_t>(summary.policy));
+        store_u32(output + 4, static_cast<uint32_t>(summary.latch));
+        store_u32(output + 8, summary.source);
+        store_u64(output + 16, summary.gate_pc);
+        store_u64(output + 24, summary.cr3);
+        store_u64(output + 32, summary.paging_root);
+        store_u64(output + 40, summary.kept);
+        store_u64(output + 48, summary.dropped);
+        store_u64(output + 56, summary.matching);
+        store_u64(output + 64, summary.foreign);
+        store_u64(output + 72, summary.unknown);
+        if (!publish(frame, sizeof(frame)).ok())
+            fail(Failure::transport, "cpu2tensor: cannot publish context filter summary\n");
+    }
     send_header({Kind::complete});
 }
 
@@ -1079,6 +1125,8 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
     bool blocks_seen = false;
     bool reducer_seen = false;
     bool capacity_seen = false;
+    bool rich_context_start_seen = false;
+    bool rich_context_policy_seen = false;
     for (int index = 0; index < argc; ++index) {
         const char* argument = argv[index];
         if (std::strncmp(argument, "fd=", 3) == 0 && output_fd < 0) {
@@ -1108,6 +1156,23 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
             stop_pc = std::strtoull(argument + 5, &end, 0);
             if (end == argument + 5 || errno != 0 || *end != '\0' || argument[5] == '-') return 1;
             has_stop_pc = true;
+        } else if (std::strncmp(argument, "rich_context_start=", 19) == 0 &&
+                   !rich_context_start_seen) {
+            rich_context_start_seen = true;
+            char* end = nullptr;
+            errno = 0;
+            rich_context_start_pc = std::strtoull(argument + 19, &end, 0);
+            if (end == argument + 19 || errno != 0 || *end != '\0' || argument[19] == '-')
+                return 1;
+            has_rich_context_start_pc = true;
+        } else if (std::strncmp(argument, "rich_context_policy=", 20) == 0 &&
+                   !rich_context_policy_seen) {
+            rich_context_policy_seen = true;
+            if (std::strcmp(argument + 20, "drop") == 0)
+                context_filter_policy = ContextFilterPolicy::drop;
+            else if (std::strcmp(argument + 20, "keep") == 0)
+                context_filter_policy = ContextFilterPolicy::keep;
+            else return 1;
         } else if (std::strncmp(argument, "window_start=", 13) == 0 && !has_window_start_pc) {
             char* end = nullptr;
             errno = 0;
@@ -1288,6 +1353,17 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
     }
     capture_context = capture_system && architecture == Architecture::x86_64 &&
         (requested_context || capture_memory || register_profile != RegisterProfile::none);
+    if (rich_context_policy_seen && !has_rich_context_start_pc) {
+        std::fputs("cpu2tensor: rich context policy needs a rich context start block\n", stderr);
+        return 1;
+    }
+    if (has_rich_context_start_pc && (!capture_context || capture_kernel || has_start_pc ||
+        has_stop_pc || any_window ||
+        (!capture_memory && register_profile == RegisterProfile::none))) {
+        std::fputs("cpu2tensor: rich context filtering needs observation-only rich x86 system capture\n", stderr);
+        return 1;
+    }
+    if (has_rich_context_start_pc) context_filter.configure(context_filter_policy);
     if (capture_context) {
         read_x86_state = reinterpret_cast<ReadX86State>(dlsym(RTLD_DEFAULT, "qemu_plugin_cpu2tensor_x86_state_v1"));
         if (read_x86_state == nullptr && register_profile != RegisterProfile::none) {
@@ -1320,6 +1396,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         (capture_context && capture_memory ? feature_system_memory : 0) |
         (capture_layout ? feature_executable_layout : 0) | (mixed_batches ? feature_mixed : 0) |
         (has_stop_pc ? feature_stop : 0) | (any_window ? feature_transition_windows : 0) |
+        (has_rich_context_start_pc ? feature_context_filter : 0) |
         (reduce_observations ? feature_observation_reduction : 0);
     send_header({Kind::hello, 0, 0, 0, static_cast<uint64_t>(architecture) | features});
     if (ring_publication && pthread_create(&collector_thread, nullptr, collect_frames, nullptr) != 0) {

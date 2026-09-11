@@ -19,9 +19,9 @@ from cpu2tensor import _native
 from cpu2tensor._batching import BatchCollator, MAX_BATCH_BYTES
 from cpu2tensor._device import to_device
 from cpu2tensor.batch import (
-    AddressContext, Batch, BlockTransitions, ExecutableLayout, MemoryAccesses,
-    ObservationContext, ObservationSummary, ObservationTransitions, RegisterChanges,
-    TransitionWindow,
+    AddressContext, Batch, BlockTransitions, ContextFilterSummary, ExecutableLayout,
+    MemoryAccesses, ObservationContext, ObservationSummary, ObservationTransitions,
+    RegisterChanges, TransitionWindow,
 )
 from cpu2tensor.terminal import (
     BoundaryProgress, TerminalOutcome, TerminalReason, TraceConnectionError,
@@ -43,6 +43,7 @@ _MIXED = 14
 _BLOCK_TRANSITIONS = 15
 _TRANSITION_WINDOW = 16
 _TERMINAL_REPORT = 17
+_CONTEXT_FILTER = 18
 _OBSERVATION_SUMMARY = 19
 _REDUCED_CONTEXT = 20
 _TERMINAL_REPORT_VERSION = 1
@@ -62,10 +63,11 @@ _OBSERVATION_REDUCTION_FEATURE = 1 << 22
 _DATA_KINDS = {
     _BLOCKS, _REGISTERS, _MEMORY, _ADDRESS_CONTEXT, _EXECUTABLE_LAYOUT,
     _MIXED, _BLOCK_TRANSITIONS, _TRANSITION_WINDOW, _OBSERVATION_SUMMARY,
-    _REDUCED_CONTEXT,
+    _REDUCED_CONTEXT, _CONTEXT_FILTER,
 }
 _WINDOW = struct.Struct("<IIIIQQQ")
 _OBSERVATION = struct.Struct("<IIIIQQQQQQQ")
+_FILTER = struct.Struct("<IIIIQQQQQQQQ")
 _WINDOW_STATUS = {1: "ended", 2: "aborted", 3: "incomplete"}
 _FAILURES = {
     1: "capture failed",
@@ -354,7 +356,7 @@ class Pool:
                     elif kind in (_BLOCKS, _REGISTERS, _MEMORY, _ADDRESS_CONTEXT,
                                   _EXECUTABLE_LAYOUT, _MIXED, _BLOCK_TRANSITIONS,
                                   _TRANSITION_WINDOW, _OBSERVATION_SUMMARY,
-                                  _REDUCED_CONTEXT):
+                                  _REDUCED_CONTEXT, _CONTEXT_FILTER):
                         batch = self._batch(
                             kind, source, count, sequence, payload, names.get(source),
                             reduced_observation,
@@ -583,6 +585,20 @@ class Pool:
             return to_device(
                 Batch(None, None, torch.empty(0, dtype=torch.int64),
                       transition_window=window),
+                self._column_device,
+            )
+        if kind == _CONTEXT_FILTER:
+            (policy, latch, gate_source, reserved, gate_pc, cr3, paging_root,
+             kept, dropped, matching, foreign, unknown) = _FILTER.unpack(
+                 cast(bytearray, payload)
+             )
+            assert reserved == 0
+            summary = ContextFilterSummary(
+                "drop" if policy == 1 else "keep", latch == 2, gate_source,
+                gate_pc, cr3, paging_root, kept, dropped, matching, foreign, unknown,
+            )
+            return to_device(
+                Batch(None, None, torch.empty(0, dtype=torch.int64), context_filter=summary),
                 self._column_device,
             )
         if kind == _OBSERVATION_SUMMARY:

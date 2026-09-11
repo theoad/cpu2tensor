@@ -82,11 +82,33 @@ int main() {
     assert(decode_header(bytes, sizeof(bytes)).ok());
     encode_header(bytes, {Kind::transition_window, 0, 1, 1, transition_window_bytes});
     assert(decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::context_filter, 0, 1, 0, context_filter_bytes});
+    assert(decode_header(bytes, sizeof(bytes)).ok());
     encode_header(bytes, {Kind::memory, 0, 1, 0, 24});
     assert(decode_header(bytes, sizeof(bytes)).ok());
 
     encode_header(bytes, {Kind::input_request, 1, 0, 0, 1});
     assert(!decode_header(bytes, sizeof(bytes)).ok());
+
+    uint8_t filter[context_filter_bytes]{};
+    store_u32(filter, 1);
+    store_u32(filter + 4, 2);
+    store_u64(filter + 16, 0x81001000);
+    store_u64(filter + 24, 0x12000);
+    store_u64(filter + 32, 0x12000);
+    store_u64(filter + 40, 2);
+    store_u64(filter + 48, 3);
+    store_u64(filter + 56, 2);
+    store_u64(filter + 64, 2);
+    store_u64(filter + 72, 1);
+    Stream filtered;
+    assert(filtered.accept({Kind::hello, 0, 0, 0,
+                            2 | feature_system | feature_memory | feature_system_memory |
+                            feature_address_context | feature_context_filter}).ok());
+    assert(filtered.accept({Kind::source_end, 0, 0, 0, 0}).ok());
+    assert(!filtered.accept({Kind::complete}).ok());
+    assert(filtered.accept({Kind::context_filter, 0, 1, 0, context_filter_bytes}, filter).ok());
+    assert(filtered.accept({Kind::complete}).ok());
     encode_header(bytes, {Kind::complete, 1, 0, 0, 0});
     assert(!decode_header(bytes, sizeof(bytes)).ok());
     encode_header(bytes, {Kind::hello, 0, 0, 0,

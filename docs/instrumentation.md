@@ -284,3 +284,12 @@ memory observations. `auto` preserves previous defaults. Context events still
 precede the blocks they describe on each source; mixed/collated batches may hold
 multiple changes. See [context-only capture](context-only.md) for validity,
 raw-CR3 limits, a vectorized Python example and measured overhead.
+
+## Paging-context filtered rich selection
+
+`--rich-context-start-pc ADDRESS` latches a normalized CR3 page-table root at an
+exact block gate, preserves blocks and sparse context changes across every vCPU,
+and admits rich memory/register observations only by the explicit `drop` or
+`keep` policy. A final worker-wide record exposes the latch and exact memory
+accounting. The [filter contract](context-filter.md) defines migration, sequence,
+register-baseline, unknown-context and deadline behavior.

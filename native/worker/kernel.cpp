@@ -222,17 +222,21 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
     if (!nonblocking(trace_read.value).ok() || !nonblocking(qmp.value).ok() ||
         !nonblocking(console.value).ok() || !nonblocking(serial.value).ok())
         return Result<bool>::failure("Cannot configure kernel channels");
-    char plugin[PATH_MAX + 512];
+    char plugin[PATH_MAX + 640];
     char control_option[64]{};
     if (options.interactive)
         std::snprintf(control_option, sizeof(control_option), ",control=%d", control_read.value);
-    const int length = std::snprintf(plugin, sizeof(plugin), "%s,fd=%d%s,kernel=%s,registers=%s,memory=%s,values=%s,context=%s,batching=%s,publication=%s,blocks=%s,reducer=%s,transition_capacity=%d%s%s%s%s%s%s%s%s%s%s",
+    const int length = std::snprintf(plugin, sizeof(plugin), "%s,fd=%d%s,kernel=%s,registers=%s,memory=%s,values=%s,context=%s,batching=%s,publication=%s,blocks=%s,reducer=%s,transition_capacity=%d%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
         options.plugin, trace_write.value, control_option, options.interactive ? "on" : "off",
         options.registers, options.memory, options.values, options.context,
         options.batching, options.publication, options.blocks, options.reducer,
         options.transition_capacity,
         options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc,
         options.stop_pc == nullptr ? "" : ",stop=", options.stop_pc == nullptr ? "" : options.stop_pc,
+        options.rich_context_start_pc == nullptr ? "" : ",rich_context_start=",
+        options.rich_context_start_pc == nullptr ? "" : options.rich_context_start_pc,
+        options.rich_context_start_pc == nullptr ? "" : ",rich_context_policy=",
+        options.rich_context_start_pc == nullptr ? "" : options.rich_context_policy,
         options.window_start_pc == nullptr ? "" : ",window_start=", options.window_start_pc == nullptr ? "" : options.window_start_pc,
         options.window_end_pc == nullptr ? "" : ",window_end=", options.window_end_pc == nullptr ? "" : options.window_end_pc,
         options.window_abort_pc == nullptr ? "" : ",window_abort=", options.window_abort_pc == nullptr ? "" : options.window_abort_pc);
