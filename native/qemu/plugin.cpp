@@ -791,11 +791,15 @@ void translate(qemu_plugin_id_t, qemu_plugin_tb* block)
     qemu_plugin_register_vcpu_tb_exec_cb(block, block_entry, flags,
                                         reinterpret_cast<void*>(address));
     if (capture_memory) {
+        // Filtered callbacks use the block-entry cache and must not make QEMU
+        // synchronize register state for every guest memory transaction.
+        const auto memory_flags = capture_context && !has_rich_context_start_pc ?
+            QEMU_PLUGIN_CB_R_REGS : QEMU_PLUGIN_CB_NO_REGS;
         for (size_t index = 0; index < qemu_plugin_tb_n_insns(block); ++index) {
             auto* instruction = qemu_plugin_tb_get_insn(block, index);
             const auto pc = static_cast<uintptr_t>(qemu_plugin_insn_vaddr(instruction));
             qemu_plugin_register_vcpu_mem_cb(instruction, memory_access,
-                capture_context ? QEMU_PLUGIN_CB_R_REGS : QEMU_PLUGIN_CB_NO_REGS,
+                memory_flags,
                 QEMU_PLUGIN_MEM_RW, reinterpret_cast<void*>(pc));
         }
     }
