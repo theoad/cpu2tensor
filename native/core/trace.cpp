@@ -35,7 +35,8 @@ size_t payload_size(const Header& header) {
     if (header.kind == Kind::blocks) return header.count * sizeof(uint64_t);
     if (header.kind == Kind::register_schema || header.kind == Kind::registers || header.kind == Kind::memory ||
         header.kind == Kind::address_context || header.kind == Kind::executable_layout || header.kind == Kind::mixed ||
-        header.kind == Kind::block_transitions || header.kind == Kind::transition_window)
+        header.kind == Kind::block_transitions || header.kind == Kind::transition_window ||
+        header.kind == Kind::observation_summary || header.kind == Kind::reduced_context)
         return static_cast<size_t>(header.detail);
     return 0;
 }
@@ -66,6 +67,14 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
     case Kind::transition_window:
         if (h.source != 0 || h.count != 1 || h.sequence == 0 || h.detail != transition_window_bytes)
             return Result<Header>::failure("Invalid transition window fields");
+        break;
+    case Kind::observation_summary:
+        if (h.count != 1 || h.sequence != 0 || h.detail != observation_summary_bytes)
+            return Result<Header>::failure("Invalid reduced observation summary fields");
+        break;
+    case Kind::reduced_context:
+        if (h.count == 0 || h.detail != h.count * reduced_context_bytes)
+            return Result<Header>::failure("Invalid reduced context batch fields");
         break;
     case Kind::kernel_request:
     case Kind::guest_event:
@@ -108,7 +117,8 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
             const auto architecture = h.detail & 255;
             constexpr auto allowed = uint64_t{255} | feature_memory | feature_registers | feature_memory_values | feature_stdio |
                 feature_system | feature_kernel | feature_window | feature_system_memory | feature_address_context |
-                feature_executable_layout | feature_mixed | feature_stop | feature_transition_windows;
+                feature_executable_layout | feature_mixed | feature_stop | feature_transition_windows |
+                feature_observation_reduction;
             if ((architecture != 1 && architecture != 2) || (h.detail & ~allowed) != 0)
                 return Result<Header>::failure("Unsupported target architecture or features");
             if ((h.detail & feature_memory_values) && !(h.detail & feature_memory))
@@ -128,6 +138,13 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
                 return Result<Header>::failure("Incompatible system and action features");
             if ((h.detail & feature_transition_windows) && !(h.detail & feature_kernel))
                 return Result<Header>::failure("Transition windows need an interactive system worker");
+            if (h.detail & feature_observation_reduction) {
+                if (h.version != wire_version || !(h.detail & feature_system) ||
+                    !(h.detail & feature_address_context) ||
+                    (h.detail & (feature_kernel | feature_memory | feature_registers |
+                                 feature_transition_windows)))
+                    return Result<Header>::failure("Reduced observations need v3 context-only system capture");
+            }
         }
         if (h.kind == Kind::complete && h.detail > 255) return Result<Header>::failure("Invalid target exit code");
         if (h.kind == Kind::error && (h.detail < 1 || h.detail > 4)) return Result<Header>::failure("Unknown trace failure");
@@ -380,10 +397,13 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
         return Result<Done>::success({});
     }
     if (h.kind == Kind::block_transitions) {
-        if (!(_features & feature_transition_windows) || bytes == nullptr ||
+        const bool action = (_features & feature_transition_windows) != 0;
+        const bool observation = (_features & feature_observation_reduction) != 0;
+        if ((!action && !observation) || bytes == nullptr ||
             h.sequence != _next_window || h.source >= max_sources || _ended[h.source] ||
-            !_window_expected)
-            return Result<Done>::failure("Block transitions need their current window");
+            (action && !_window_expected) ||
+            (observation && _observation_summary[h.source]))
+            return Result<Done>::failure("Block transitions need their current reduction");
         for (uint32_t row = 0; row < h.count; ++row) {
             const uint8_t* item = bytes + row * transition_count_bytes;
             const auto remembered = remember_transition(h.source, load_u64(item), load_u64(item + 8));
@@ -392,6 +412,11 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
             if (count == 0 || _window_observed > UINT64_MAX - count)
                 return Result<Done>::failure("Invalid or overflowing block transition count");
             _window_observed += count;
+            if (observation) {
+                if (_observation_transition_counts[h.source] > UINT64_MAX - count)
+                    return Result<Done>::failure("Reduced transition count overflow");
+                _observation_transition_counts[h.source] += count;
+            }
             ++_window_distinct;
         }
         if (_window_rows_per_source[h.source] > max_transition_slots - h.count)
@@ -400,6 +425,83 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
         if (_window_max_source_plus_one <= h.source)
             _window_max_source_plus_one = h.source + 1;
         _window_rows = true;
+        return Result<Done>::success({});
+    }
+    if (h.kind == Kind::reduced_context) {
+        if (!(_features & feature_observation_reduction) || bytes == nullptr ||
+            _ended[h.source] || _observation_summary[h.source] ||
+            h.sequence != _next[h.source] || h.count > UINT64_MAX - h.sequence)
+            return Result<Done>::failure("Reduced contexts need their current source projection");
+        for (uint32_t row = 0; row < h.count; ++row) {
+            const auto* item = bytes + row * reduced_context_bytes;
+            const uint64_t block = load_u64(item);
+            const uint64_t mode = load_u64(item + 56);
+            const uint64_t known = load_u64(item + 64);
+            if ((_observation_has_context[h.source] &&
+                 block <= _observation_last_block[h.source]) ||
+                (known != 15 && known != 63) ||
+                (known == 15 && (mode != 0 || load_u64(item + 48) != 0)) ||
+                (known == 63 && mode != 16 && mode != 32 && mode != 64))
+                return Result<Done>::failure("Invalid reduced context position or availability");
+            _observation_last_block[h.source] = block;
+            _observation_has_context[h.source] = true;
+        }
+        if (_observation_context_rows[h.source] > max_transition_slots - h.count)
+            return Result<Done>::failure("Reduced context rows exceed the fixed bound");
+        _observation_context_rows[h.source] += h.count;
+        _next[h.source] += h.count;
+        _seen[h.source] = true;
+        _source_data_seen = true;
+        _data[h.source] = true;
+        return Result<Done>::success({});
+    }
+    if (h.kind == Kind::observation_summary) {
+        if (!(_features & feature_observation_reduction) || bytes == nullptr ||
+            _ended[h.source] || _observation_summary[h.source])
+            return Result<Done>::failure("Reduced observation summary is disabled or repeated");
+        const uint32_t sources = load_u32(bytes);
+        const uint32_t transition_capacity = load_u32(bytes + 4);
+        const uint32_t context_capacity = load_u32(bytes + 8);
+        const uint32_t reserved = load_u32(bytes + 12);
+        const uint64_t blocks = load_u64(bytes + 16);
+        const uint64_t transitions = load_u64(bytes + 24);
+        const uint64_t distinct = load_u64(bytes + 32);
+        const uint64_t transition_overflow = load_u64(bytes + 40);
+        const uint64_t context_changes = load_u64(bytes + 48);
+        const uint64_t retained_contexts = load_u64(bytes + 56);
+        const uint64_t context_overflow = load_u64(bytes + 64);
+        const uint64_t expected_transitions = blocks == 0 ? 0 : blocks - 1;
+        if (sources == 0 || sources > max_sources || h.source >= sources ||
+            transition_capacity < 2 ||
+            (transition_capacity & (transition_capacity - 1)) != 0 ||
+            context_capacity != transition_capacity || reserved != 0 ||
+            uint64_t{sources} * transition_capacity > max_transition_slots ||
+            transitions != expected_transitions ||
+            distinct != _window_rows_per_source[h.source] ||
+            distinct > transition_capacity || transition_overflow > transitions ||
+            _observation_transition_counts[h.source] > transitions - transition_overflow ||
+            _observation_transition_counts[h.source] + transition_overflow != transitions ||
+            retained_contexts != _observation_context_rows[h.source] ||
+            retained_contexts > context_capacity || context_overflow > context_changes ||
+            retained_contexts + context_overflow != context_changes ||
+            retained_contexts != (context_changes < context_capacity ?
+                                  context_changes : context_capacity) ||
+            context_changes > blocks || (blocks != 0 && context_changes == 0) ||
+            (_observation_has_context[h.source] &&
+             _observation_last_block[h.source] >= blocks) ||
+            (_observation_sources != 0 &&
+             (_observation_sources != sources ||
+              _observation_transition_capacity != transition_capacity ||
+              _observation_context_capacity != context_capacity)))
+            return Result<Done>::failure("Reduced observation summary does not close its source");
+        if (_observation_sources == 0) {
+            _observation_sources = sources;
+            _observation_transition_capacity = transition_capacity;
+            _observation_context_capacity = context_capacity;
+        }
+        _observation_summary[h.source] = true;
+        _seen[h.source] = true;
+        _source_data_seen = true;
         return Result<Done>::success({});
     }
     if (h.kind == Kind::transition_window) {
@@ -447,13 +549,20 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
         return Result<Done>::success({});
     }
     if (h.kind == Kind::complete) {
-        if (_window_rows || _window_expected)
+        if ((_features & feature_transition_windows) && (_window_rows || _window_expected))
             return Result<Done>::failure("Trace ended before its required transition window");
         for (uint32_t source = 0; source < _window_sources; ++source)
             if (!_ended[source])
                 return Result<Done>::failure("Trace ended before a declared window source ended");
         for (uint32_t source = 0; source < max_sources; ++source)
             if (_seen[source] && !_ended[source]) return Result<Done>::failure("Trace ended before all sources ended");
+        if (_features & feature_observation_reduction) {
+            if (_observation_sources == 0)
+                return Result<Done>::failure("Reduced trace ended without source summaries");
+            for (uint32_t source = 0; source < _observation_sources; ++source)
+                if (!_observation_summary[source] || !_ended[source])
+                    return Result<Done>::failure("Reduced trace ended before every source summary");
+        }
         _finished = true;
         return Result<Done>::success({});
     }
@@ -462,7 +571,13 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
         return Result<Done>::failure("Stdin interaction supports one vCPU only");
     if (h.kind == Kind::input_request && !(_features & feature_stdio))
         return Result<Done>::failure("Stdin request needs interactive capture");
+    if ((_features & feature_observation_reduction) &&
+        (h.kind == Kind::blocks || h.kind == Kind::address_context))
+        return Result<Done>::failure("Reduced observations cannot contain raw block or context rows");
     if (_ended[source]) return Result<Done>::failure("Frame received after source end");
+    if ((_features & feature_observation_reduction) && h.kind == Kind::source_end &&
+        !_observation_summary[source])
+        return Result<Done>::failure("Reduced source ended before its summary");
     if (h.kind == Kind::register_schema || h.kind == Kind::registers || h.kind == Kind::memory ||
         h.kind == Kind::address_context) {
         if (bytes == nullptr) return Result<Done>::failure("Signal payload is missing");

@@ -38,6 +38,7 @@ Open this directory as an Obsidian vault. Product requirements come from the
 to revise as experiments produce evidence.
 
 - [Capture performance](capture-performance.md): mixed frames, per-vCPU rings, bounded endpoint pools and measurement.
+- [Bounded observation reduction](bounded-observation.md): producer-side context and block projection for long kernel runs.
 - [Kernel window acceptance](kernel-window-results.md): one-shot start/stop on the fixed getpid workload.
 - [Tensor pipeline benchmark](benchmark-pipeline.md): rich uploads and bounded model updates across supplied endpoints.
 

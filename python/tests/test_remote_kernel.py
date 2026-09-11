@@ -42,7 +42,7 @@ class RemoteKernelTests(unittest.TestCase):
     def ssh(self, args):
         return subprocess.check_output(['ssh', '-o', 'BatchMode=yes', self.host, shlex.join(args)], timeout=20)
 
-    def start(self, *, interactive=True, episodes=1, rich=False, timeout=30000, start=None, full_boot=False, cpus='2', stop=None, batching='legacy', publication='pipe', workload_bytes=None, max_run_ms=None, context='auto', action_windows=False):
+    def start(self, *, interactive=True, episodes=1, rich=False, timeout=30000, start=None, full_boot=False, cpus='2', stop=None, batching='legacy', publication='pipe', workload_bytes=None, max_run_ms=None, context='auto', action_windows=False, observation_reduction=False):
         port = int(self.ssh(['python3', '-c', 'import socket; s=socket.socket(); s.bind(("0.0.0.0",0)); print(s.getsockname()[1])']))
         args = [f'{self.build}/cpu2tensor-worker', '--qemu', self.qemu, '--plugin', f'{self.build}/libcpu2tensor_plugin.so',
                 '--system', 'on', '--host', self.address, '--port', str(port), '--episodes', str(episodes),
@@ -68,6 +68,9 @@ class RemoteKernelTests(unittest.TestCase):
             # The managed observation protocol validates those records without
             # exposing action frames to Pool.
             args += ['--kernel-protocol', 'on']
+            if observation_reduction:
+                args += ['--blocks', 'off', '--reducer', 'block-transitions',
+                         '--transition-capacity', '4096']
         args += ['--', '-accel', 'tcg,thread=multi', '-smp', cpus, '-m', '256M', '-nic', 'none', '-no-reboot',
                  '-kernel', self.image, '-initrd', self.initramfs,
                  '-append', 'console=ttyS0 rdinit=/init panic=-1 cpu2tensor.mode=' + ('interactive' if interactive else 'observe')
@@ -164,6 +167,39 @@ class RemoteKernelTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 10)
         self.assertIn('Target exceeded --max-run-ms deadline', self.finish(expected=1))
         self.gone(children[0])
+
+    def test_bounded_observation_reduction(self):
+        endpoint = self.start(
+            interactive=False, context='on', observation_reduction=True,
+            workload_bytes=64, max_run_ms=120000, timeout=120000,
+        )
+        summaries = {}
+        tensor_bytes = 0
+        with Pool([endpoint], timeout=120, batch_bytes=65536) as pool:
+            for batch in pool.read():
+                self.assertEqual(batch.addresses.numel(), 0)
+                if batch.observation_transitions is not None:
+                    table = batch.observation_transitions
+                    tensor_bytes += sum(column.numel() * column.element_size() for column in (
+                        table.from_addresses, table.destinations, table.counts,
+                    ))
+                if batch.observation_context is not None:
+                    table = batch.observation_context
+                    tensor_bytes += sum(
+                        getattr(table, name).numel() * getattr(table, name).element_size()
+                        for name in table.__dataclass_fields__
+                    )
+                if batch.observation_summary is not None:
+                    summaries[batch.source] = batch.observation_summary
+        self.assertEqual(set(summaries), {0, 1})
+        for summary in summaries.values():
+            self.assertEqual(summary.transitions, max(0, summary.blocks - 1))
+            self.assertEqual(
+                summary.retained_contexts + summary.context_overflow,
+                summary.context_changes,
+            )
+        self.assertLessEqual(tensor_bytes, 2 * 4096 * (24 + 72))
+        self.assertIn('"ok":true', self.finish())
 
     def test_rich_parallel_values_and_retained_device_storage(self):
         endpoint = self.start(rich=True, timeout=300000)

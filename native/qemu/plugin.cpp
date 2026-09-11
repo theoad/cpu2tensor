@@ -18,6 +18,7 @@
 #include <pthread.h>
 #include <poll.h>
 #include <sys/stat.h>
+#include <type_traits>
 #include <unistd.h>
 
 namespace {
@@ -74,6 +75,10 @@ struct alignas(frame_ring_cache_line_bytes) Source final {
     uint64_t context[6]{};
     uint64_t context_sequence = 0;
     bool context_sampled = false;
+    uint64_t reduced_blocks = 0;
+    uint64_t reduced_context_changes = 0;
+    uint64_t reduced_contexts = 0;
+    uint64_t reduced_context_overflow = 0;
     // The descriptor at index zero can have a null but valid QEMU handle.
     int32_t pc_register = -1;
     State state = State::unused;
@@ -82,6 +87,9 @@ struct alignas(frame_ring_cache_line_bytes) Source final {
     std::atomic<uint64_t> published{0};
     std::atomic<uint64_t> drained{0};
 };
+
+static_assert(std::is_trivially_destructible_v<Source>,
+              "QEMU's atexit callback must retain source storage after DSO finalizers");
 
 Source sources[max_sources];
 int output_fd = -1;
@@ -112,8 +120,14 @@ uint64_t window_start_pc = 0;
 uint64_t window_end_pc = 0;
 uint64_t window_abort_pc = 0;
 bool reduce_transitions = false;
+bool reduce_observations = false;
 uint32_t transition_capacity = 4096;
-TransitionWindow transition_window;
+// QEMU invokes plugin atexit callbacks after shared-library destructors on some
+// system exits. Construct this process-lifetime object during install and let
+// the OS reclaim it after our final callback, so its tables remain valid while
+// the callback publishes the final reduction.
+alignas(TransitionWindow) uint8_t transition_window_storage[sizeof(TransitionWindow)]{};
+TransitionWindow* transition_window = nullptr;
 bool action_window_expected = false;
 bool mixed_batches = false;
 bool ring_publication = false;
@@ -489,14 +503,35 @@ void emit_context(unsigned int index, Source& source, uint64_t pc) {
     for (unsigned field = 0; field < 6; ++field)
         changed |= source.context[field] != source.raw_state[fields[field]];
     if (!changed) return;
-    uint8_t* row = append(index, source, Kind::address_context, context_bytes);
-    source.context_sequence = source.next - 1;
-    store_u64(row, pc);
+    uint8_t* row = nullptr;
+    if (reduce_observations) {
+        if (source.reduced_context_changes == UINT64_MAX)
+            fail(Failure::capture, "cpu2tensor: reduced context change count overflow\n");
+        ++source.reduced_context_changes;
+        if (source.reduced_contexts < transition_capacity) {
+            row = append(index, source, Kind::reduced_context, reduced_context_bytes);
+            store_u64(row, source.reduced_blocks - 1);
+            store_u64(row + 8, pc);
+            ++source.reduced_contexts;
+        } else {
+            if (source.reduced_context_overflow == UINT64_MAX)
+                fail(Failure::capture, "cpu2tensor: reduced context overflow count overflow\n");
+            ++source.reduced_context_overflow;
+        }
+    } else {
+        row = append(index, source, Kind::address_context, context_bytes);
+        source.context_sequence = source.next - 1;
+        store_u64(row, pc);
+    }
     for (unsigned field = 0; field < 6; ++field) {
         source.context[field] = source.raw_state[fields[field]];
-        store_u64(row + 8 + field * 8, source.context[field]);
+        if (row != nullptr) {
+            const size_t prefix = reduce_observations ? 16 : 8;
+            store_u64(row + prefix + field * 8, source.context[field]);
+        }
     }
-    store_u64(row + 56, read_x86_state == nullptr ? 15 : 63);
+    if (row != nullptr)
+        store_u64(row + (reduce_observations ? 64 : 56), read_x86_state == nullptr ? 15 : 63);
     source.context_sampled = true;
 }
 
@@ -543,7 +578,8 @@ void release_registers(Source& source)
 
 void source_start(qemu_plugin_id_t, unsigned int index)
 {
-    if ((capture_stdio && index != 0) || (capture_kernel && index >= system_cpus) ||
+    if ((capture_stdio && index != 0) ||
+        ((capture_kernel || reduce_observations) && index >= system_cpus) ||
         index >= max_sources || sources[index].state != State::unused) {
         fail(Failure::unsupported_target, "cpu2tensor: too many vCPUs or a reused vCPU index\n");
     }
@@ -575,6 +611,12 @@ void source_end(qemu_plugin_id_t, unsigned int index)
         emit_context(index, source, pc);
         sample_registers(index, source, pc, Checkpoint::exit);
     }
+    // Continuous reduction is sealed once every vCPU callback has stopped in
+    // finish(). Keep this source active so its summary can precede source_end.
+    if (reduce_observations) {
+        flush(index, source);
+        return;
+    }
     end_source(index, source);
 }
 
@@ -587,19 +629,19 @@ void block_entry(unsigned int index, void* address)
         capture_state.compare_exchange_strong(expected, CaptureState::running, std::memory_order_acq_rel);
     }
     if (has_window_start_pc && pc == window_start_pc) {
-        const auto opened = transition_window.begin();
+        const auto opened = transition_window->begin();
         if (!opened.ok()) fail(Failure::capture, opened.error());
         source.recording = false;
         return;
     }
     if (has_window_end_pc && pc == window_end_pc) {
-        const auto ended = transition_window.end();
+        const auto ended = transition_window->end();
         if (!ended.ok()) fail(Failure::capture, ended.error());
         source.recording = false;
         return;
     }
     if (has_window_abort_pc && pc == window_abort_pc) {
-        const auto aborted = transition_window.abort();
+        const auto aborted = transition_window->abort();
         if (!aborted.ok()) fail(Failure::capture, aborted.error());
         source.recording = false;
         return;
@@ -611,13 +653,18 @@ void block_entry(unsigned int index, void* address)
         source.recording = false;
         return;
     }
-    const BlockAdmission admission = has_window_start_pc ? transition_window.admit() :
+    const BlockAdmission admission = reduce_transitions ? transition_window->admit() :
         BlockAdmission{0, true};
     source.recording = capture_state.load(std::memory_order_acquire) == CaptureState::running &&
         admission.included;
     if (!source.recording) return;
     if (reduce_transitions) {
-        const auto observed = transition_window.observe(index, pc, admission);
+        if (reduce_observations) {
+            if (source.reduced_blocks == UINT64_MAX)
+                fail(Failure::capture, "cpu2tensor: reduced block count overflow\n");
+            ++source.reduced_blocks;
+        }
+        const auto observed = transition_window->observe(index, pc, admission);
         if (!observed.ok()) fail(Failure::capture, observed.error());
     }
     const PublishChanges publication(source);
@@ -794,7 +841,7 @@ void source_idle(qemu_plugin_id_t, unsigned int index)
 
 bool publish_transition_window()
 {
-    const auto closed = transition_window.close();
+    const auto closed = transition_window->close();
     if (!closed.ok()) fail(Failure::capture, closed.error());
     const auto summary = closed.value();
     if (summary.status == WindowStatus::none) return false;
@@ -802,14 +849,14 @@ bool publish_transition_window()
         static_cast<uint32_t>(max_payload_bytes / transition_count_bytes);
     uint8_t frame[max_frame_bytes];
     for (uint32_t source = 0; source < summary.sources; ++source) {
-        const uint32_t rows = transition_window.row_count(source, summary.id);
+        const uint32_t rows = transition_window->row_count(source, summary.id);
         for (uint32_t first = 0; first < rows; first += rows_per_frame) {
             const uint32_t remaining = rows - first;
             const uint32_t count = remaining < rows_per_frame ? remaining : rows_per_frame;
             encode_header(frame, {Kind::block_transitions, source, count, summary.id,
                                   count * transition_count_bytes});
             for (uint32_t index = 0; index < count; ++index) {
-                const auto row = transition_window.row(source, summary.id, first + index);
+                const auto row = transition_window->row(source, summary.id, first + index);
                 uint8_t* output = frame + header_bytes + index * transition_count_bytes;
                 store_u64(output, row.from_address);
                 store_u64(output + 8, row.destination);
@@ -832,6 +879,67 @@ bool publish_transition_window()
     if (!publish(frame, header_bytes + transition_window_bytes).ok())
         fail(Failure::transport, "cpu2tensor: cannot publish transition window\n");
     return true;
+}
+
+void publish_reduced_observation()
+{
+    const auto ended = transition_window->end();
+    if (!ended.ok()) fail(Failure::capture, ended.error());
+    const auto closed = transition_window->close();
+    if (!closed.ok()) fail(Failure::capture, closed.error());
+    const auto reduction = closed.value();
+    if (reduction.status != WindowStatus::ended || reduction.id != 1 ||
+        reduction.sources != system_cpus)
+        fail(Failure::capture, "cpu2tensor: continuous reduction did not close cleanly\n");
+
+    constexpr uint32_t rows_per_frame =
+        static_cast<uint32_t>(max_payload_bytes / transition_count_bytes);
+    uint8_t frame[max_frame_bytes];
+    for (uint32_t source = 0; source < reduction.sources; ++source) {
+        const auto summary = transition_window->source_summary(source, reduction.id);
+        const auto& captured = sources[source];
+        if (captured.state != State::active)
+            fail(Failure::unsupported_target,
+                 "cpu2tensor: reduced capture needs every configured vCPU to start\n");
+        const uint64_t expected = captured.reduced_blocks == 0 ? 0 :
+                                  captured.reduced_blocks - 1;
+        if (summary.observed != expected ||
+            captured.reduced_contexts + captured.reduced_context_overflow !=
+                captured.reduced_context_changes)
+            fail(Failure::capture, "cpu2tensor: reduced source totals are inconsistent\n");
+        for (uint32_t first = 0; first < summary.distinct; first += rows_per_frame) {
+            const uint32_t remaining = summary.distinct - first;
+            const uint32_t count = remaining < rows_per_frame ? remaining : rows_per_frame;
+            encode_header(frame, {Kind::block_transitions, source, count, reduction.id,
+                                  count * transition_count_bytes});
+            for (uint32_t index = 0; index < count; ++index) {
+                const auto row = transition_window->row(source, reduction.id, first + index);
+                uint8_t* output = frame + header_bytes + index * transition_count_bytes;
+                store_u64(output, row.from_address);
+                store_u64(output + 8, row.destination);
+                store_u64(output + 16, row.count);
+            }
+            if (!publish(frame, header_bytes + count * transition_count_bytes).ok())
+                fail(Failure::transport, "cpu2tensor: cannot publish reduced transition rows\n");
+        }
+
+        encode_header(frame, {Kind::observation_summary, source, 1, 0,
+                              observation_summary_bytes});
+        uint8_t* output = frame + header_bytes;
+        std::memset(output, 0, observation_summary_bytes);
+        store_u32(output, reduction.sources);
+        store_u32(output + 4, reduction.capacity_per_source);
+        store_u32(output + 8, transition_capacity);
+        store_u64(output + 16, captured.reduced_blocks);
+        store_u64(output + 24, summary.observed);
+        store_u64(output + 32, summary.distinct);
+        store_u64(output + 40, summary.overflow);
+        store_u64(output + 48, captured.reduced_context_changes);
+        store_u64(output + 56, captured.reduced_contexts);
+        store_u64(output + 64, captured.reduced_context_overflow);
+        if (!publish(frame, header_bytes + observation_summary_bytes).ok())
+            fail(Failure::transport, "cpu2tensor: cannot publish reduced observation summary\n");
+    }
 }
 
 void* control(void*)
@@ -862,7 +970,7 @@ void* control(void*)
             // buffer/count fields changed by the stopped-world drain.
             source.drained.store(generation, std::memory_order_release);
         }
-        if (transition_window.open())
+        if (transition_window->open())
             fail(Failure::capture,
                  "cpu2tensor: guest requested an action before ending or aborting its window\n");
         const bool published_window = publish_transition_window();
@@ -907,6 +1015,18 @@ void finish(qemu_plugin_id_t, void*)
                  "cpu2tensor: guest exited without a completed action window\n" :
                  "cpu2tensor: guest exited with an unexpected action window\n");
         action_window_expected = false;
+    }
+    if (reduce_observations) {
+        // Atexit runs after all vCPU callbacks. Drain the bounded retained
+        // contexts before publishing rows and summaries for their whole run.
+        for (unsigned int index = 0; index < system_cpus; ++index) {
+            const ColdLock lock(sources[index]);
+            if (sources[index].state == State::active) {
+                flush(index, sources[index]);
+                if (ring_publication) wait_for_frames(sources[index]);
+            }
+        }
+        publish_reduced_observation();
     }
     for (unsigned int index = 0; index < max_sources; ++index) {
         const ColdLock lock(sources[index]);
@@ -1124,23 +1244,41 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         std::fputs("cpu2tensor: action windows need three distinct markers and kernel interaction\n", stderr);
         return 1;
     }
-    if (reduce_transitions != any_window || (!capture_blocks && !reduce_transitions)) {
-        std::fputs("cpu2tensor: action windows and transition reduction must be enabled together\n", stderr);
+    reduce_observations = reduce_transitions && !any_window;
+    if ((any_window && !reduce_transitions) || (!capture_blocks && !reduce_transitions)) {
+        std::fputs("cpu2tensor: disabled block rows need transition reduction\n", stderr);
         return 1;
     }
-    if (capture_kernel) {
+    if (reduce_observations && (!capture_system || capture_kernel || capture_blocks ||
+        capture_memory || register_profile != RegisterProfile::none || !requested_context ||
+        mixed_batches)) {
+        std::fputs("cpu2tensor: observation reduction needs context-only system capture, blocks=off, and legacy batching\n", stderr);
+        return 1;
+    }
+    // Preserve the old always-live object's idle behavior for ordinary kernel
+    // control paths, which query this object even when no reducer is configured.
+    transition_window = new (transition_window_storage) TransitionWindow();
+    if (capture_kernel || reduce_observations) {
         if (info->system.smp_vcpus < 1 || info->system.smp_vcpus > static_cast<int>(max_sources) ||
             info->system.smp_vcpus != info->system.max_vcpus) {
-            std::fputs("cpu2tensor: kernel actions need a fixed vCPU count without hotplug slots\n", stderr);
+            std::fputs("cpu2tensor: kernel capture needs a fixed vCPU count without hotplug slots\n", stderr);
             return 1;
         }
         system_cpus = static_cast<unsigned int>(info->system.smp_vcpus);
-        if (any_window) {
-            const auto configured = transition_window.configure(system_cpus, transition_capacity);
+        if (reduce_transitions) {
+            const auto configured = transition_window->configure(system_cpus, transition_capacity);
             if (!configured.ok()) {
                 std::fputs(configured.error(), stderr);
                 std::fputc('\n', stderr);
                 return 1;
+            }
+            if (reduce_observations) {
+                const auto started = transition_window->begin();
+                if (!started.ok()) {
+                    std::fputs(started.error(), stderr);
+                    std::fputc('\n', stderr);
+                    return 1;
+                }
             }
         }
     }
@@ -1181,7 +1319,8 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         (capture_context ? feature_address_context : 0) |
         (capture_context && capture_memory ? feature_system_memory : 0) |
         (capture_layout ? feature_executable_layout : 0) | (mixed_batches ? feature_mixed : 0) |
-        (has_stop_pc ? feature_stop : 0) | (any_window ? feature_transition_windows : 0);
+        (has_stop_pc ? feature_stop : 0) | (any_window ? feature_transition_windows : 0) |
+        (reduce_observations ? feature_observation_reduction : 0);
     send_header({Kind::hello, 0, 0, 0, static_cast<uint64_t>(architecture) | features});
     if (ring_publication && pthread_create(&collector_thread, nullptr, collect_frames, nullptr) != 0) {
         std::fputs("cpu2tensor: cannot start trace collector\n", stderr);

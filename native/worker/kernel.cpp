@@ -38,7 +38,8 @@ struct KernelTerminalProgress final {
 bool execution_frame(Kind kind) {
     return kind == Kind::blocks || kind == Kind::registers || kind == Kind::memory ||
         kind == Kind::address_context || kind == Kind::mixed ||
-        kind == Kind::block_transitions || kind == Kind::transition_window;
+        kind == Kind::block_transitions || kind == Kind::transition_window ||
+        kind == Kind::observation_summary || kind == Kind::reduced_context;
 }
 
 bool observation_frame(Kind kind) {

@@ -138,6 +138,22 @@ PyObject* decode_context(const Header& h, const uint8_t* bytes) {
     return result;
 }
 
+PyObject* decode_reduced_context(const Header& h, const uint8_t* bytes) {
+    constexpr const char* names[] = {
+        "block_positions", "pc", "cr0", "cr3", "cr4", "efer", "cs_base", "mode", "known"
+    };
+    PyObject* result = PyDict_New();
+    if (result == nullptr) return nullptr;
+    for (unsigned column = 0; column < 9; ++column) {
+        const auto added = add_buffer(result, names[column], h.count * sizeof(uint64_t));
+        if (!added.ok()) { Py_DECREF(result); return nullptr; }
+        for (uint32_t row = 0; row < h.count; ++row)
+            native_integer(added.value(), row,
+                load_u64(bytes + row * reduced_context_bytes + column * sizeof(uint64_t)));
+    }
+    return result;
+}
+
 PyObject* decode_transitions(const Header& h, const uint8_t* bytes) {
     constexpr const char* names[] = {"from_addresses", "destinations", "counts"};
     PyObject* result = PyDict_New();
@@ -487,6 +503,8 @@ PyObject* decode(PyObject*, PyObject* arguments) {
     else if (frame.kind == Kind::registers || frame.kind == Kind::memory)
         payload = decode_signals(frame, bytes + header_bytes, stream->memory_values(), stream->system_memory());
     else if (frame.kind == Kind::address_context) payload = decode_context(frame, bytes + header_bytes);
+    else if (frame.kind == Kind::reduced_context)
+        payload = decode_reduced_context(frame, bytes + header_bytes);
     else if (frame.kind == Kind::block_transitions)
         payload = decode_transitions(frame, bytes + header_bytes);
     else if (frame.kind == Kind::mixed)
@@ -494,7 +512,8 @@ PyObject* decode(PyObject*, PyObject* arguments) {
     else {
         payload = PyByteArray_FromStringAndSize(nullptr, size);
         if (payload != nullptr && (frame.kind == Kind::guest_event ||
-                                   frame.kind == Kind::transition_window))
+                                   frame.kind == Kind::transition_window ||
+                                   frame.kind == Kind::observation_summary))
             std::memcpy(PyByteArray_AsString(payload), bytes + header_bytes, size);
         if (payload != nullptr && (frame.kind == Kind::blocks || frame.kind == Kind::executable_layout)) {
             char* destination = PyByteArray_AsString(payload);

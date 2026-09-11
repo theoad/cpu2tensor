@@ -20,7 +20,8 @@ from cpu2tensor._batching import BatchCollator, MAX_BATCH_BYTES
 from cpu2tensor._device import to_device
 from cpu2tensor.batch import (
     AddressContext, Batch, BlockTransitions, ExecutableLayout, MemoryAccesses,
-    RegisterChanges, TransitionWindow,
+    ObservationContext, ObservationSummary, ObservationTransitions, RegisterChanges,
+    TransitionWindow,
 )
 from cpu2tensor.terminal import (
     BoundaryProgress, TerminalOutcome, TerminalReason, TraceConnectionError,
@@ -42,6 +43,8 @@ _MIXED = 14
 _BLOCK_TRANSITIONS = 15
 _TRANSITION_WINDOW = 16
 _TERMINAL_REPORT = 17
+_OBSERVATION_SUMMARY = 19
+_REDUCED_CONTEXT = 20
 _TERMINAL_REPORT_VERSION = 1
 _TERMINAL_HELLO = 1 << 0
 _TERMINAL_DATA = 1 << 1
@@ -55,11 +58,14 @@ _REGISTERS_FEATURE = 1 << 9
 _CONTEXT_FEATURE = 1 << 16
 _MIXED_FEATURE = 1 << 18
 _STOP_FEATURE = 1 << 19
+_OBSERVATION_REDUCTION_FEATURE = 1 << 22
 _DATA_KINDS = {
     _BLOCKS, _REGISTERS, _MEMORY, _ADDRESS_CONTEXT, _EXECUTABLE_LAYOUT,
-    _MIXED, _BLOCK_TRANSITIONS, _TRANSITION_WINDOW,
+    _MIXED, _BLOCK_TRANSITIONS, _TRANSITION_WINDOW, _OBSERVATION_SUMMARY,
+    _REDUCED_CONTEXT,
 }
 _WINDOW = struct.Struct("<IIIIQQQ")
+_OBSERVATION = struct.Struct("<IIIIQQQQQQQ")
 _WINDOW_STATUS = {1: "ended", 2: "aborted", 3: "incomplete"}
 _FAILURES = {
     1: "capture failed",
@@ -288,6 +294,8 @@ class Pool:
         data_received = False
         start_configured: bool | None = None
         stop_configured: bool | None = None
+        reduced_observation = False
+        pending_summaries: list[Batch] = []
         connected = False
         try:
             if self._closed:
@@ -331,6 +339,7 @@ class Pool:
                         context_grouping = bool(detail & _CONTEXT_FEATURE and
                                                 detail & _MIXED_FEATURE and
                                                 not detail & (_MEMORY_FEATURE | _REGISTERS_FEATURE))
+                        reduced_observation = bool(detail & _OBSERVATION_REDUCTION_FEATURE)
                     elif kind in _DATA_KINDS:
                         data_received = True
                     if kind == 1 and detail & 2048:
@@ -344,8 +353,20 @@ class Pool:
                         names[source] = MappingProxyType({**names.get(source, {}), **update})
                     elif kind in (_BLOCKS, _REGISTERS, _MEMORY, _ADDRESS_CONTEXT,
                                   _EXECUTABLE_LAYOUT, _MIXED, _BLOCK_TRANSITIONS,
-                                  _TRANSITION_WINDOW):
-                        batch = self._batch(kind, source, count, sequence, payload, names.get(source))
+                                  _TRANSITION_WINDOW, _OBSERVATION_SUMMARY,
+                                  _REDUCED_CONTEXT):
+                        batch = self._batch(
+                            kind, source, count, sequence, payload, names.get(source),
+                            reduced_observation,
+                        )
+                        if kind == _OBSERVATION_SUMMARY:
+                            pending_summaries.append(batch)
+                            continue
+                        if reduced_observation and kind in (_BLOCK_TRANSITIONS, _REDUCED_CONTEXT):
+                            if self._column_device != self._device:
+                                batch = to_device(batch, self._device)
+                            yield batch
+                            continue
                         if collator is None:
                             yield batch
                         else:
@@ -371,6 +392,10 @@ class Pool:
                         )
                         if detail != 0:
                             raise TraceTerminalError(f"Target exited with code {detail}", self._outcome)
+                        for summary in pending_summaries:
+                            if self._column_device != self._device:
+                                summary = to_device(summary, self._device)
+                            yield summary
                         return
                     elif kind == _ERROR:
                         self._outcome = self._make_outcome(
@@ -525,12 +550,23 @@ class Pool:
             _native.MemoryColumns | _native.TransitionColumns
         ),
         names: Mapping[int, str] | None,
+        reduced_observation: bool = False,
     ) -> Batch:
         registers = None
         memory = None
         context = None
         if kind == _BLOCK_TRANSITIONS:
             columns = cast("_native.TransitionColumns", payload)
+            if reduced_observation:
+                transitions = ObservationTransitions(
+                    **{name: self._tensor(data, torch.int64)
+                       for name, data in columns.items()},
+                )
+                return to_device(
+                    Batch(source, None, torch.empty(0, dtype=torch.int64),
+                          observation_transitions=transitions),
+                    self._column_device,
+                )
             transitions = BlockTransitions(
                 sequence,
                 **{name: self._tensor(data, torch.int64) for name, data in columns.items()},
@@ -547,6 +583,33 @@ class Pool:
             return to_device(
                 Batch(None, None, torch.empty(0, dtype=torch.int64),
                       transition_window=window),
+                self._column_device,
+            )
+        if kind == _OBSERVATION_SUMMARY:
+            (sources, transition_capacity, context_capacity, reserved, blocks,
+             transitions, distinct, transition_overflow, context_changes,
+             retained_contexts, context_overflow) = _OBSERVATION.unpack(
+                 cast(bytearray, payload)
+             )
+            assert reserved == 0
+            summary = ObservationSummary(
+                sources, transition_capacity, context_capacity, blocks,
+                transitions, distinct, transition_overflow, context_changes,
+                retained_contexts, context_overflow,
+            )
+            return to_device(
+                Batch(source, None, torch.empty(0, dtype=torch.int64),
+                      observation_summary=summary),
+                self._column_device,
+            )
+        if kind == _REDUCED_CONTEXT:
+            context = ObservationContext(**{
+                name: self._tensor(data, torch.int64)
+                for name, data in cast(dict[str, bytearray], payload).items()
+            })
+            return to_device(
+                Batch(source, None, torch.empty(0, dtype=torch.int64),
+                      observation_context=context),
                 self._column_device,
             )
         if kind == _MIXED:
