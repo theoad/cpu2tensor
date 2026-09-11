@@ -24,11 +24,19 @@ export INITRAMFS=/path/to/initramfs.cpio.gz
 
 # The marker belongs to this exact guest binary. Do not reuse another build's PC.
 export C2T_START_PC="$(nm "$C2T_BUILD/kernel_init" | awk '$3 == "cpu2tensor_capture_begin" {print "0x" $1}')"
+export C2T_ACTION_BEGIN="$(nm "$C2T_BUILD/kernel_init" | awk '$3 == "cpu2tensor_action_begin" {print "0x" $1}')"
+export C2T_ACTION_END="$(nm "$C2T_BUILD/kernel_init" | awk '$3 == "cpu2tensor_action_end" {print "0x" $1}')"
+export C2T_ACTION_ABORT="$(nm "$C2T_BUILD/kernel_init" | awk '$3 == "cpu2tensor_action_abort" {print "0x" $1}')"
 
 "$C2T_BUILD/cpu2tensor-worker" \
   --qemu "$QEMU_SYSTEM" --plugin "$C2T_BUILD/libcpu2tensor_plugin.so" \
   --system on --kernel-adapter on --registers none --memory off \
-  --start-pc "$C2T_START_PC" --host 127.0.0.1 --port 9400 \
+  --start-pc "$C2T_START_PC" \
+  --window-start-pc "$C2T_ACTION_BEGIN" \
+  --window-end-pc "$C2T_ACTION_END" \
+  --window-abort-pc "$C2T_ACTION_ABORT" \
+  --reducer block-transitions --transition-capacity 4096 \
+  --host 127.0.0.1 --port 9400 \
   --episodes 1 --timeout-ms 120000 -- \
   -accel tcg,thread=multi -smp 2 -m 256M -nic none -no-reboot \
   -kernel "$KERNEL" -initrd "$INITRAMFS" \
@@ -37,7 +45,10 @@ export C2T_START_PC="$(nm "$C2T_BUILD/kernel_init" | awk '$3 == "cpu2tensor_capt
 
 The marker starts a post-boot capture window; boot events are deliberately
 excluded. Omit `--start-pc` when the full boot trace is required. The example
-reduces only basic blocks, so this command disables register and memory capture.
+keeps raw basic blocks and also emits bounded transition counts for the execution
+between each action's begin and end markers. Command parsing, result serialization,
+and the next request stay outside those tensors. This command disables register
+and memory capture.
 Those signals can remain enabled for clients that use their columns. The worker
 owns QMP, ttyS0 diagnostics and the private ttyS1 protocol channel; do not supply
 QEMU serial, monitor, or initial pause options. An operator can expose this

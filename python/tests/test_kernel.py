@@ -64,6 +64,60 @@ def result_for(action: int, step: int) -> dict:
 
 
 class KernelTests(unittest.TestCase):
+    def test_action_window_excludes_command_and_result_transport(self) -> None:
+        commands = (b"compute 257 0\n", b"compute 0000000257 64\n",
+                    b"compute 521 0\n", COMMANDS[4])
+        rows = (
+            ((0x401000, 0x401010, 257), (0x401010, 0x401020, 257)),
+            ((0x401000, 0x401010, 257), (0x401010, 0x401020, 257)),
+            ((0x401000, 0x401010, 521), (0x401010, 0x401030, 521)),
+            (),
+        )
+
+        def serve(connection: socket.socket) -> None:
+            connection.sendall(frame(1, detail=2 | FEATURES | WINDOWS) + ready(0))
+            for step, (command, transitions) in enumerate(zip(commands, rows, strict=True)):
+                self.assertEqual(read_action(connection), command)
+                result = ({"event": "complete", "steps": 3, "ok": True}
+                          if step == 3 else
+                          {"event": "result", "step": step, "action": "compute",
+                           "iterations": 257 if step < 2 else 521,
+                           "padding": "x" * (64 if step == 1 else 0)})
+                payload = window_frame(step + 1, 1, sources=2, capacity=8,
+                                       distinct=len(transitions),
+                                       observed=sum(row[2] for row in transitions))
+                if transitions:
+                    payload = transition_frame(0, step + 1, transitions) + payload
+                payload += event(result)
+                if step < 3:
+                    payload += ready(step + 1)
+                else:
+                    payload += frame(3, source=0) + frame(3, source=1) + frame(4)
+                connection.sendall(payload)
+
+        observed = []
+        report_sizes = []
+        with interactive_worker(serve) as endpoint, KernelEnv(endpoint) as env:
+            self.assertEqual(list(env.reset()), [])
+            for command in commands[:-1]:
+                batches = list(env.step(command))
+                observed.append(tuple(
+                    (batch.transitions.from_addresses.tolist(),
+                     batch.transitions.destinations.tolist(),
+                     batch.transitions.counts.tolist())
+                    for batch in batches if batch.transitions is not None
+                ))
+                report_sizes.append(len(json.dumps(env.result)))
+                summary = next(batch.transition_window for batch in batches
+                               if batch.transition_window is not None)
+                self.assertTrue(summary.complete)
+            list(env.step(commands[-1]))
+
+        self.assertNotEqual(len(commands[0]), len(commands[1]))
+        self.assertNotEqual(report_sizes[0], report_sizes[1])
+        self.assertEqual(observed[0], observed[1])
+        self.assertNotEqual(observed[1], observed[2])
+
     @unittest.skipUnless(torch.backends.mps.is_available(), "MPS unavailable")
     def test_window_summary_empty_tensor_uses_configured_device(self) -> None:
         def serve(connection: socket.socket) -> None:
