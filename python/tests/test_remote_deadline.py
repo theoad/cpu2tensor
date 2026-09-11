@@ -8,7 +8,7 @@ import time
 import unittest
 
 import test_remote
-from cpu2tensor import Pool
+from cpu2tensor import Pool, TerminalReason, TraceTerminalError
 
 
 @unittest.skipUnless(os.environ.get("CPU2TENSOR_REMOTE"), "Set CPU2TENSOR_REMOTE for real deadline checks")
@@ -51,9 +51,12 @@ class RemoteDeadlineTests(unittest.TestCase):
                 self.remote.worker.wait(timeout=8)
                 result = self.remote.finish()
             count = first.addresses.numel()
-            with self.assertRaisesRegex(RuntimeError, "Incomplete trace"):
+            with self.assertRaises(TraceTerminalError) as raised:
                 for batch in batches:
                     count += batch.addresses.numel()
+            if not blocked:
+                self.assertEqual(raised.exception.outcome.reason, TerminalReason.MAX_RUN_DEADLINE)
+                self.assertTrue(raised.exception.outcome.hello_reported)
             if mode == "spin" and not blocked:
                 self.assertGreater(count, first.addresses.numel(), "The active target must stream before expiry")
             self.check_expired(child, started, result)

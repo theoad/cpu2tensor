@@ -13,7 +13,7 @@ import unittest
 
 import torch
 
-from cpu2tensor import Pool, StdioEnv
+from cpu2tensor import Pool, StdioEnv, TerminalReason, TraceTerminalError
 
 
 BUILD = Path(os.environ["CPU2TENSOR_CI_BUILD"])
@@ -29,6 +29,7 @@ class LocalWorker:
         data: bytes = b"",
         stdio: bool = False,
         rich: bool = False,
+        max_run_ms: int | None = None,
     ) -> None:
         input_file = tempfile.NamedTemporaryFile(prefix="cpu2tensor-ci-", delete=False)
         input_file.write(data)
@@ -47,6 +48,7 @@ class LocalWorker:
             "--memory-values", "on" if rich else "off",
             "--batching", "mixed" if rich else "legacy",
             "--publication", "ring" if rich else "pipe",
+            *([] if max_run_ms is None else ["--max-run-ms", str(max_run_ms)]),
             "--", str(target),
         ]
         self.process = subprocess.Popen(
@@ -167,3 +169,21 @@ class PipelineSystemTests(unittest.TestCase):
             self.assertEqual(env.exit_code, 0)
         code, output, errors = worker.finish()
         self.assertEqual((code, output), (0, b""), errors.decode())
+
+    def test_worker_deadline_has_a_structured_terminal_outcome(self) -> None:
+        worker = self.start(
+            str(BUILD / "worker_test_target"),
+            BUILD / "checksum",
+            max_run_ms=100,
+        )
+        with Pool([worker.endpoint], timeout=10) as pool:
+            with self.assertRaises(TraceTerminalError) as raised:
+                list(pool.read())
+        outcome = raised.exception.outcome
+        self.assertEqual(outcome.reason, TerminalReason.MAX_RUN_DEADLINE)
+        self.assertTrue(outcome.hello_reported)
+        self.assertTrue(outcome.data_reported)
+        self.assertFalse(outcome.complete)
+        code, _, errors = worker.finish()
+        self.assertNotEqual(code, 0)
+        self.assertIn(b"Target exceeded --max-run-ms deadline", errors)

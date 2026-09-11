@@ -22,14 +22,22 @@ is continuously ready, while sending, and during post-seal shutdown. This uses
 monotonic wall time, not guest instructions or guest virtual time. It therefore
 includes time spent paused by backpressure or descheduled by the host.
 
-On expiry the worker reports `Target exceeded --max-run-ms deadline`, kills and
+On expiry the worker reports `Target exceeded --max-run-ms deadline`, attempts a
+versioned in-band [terminal outcome](terminal-outcomes.md), kills and
 reaps its owned child/process group, closes the connection and exits nonzero.
 It does not synthesize a successful capture seal. Pool consumers get an incomplete
 trace error; already received tensors remain valid partial data, not a complete
 training example. A client may still have buffered bytes after the worker stops,
 so this is not a deadline on learner work or on when the client reads its error.
+The report attempt is nonblocking and can be absent or truncated under transport
+backpressure. Python names the deadline only after validating the complete report.
 Operating-system scheduling and child reaping add latency; this is an absolute
 worker budget, not a hard real-time scheduling guarantee.
+
+The managed full-system path applies the same bound to trace forwarding and QMP
+writes. Its terminal report records whether plugin negotiation and observation
+data reached the client before expiry. This keeps deadline diagnosis identical
+for ordinary process targets and kernel guests.
 
 `--timeout-ms` remains the existing operation timeout. It can fail an inactive
 operation before the total budget expires. The pipeline benchmark's

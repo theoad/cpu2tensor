@@ -21,9 +21,9 @@ int main() {
     uint8_t bytes[header_bytes];
     Header batch{Kind::blocks, 2, 2, 0, 0};
     encode_header(bytes, batch);
-    assert(std::memcmp(bytes, "C2T1\2\0\2\0", 8) == 0);
+    assert(std::memcmp(bytes, "C2T1\3\0\2\0", 8) == 0);
     assert(decode_header(bytes, sizeof(bytes)).value().source == 2);
-    bytes[4] = 3;
+    bytes[4] = 4;
     assert(!decode_header(bytes, sizeof(bytes)).ok());
     assert(!decode_header(bytes, 4).ok());
     store_u64(bytes, UINT64_MAX);
@@ -31,6 +31,48 @@ int main() {
     store_u64(bytes, uint64_t{1} << 63);
     assert(load_u64(bytes) == uint64_t{1} << 63);
     assert(payload_size({Kind::hello}) == 0);
+
+    Header legacy_hello{Kind::hello, 0, 0, 0, 1};
+    legacy_hello.version = legacy_wire_version;
+    encode_header(bytes, legacy_hello);
+    assert(decode_header(bytes, sizeof(bytes)).ok());
+    Stream legacy_stream;
+    assert(legacy_stream.accept(legacy_hello).ok());
+    Header legacy_end{Kind::source_end};
+    legacy_end.version = legacy_wire_version;
+    assert(legacy_stream.accept(legacy_end).ok());
+    Header legacy_complete{Kind::complete};
+    legacy_complete.version = legacy_wire_version;
+    assert(legacy_stream.accept(legacy_complete).ok());
+
+    const auto terminal = terminal_report_detail(
+        TerminalReason::max_run_deadline,
+        terminal_hello | terminal_data | terminal_start_configured |
+        terminal_start_observed | terminal_stop_configured);
+    encode_header(bytes, {Kind::terminal_report, 0, 0, 0, terminal});
+    assert(decode_header(bytes, sizeof(bytes)).ok());
+    Header legacy_terminal{Kind::terminal_report, 0, 0, 0, terminal};
+    legacy_terminal.version = legacy_wire_version;
+    encode_header(bytes, legacy_terminal);
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::terminal_report, 0, 0, 0, terminal | (uint64_t{1} << 24)});
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::terminal_report, 0, 0, 0, terminal + 1});
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::terminal_report, 0, 0, 0, terminal + (uint64_t{1} << 8)});
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::terminal_report, 0, 0, 0,
+                          terminal_report_detail(TerminalReason::max_run_deadline,
+                                                 terminal_start_observed)});
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+    Stream terminal_only;
+    assert(terminal_only.accept({Kind::terminal_report, 0, 0, 0, terminal_report_detail(
+        TerminalReason::max_run_deadline, 0)}).ok());
+    assert(terminal_only.finished());
+    assert(!terminal_only.accept({Kind::hello, 0, 0, 0, 1}).ok());
+    Stream mixed_versions;
+    assert(mixed_versions.accept(legacy_hello).ok());
+    assert(!mixed_versions.accept({Kind::source_end}).ok());
 
     // Exercise every accepted compound frame shape as well as combinations
     // that would give a client ambiguous trace semantics.

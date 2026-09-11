@@ -25,6 +25,42 @@ constexpr size_t argument_capacity = 256;
 constexpr size_t console_chunk_capacity = 4096;
 constexpr int socket_capacity = 65536;
 
+struct KernelTerminalProgress final {
+    bool hello_sent = false;
+    bool data_sent = false;
+    bool start_configured = false;
+    bool start_observed = false;
+    bool stop_configured = false;
+    bool stop_observed = false;
+    uint16_t version = wire_version;
+};
+
+bool execution_frame(Kind kind) {
+    return kind == Kind::blocks || kind == Kind::registers || kind == Kind::memory ||
+        kind == Kind::address_context || kind == Kind::mixed ||
+        kind == Kind::block_transitions || kind == Kind::transition_window;
+}
+
+bool observation_frame(Kind kind) {
+    return execution_frame(kind) || kind == Kind::executable_layout;
+}
+
+void report_deadline(int client, const KernelTerminalProgress& progress) {
+    if (progress.version != wire_version) return;
+    const uint8_t flags = (progress.hello_sent ? terminal_hello : 0) |
+        (progress.data_sent ? terminal_data : 0) |
+        (progress.start_configured ? terminal_start_configured : 0) |
+        (progress.start_observed ? terminal_start_observed : 0) |
+        (progress.stop_configured ? terminal_stop_configured : 0) |
+        (progress.stop_observed ? terminal_stop_observed : 0);
+    uint8_t bytes[header_bytes];
+    encode_header(bytes, {Kind::terminal_report, 0, 0, 0,
+                          terminal_report_detail(TerminalReason::max_run_deadline, flags)});
+    // The absolute deadline has expired. One nonblocking attempt preserves that
+    // bound; a partial report remains an explicit truncated stream at the client.
+    (void)send(client, bytes, sizeof(bytes), MSG_NOSIGNAL | MSG_DONTWAIT);
+}
+
 int64_t now_ms() {
     timespec time{};
     clock_gettime(CLOCK_MONOTONIC, &time);
@@ -241,6 +277,10 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
     bool seal = false, trace_eof = false, console_eof = false;
     bool guest_complete = false, child_done = false;
     bool guest_started = false;
+    KernelTerminalProgress progress{
+        false, false, options.start_pc != nullptr, false,
+        options.stop_pc != nullptr, false,
+    };
     int child_status = 0, pending = 0, next_id = 1;
     enum class Command { none, capabilities, resume, stop } command = Command::none;
     auto deadline = now_ms() + options.timeout_ms;
@@ -248,23 +288,59 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
                                   now_ms() + options.maximum_ms;
     int64_t control_deadline = 0;
     for (;;) {
+        const auto current = now_ms();
+        if (maximum_deadline != 0 && current >= maximum_deadline) {
+            report_deadline(client.value, progress);
+            return Result<bool>::failure("Target exceeded --max-run-ms deadline");
+        }
+        auto remaining = deadline - current;
+        if (maximum_deadline != 0 && maximum_deadline - current < remaining)
+            remaining = maximum_deadline - current;
+        if (remaining <= 0) return Result<bool>::failure("Kernel run timed out before capture or action boundary");
+        const auto send_client = [&](const uint8_t* bytes, size_t size,
+                                     int timeout) -> Result<bool> {
+            if (maximum_deadline != 0) {
+                const auto available = maximum_deadline - now_ms();
+                if (available <= 0) {
+                    report_deadline(client.value, progress);
+                    return Result<bool>::failure("Target exceeded --max-run-ms deadline");
+                }
+                if (available < timeout) timeout = static_cast<int>(available);
+            }
+            const auto sent = send_bytes(client.value, bytes, size, timeout);
+            if (!sent.ok() && maximum_deadline != 0 && now_ms() >= maximum_deadline) {
+                report_deadline(client.value, progress);
+                return Result<bool>::failure("Target exceeded --max-run-ms deadline");
+            }
+            return sent;
+        };
+        const auto send_qmp = [&](const char* name, int id) -> Result<Done> {
+            auto timeout = options.timeout_ms;
+            if (maximum_deadline != 0) {
+                const auto available = maximum_deadline - now_ms();
+                if (available <= 0) {
+                    report_deadline(client.value, progress);
+                    return Result<Done>::failure("Target exceeded --max-run-ms deadline");
+                }
+                if (available < timeout) timeout = static_cast<int>(available);
+            }
+            const auto sent = qmp_command(qmp.value, name, id, timeout);
+            if (!sent.ok() && maximum_deadline != 0 && now_ms() >= maximum_deadline) {
+                report_deadline(client.value, progress);
+                return Result<Done>::failure("Target exceeded --max-run-ms deadline");
+            }
+            return sent;
+        };
         if (seal && trace_eof && child_done && console_eof && serial_lines.eof) {
             if (serial_lines.used != 0 || !guest_complete)
                 return Result<bool>::failure("Guest exited without a successful adapter completion");
             if (!WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0)
                 return Result<bool>::failure("System QEMU failed after capture completion");
             encode_header(frame, {Kind::complete});
-            const auto sent = send_bytes(client.value, frame, header_bytes, options.timeout_ms);
+            const auto sent = send_client(frame, header_bytes, static_cast<int>(remaining));
             if (!sent.ok() || sent.value()) return sent;
             return Result<bool>::success(false);
         }
-        const auto current = now_ms();
-        if (maximum_deadline != 0 && current >= maximum_deadline)
-            return Result<bool>::failure("Target exceeded --max-run-ms deadline");
-        auto remaining = deadline - current;
-        if (maximum_deadline != 0 && maximum_deadline - current < remaining)
-            remaining = maximum_deadline - current;
-        if (remaining <= 0) return Result<bool>::failure("Kernel run timed out before capture or action boundary");
         if (control_deadline != 0 && now_ms() >= control_deadline)
             return Result<bool>::failure("Kernel QMP command or trace drain timed out");
         pollfd watches[] = {{trace_eof ? -1 : trace_read.value, POLLIN, 0},
@@ -303,9 +379,19 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
                 else {
                     if (header.kind == Kind::kernel_request && (!options.interactive || !draining))
                         return Result<bool>::failure("Unexpected kernel drain seal");
-                    const auto sent = send_bytes(client.value, frame, frame_needed, options.timeout_ms);
+                    const auto sent = send_client(frame, frame_needed,
+                                                  static_cast<int>(remaining));
                     if (header.kind == Kind::error) return Result<bool>::failure("Kernel capture failed");
                     if (!sent.ok() || sent.value()) return sent;
+                    if (header.kind == Kind::hello) {
+                        progress.hello_sent = true;
+                        progress.version = header.version;
+                    }
+                    if (observation_frame(header.kind)) {
+                        progress.data_sent = true;
+                        if (progress.start_configured && execution_frame(header.kind))
+                            progress.start_observed = true;
+                    }
                     if (header.kind == Kind::kernel_request) {
                         const auto received = action(client.value, serial.value, options.timeout_ms);
                         if (!received.ok() || received.value()) return received;
@@ -314,7 +400,7 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
                         pending = next_id++;
                         command = Command::resume;
                         control_deadline = now_ms() + options.timeout_ms;
-                        const auto resumed = qmp_command(qmp.value, "cont", pending, options.timeout_ms);
+                        const auto resumed = send_qmp("cont", pending);
                         if (!resumed.ok()) return Result<bool>::failure(resumed.error());
                         deadline = now_ms() + options.timeout_ms;
                     }
@@ -337,7 +423,7 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
                 pending = next_id++;
                 command = Command::capabilities;
                 control_deadline = now_ms() + options.timeout_ms;
-                const auto sent = qmp_command(qmp.value, "qmp_capabilities", pending, options.timeout_ms);
+                const auto sent = send_qmp("qmp_capabilities", pending);
                 if (!sent.ok()) return Result<bool>::failure(sent.error());
             } else if (message.get("id") != nullptr) {
                 if (!json_object_is_type(message.get("id"), json_type_int) || json_object_get_int(message.get("id")) != pending || pending == 0 || message.get("error") != nullptr || message.get("return") == nullptr)
@@ -349,7 +435,7 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
                     pending = next_id++;
                     command = Command::resume;
                     control_deadline = now_ms() + options.timeout_ms;
-                    const auto sent = qmp_command(qmp.value, "cont", pending, options.timeout_ms);
+                    const auto sent = send_qmp("cont", pending);
                     if (!sent.ok()) return Result<bool>::failure(sent.error());
                 } else if (completed == Command::stop) {
                     // QMP stopped execution. The plugin's explicit drain, not
@@ -442,9 +528,9 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
                     const Header header{Kind::guest_event, 0, 0, 0, payload.json_size};
                     encode_header(event_frame, header);
                     std::memcpy(event_frame + header_bytes, bytes, payload.json_size);
-                    const auto sent = send_bytes(client.value, event_frame,
-                                                 header_bytes + payload.json_size,
-                                                 options.timeout_ms);
+                    const auto sent = send_client(event_frame,
+                                                  header_bytes + payload.json_size,
+                                                  options.timeout_ms);
                     if (!sent.ok() || sent.value()) return sent;
                 }
             }
@@ -461,7 +547,7 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
             pending = next_id++;
             command = Command::stop;
             control_deadline = now_ms() + options.timeout_ms;
-            const auto stopped = qmp_command(qmp.value, "stop", pending, options.timeout_ms);
+            const auto stopped = send_qmp("stop", pending);
             if (!stopped.ok()) return Result<bool>::failure(stopped.error());
         }
         if (!child_done) {

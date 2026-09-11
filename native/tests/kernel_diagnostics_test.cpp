@@ -103,6 +103,13 @@ static int producer(int argc, char** argv) {
         shutdown(qmp, SHUT_WR);
         return 0;
     }
+    if (std::strcmp(record, "observation-deadline") == 0) {
+        assert(!interactive);
+        constexpr char start[] =
+            "C2T {\"event\":\"start\",\"mode\":\"observe\"}\n";
+        write_all(serial, start, sizeof(start) - 1);
+        for (;;) pause();
+    }
     answer_qmp_command(qmp);
     if (std::strcmp(record, "action-routing") == 0) {
         constexpr char events[] =
@@ -352,6 +359,68 @@ static void check_observation_protocol(const char* self) {
     assert(kill(child, 0) == -1 && errno == ESRCH);
 }
 
+static void check_observation_deadline_report(const char* self) {
+    int logs[2];
+    assert(pipe(logs) == 0);
+    const int listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    assert(bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    assert(listen(listener, 1) == 0);
+    socklen_t length = sizeof(address);
+    assert(getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length) == 0);
+    const pid_t worker = fork();
+    assert(worker >= 0);
+    if (worker == 0) {
+        close(logs[0]);
+        assert(dup2(logs[1], STDERR_FILENO) >= 0);
+        close(logs[1]);
+        char* arguments[] = {const_cast<char*>("observation-deadline"), nullptr};
+        const auto result = run_kernel(test_options(self, arguments, false, 100), listener);
+        if (!result.ok()) std::fprintf(stderr, "worker-error:%s\n", result.error());
+        _exit(result.ok() ? 0 : 1);
+    }
+    close(logs[1]);
+    close(listener);
+    const int client = socket(AF_INET, SOCK_STREAM, 0);
+    assert(client >= 0);
+    assert(connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+
+    uint8_t encoded[header_bytes];
+    read_all(client, encoded, sizeof(encoded));
+    auto decoded = decode_header(encoded, sizeof(encoded));
+    assert(decoded.ok() && decoded.value().kind == Kind::hello);
+    read_all(client, encoded, sizeof(encoded));
+    decoded = decode_header(encoded, sizeof(encoded));
+    assert(decoded.ok() && decoded.value().kind == Kind::terminal_report);
+    const auto flags = static_cast<uint8_t>(decoded.value().detail >> 16);
+    assert((flags & terminal_hello) != 0);
+    assert((flags & terminal_data) == 0);
+    char extra;
+    assert(read(client, &extra, 1) == 0);
+    close(client);
+
+    char output[8192]{};
+    size_t used = 0;
+    ssize_t count;
+    while ((count = read(logs[0], output + used, sizeof(output) - 1 - used)) > 0) {
+        used += static_cast<size_t>(count);
+        assert(used < sizeof(output) - 1);
+    }
+    close(logs[0]);
+    int status;
+    assert(waitpid(worker, &status, 0) == worker);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 1);
+    assert(std::strstr(output, "Target exceeded --max-run-ms deadline") != nullptr);
+    const char* child_line = std::strstr(output, "fixture-child:");
+    assert(child_line != nullptr);
+    const pid_t child = std::atoi(child_line + std::strlen("fixture-child:"));
+    assert(child > 0);
+    assert(kill(child, 0) == -1 && errno == ESRCH);
+}
+
 static void check_action_uses_adapter_channel(const char* self) {
     int logs[2];
     assert(pipe(logs) == 0);
@@ -434,6 +503,7 @@ int main(int argc, char** argv) {
     alarm(30);
     check_recovered_printk_suffix(argv[0]);
     check_observation_protocol(argv[0]);
+    check_observation_deadline_report(argv[0]);
     check_failure(argv[0], "plain text on private serial\n",
                   "reason=missing-event-prefix", false);
     check_failure(argv[0], "C2T {broken}\n", "reason=malformed-json", false);

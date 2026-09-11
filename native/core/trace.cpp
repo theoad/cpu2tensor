@@ -23,7 +23,7 @@ uint32_t load_u32(const uint8_t* bytes) { return static_cast<uint32_t>(load(byte
 uint64_t load_u64(const uint8_t* bytes) { return load(bytes, 8); }
 void encode_header(uint8_t* bytes, const Header& header) {
     store_u32(bytes, wire_magic);
-    store_u16(bytes + 4, wire_version);
+    store_u16(bytes + 4, header.version);
     store_u16(bytes + 6, static_cast<uint16_t>(header.kind));
     store_u32(bytes + 8, header.source);
     store_u32(bytes + 12, header.count);
@@ -42,9 +42,11 @@ size_t payload_size(const Header& header) {
 Result<Header> decode_header(const uint8_t* bytes, size_t size) {
     if (size != header_bytes) return Result<Header>::failure("Trace header must contain 32 bytes");
     if (load_u32(bytes) != wire_magic) return Result<Header>::failure("Not a cpu2tensor trace");
-    if (load_u16(bytes + 4) != wire_version) return Result<Header>::failure("Unsupported trace version");
+    const auto version = load_u16(bytes + 4);
+    if (version != legacy_wire_version && version != wire_version)
+        return Result<Header>::failure("Unsupported trace version");
     Header h{static_cast<Kind>(load_u16(bytes + 6)), load_u32(bytes + 8), load_u32(bytes + 12),
-             load_u64(bytes + 16), load_u64(bytes + 24)};
+             load_u64(bytes + 16), load_u64(bytes + 24), version};
     if (h.source >= max_sources || h.count > max_addresses)
         return Result<Header>::failure("Trace exceeds the supported source or batch limit");
     switch (h.kind) {
@@ -130,6 +132,22 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
         if (h.kind == Kind::complete && h.detail > 255) return Result<Header>::failure("Invalid target exit code");
         if (h.kind == Kind::error && (h.detail < 1 || h.detail > 4)) return Result<Header>::failure("Unknown trace failure");
         break;
+    case Kind::terminal_report: {
+        if (h.version != wire_version || h.source != 0 || h.count != 0 || h.sequence != 0 ||
+            (h.detail & UINT64_C(0xffffffffff000000)) != 0)
+            return Result<Header>::failure("Invalid terminal report fields");
+        const auto version = static_cast<uint8_t>(h.detail);
+        const auto reason = static_cast<uint8_t>(h.detail >> 8);
+        const auto flags = static_cast<uint8_t>(h.detail >> 16);
+        if (version != terminal_report_version ||
+            reason != static_cast<uint8_t>(TerminalReason::max_run_deadline) ||
+            (flags & ~terminal_flags) != 0 ||
+            ((flags & terminal_data) && !(flags & terminal_hello)) ||
+            ((flags & terminal_start_observed) && !(flags & terminal_start_configured)) ||
+            ((flags & terminal_stop_observed) && !(flags & terminal_stop_configured)))
+            return Result<Header>::failure("Unknown or inconsistent terminal report");
+        break;
+    }
     default: return Result<Header>::failure("Unknown trace frame kind");
     }
     return Result<Header>::success(h);
@@ -284,9 +302,17 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
     const auto checked = decode_header(encoded, sizeof(encoded));
     if (!checked.ok()) return Result<Done>::failure(checked.error());
     if (_finished) return Result<Done>::failure("Frame received after trace end");
+    if (_started && h.version != _version)
+        return Result<Done>::failure("Trace frame version changed after Hello");
     if (!_started) {
+        if (h.kind == Kind::terminal_report) {
+            _version = h.version;
+            _finished = true;
+            return Result<Done>::success({});
+        }
         if (h.kind != Kind::hello) return Result<Done>::failure("Trace must start with Hello");
         _started = true;
+        _version = h.version;
         _features = h.detail;
         return Result<Done>::success({});
     }
@@ -309,7 +335,7 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
             if (h.sequence > UINT64_MAX - count)
                 return Result<Done>::failure("Mixed sequence overflow");
             const auto result = accept({kind, h.source, rows, h.sequence + count,
-                                        kind == Kind::blocks ? 0 : size}, bytes + offset);
+                                        kind == Kind::blocks ? 0 : size, h.version}, bytes + offset);
             if (!result.ok()) return result;
             count += rows;
             offset += size;
@@ -416,7 +442,10 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
         _window_rows = false;
         return Result<Done>::success({});
     }
-    if (h.kind == Kind::error) { _finished = true; return Result<Done>::success({}); }
+    if (h.kind == Kind::error || h.kind == Kind::terminal_report) {
+        _finished = true;
+        return Result<Done>::success({});
+    }
     if (h.kind == Kind::complete) {
         if (_window_rows || _window_expected)
             return Result<Done>::failure("Trace ended before its required transition window");
