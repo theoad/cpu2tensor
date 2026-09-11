@@ -3,7 +3,7 @@ FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca0
 
 ARG QEMU_VERSION=11.0.3
 ARG QEMU_SHA256=da5fcffc32762820568b828ed430a728864d34d50b6d2f30358597760cbb0523
-ARG TORCH_VERSION=2.7.1
+ARG TORCH_VERSION=2.13.0
 
 RUN sed -i \
         's|http://archive.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' \
