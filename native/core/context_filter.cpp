@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include <cpu2tensor/context_filter.hpp>
 
+#include <limits>
+
 namespace cpu2tensor {
 
-void ContextFilterCounts::add(const ContextFilterCounts& other)
+bool ContextFilterCounts::add(const ContextFilterCounts& other)
 {
+    constexpr auto maximum = std::numeric_limits<uint64_t>::max();
+    if (kept > maximum - other.kept || dropped > maximum - other.dropped ||
+        matching > maximum - other.matching || foreign > maximum - other.foreign ||
+        unknown > maximum - other.unknown) return false;
     kept += other.kept;
     dropped += other.dropped;
     matching += other.matching;
     foreign += other.foreign;
     unknown += other.unknown;
+    return true;
 }
 
 void ContextFilter::configure(ContextFilterPolicy policy) { _policy = policy; }
@@ -41,25 +48,22 @@ ContextRelation ContextFilter::relation(uint64_t cr3, bool known) const
         ContextRelation::matching : ContextRelation::foreign;
 }
 
-bool ContextFilter::keep(ContextRelation relation) const
+bool ContextFilter::admits(ContextRelation relation) const
 {
     return relation == ContextRelation::matching || _policy == ContextFilterPolicy::keep;
 }
 
-bool ContextFilter::keep_registers(uint64_t cr3, bool known) const
+bool ContextFilter::account(ContextFilterCounts& counts, ContextRelation relation,
+                            uint64_t count) const
 {
-    return keep(relation(cr3, known));
-}
-
-bool ContextFilter::keep_memory(ContextFilterCounts& counts, uint64_t cr3, bool known) const
-{
-    const auto current = relation(cr3, known);
-    if (current == ContextRelation::matching) ++counts.matching;
-    else if (current == ContextRelation::foreign) ++counts.foreign;
-    else ++counts.unknown;
-    const bool included = keep(current);
-    included ? ++counts.kept : ++counts.dropped;
-    return included;
+    uint64_t* relation_count = relation == ContextRelation::matching ? &counts.matching :
+        relation == ContextRelation::foreign ? &counts.foreign : &counts.unknown;
+    uint64_t* policy_count = admits(relation) ? &counts.kept : &counts.dropped;
+    constexpr auto maximum = std::numeric_limits<uint64_t>::max();
+    if (*relation_count > maximum - count || *policy_count > maximum - count) return false;
+    *relation_count += count;
+    *policy_count += count;
+    return true;
 }
 
 ContextFilterSummary ContextFilter::summary(const ContextFilterCounts& counts) const

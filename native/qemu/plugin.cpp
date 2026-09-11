@@ -69,6 +69,8 @@ struct alignas(frame_ring_cache_line_bytes) Source final {
     std::atomic<uint64_t> frames_sent{0};
     uint64_t full_waits = 0;
     ContextFilterCounts filter_counts;
+    uint64_t filter_memory_total = 0;
+    ContextRelation filter_relation = ContextRelation::unknown;
     Register* registers = nullptr;
     GByteArray* scratch = nullptr;
     uint32_t register_count = 0;
@@ -101,6 +103,14 @@ RegisterProfile register_profile = RegisterProfile::general;
 char selected_registers[1024]{};
 using ReadX86State = bool (*)(uint64_t*, size_t);
 ReadX86State read_x86_state = nullptr;
+using RegisterConditionalMemory = void (*)(
+    qemu_plugin_insn*, qemu_plugin_vcpu_mem_cb_t, qemu_plugin_cb_flags,
+    qemu_plugin_mem_rw, qemu_plugin_cond, qemu_plugin_u64, uint64_t, void*);
+RegisterConditionalMemory register_conditional_memory = nullptr;
+qemu_plugin_scoreboard* filter_admission_scoreboard = nullptr;
+qemu_plugin_scoreboard* filter_memory_scoreboard = nullptr;
+qemu_plugin_u64 filter_admission{};
+qemu_plugin_u64 filter_memory_total{};
 bool capture_context = false;
 bool requested_context = false;
 bool capture_memory = true;
@@ -583,6 +593,20 @@ void release_registers(Source& source)
     }
 }
 
+void account_filter_memory(unsigned int index, Source& source)
+{
+    if (!has_rich_context_start_pc || !capture_memory) return;
+    const uint64_t total = qemu_plugin_u64_get(filter_memory_total, index);
+    if (total < source.filter_memory_total) {
+        fail(Failure::capture, "cpu2tensor: context filter memory counter overflowed\n");
+    }
+    const uint64_t count = total - source.filter_memory_total;
+    if (!context_filter.account(source.filter_counts, source.filter_relation, count)) {
+        fail(Failure::capture, "cpu2tensor: context filter summary counter overflowed\n");
+    }
+    source.filter_memory_total = total;
+}
+
 void source_start(qemu_plugin_id_t, unsigned int index)
 {
     if ((capture_stdio && index != 0) ||
@@ -592,11 +616,17 @@ void source_start(qemu_plugin_id_t, unsigned int index)
     }
     const ColdLock lock(sources[index]);
     sources[index].state = State::active;
+    if (has_rich_context_start_pc && capture_memory) {
+        qemu_plugin_u64_set(filter_memory_total, index, 0);
+        qemu_plugin_u64_set(filter_admission, index,
+                            context_filter_policy == ContextFilterPolicy::keep ? 1 : 0);
+    }
     register_setup(index, sources[index]);
 }
 
 void end_source(unsigned int index, Source& source)
 {
+    account_filter_memory(index, source);
     flush(index, source);
     if (ring_publication) wait_for_frames(source);
     send_header({Kind::source_end, index, 0, source.next, 0});
@@ -616,7 +646,8 @@ void source_end(qemu_plugin_id_t, unsigned int index)
         // Register RIP is raw storage; event PCs use the linear code address.
         const auto pc = offset + ((capture_context && source.raw_state[7] != 64) ? source.raw_state[6] : 0);
         emit_context(index, source, pc);
-        if (!has_rich_context_start_pc || context_filter.keep_registers(source.raw_state[2], true))
+        if (!has_rich_context_start_pc ||
+            context_filter.admits(context_filter.relation(source.raw_state[2], true)))
             sample_registers(index, source, pc, Checkpoint::exit);
     }
     // Continuous reduction is sealed once every vCPU callback has stopped in
@@ -631,6 +662,9 @@ void source_end(qemu_plugin_id_t, unsigned int index)
 void block_entry(unsigned int index, void* address)
 {
     auto& source = active_source(index);
+    // Attribute the previous block before refreshing its relation or publishing
+    // a one-shot latch for the new block.
+    account_filter_memory(index, source);
     const auto pc = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(address));
     if (has_start_pc && pc == start_pc) {
         auto expected = CaptureState::waiting;
@@ -681,8 +715,15 @@ void block_entry(unsigned int index, void* address)
         context_filter.latch(index, pc, source.raw_state[2], true);
     emit_context(index, source, pc);
     // These changes precede this block; they are not effects of its execution.
-    source.rich_recording = !has_rich_context_start_pc ||
-        context_filter.keep_registers(source.raw_state[2], true);
+    if (has_rich_context_start_pc) {
+        source.filter_relation = context_filter.relation(source.raw_state[2], true);
+        source.rich_recording = context_filter.admits(source.filter_relation);
+        if (capture_memory) {
+            qemu_plugin_u64_set(filter_admission, index, source.rich_recording ? 1 : 0);
+        }
+    } else {
+        source.rich_recording = true;
+    }
     if (source.rich_recording) sample_registers(index, source, pc, Checkpoint::block);
     if (capture_blocks) {
         store_u64(append(index, source, Kind::blocks, sizeof(uint64_t)), pc);
@@ -702,13 +743,6 @@ void memory_access(unsigned int index, qemu_plugin_meminfo_t info, uint64_t addr
         fail(Failure::unsupported_target, "cpu2tensor: memory access width is unsupported\n");
     }
     const uint32_t size = uint32_t{1} << shift;
-    if (has_rich_context_start_pc) {
-        // x86 ends a translation block when paging state changes. The next
-        // memory instruction therefore follows block_entry and its refreshed
-        // CR3. This keeps filter admission off the per-access register path.
-        if (!context_filter.keep_memory(source.filter_counts, source.raw_state[2],
-                                        source.context_sampled)) return;
-    }
     const PublishChanges publication(source);
     if (!has_rich_context_start_pc) {
         // Unfiltered capture retains the stronger historical contract: helpers
@@ -798,9 +832,21 @@ void translate(qemu_plugin_id_t, qemu_plugin_tb* block)
         for (size_t index = 0; index < qemu_plugin_tb_n_insns(block); ++index) {
             auto* instruction = qemu_plugin_tb_get_insn(block, index);
             const auto pc = static_cast<uintptr_t>(qemu_plugin_insn_vaddr(instruction));
-            qemu_plugin_register_vcpu_mem_cb(instruction, memory_access,
-                memory_flags,
-                QEMU_PLUGIN_MEM_RW, reinterpret_cast<void*>(pc));
+            if (has_rich_context_start_pc) {
+                // The inline total preserves exact dropped/unknown accounting.
+                // The live admission test also covers a translated block reused
+                // after the target context migrates to another vCPU.
+                qemu_plugin_register_vcpu_mem_inline_per_vcpu(
+                    instruction, QEMU_PLUGIN_MEM_RW, QEMU_PLUGIN_INLINE_ADD_U64,
+                    filter_memory_total, 1);
+                register_conditional_memory(
+                    instruction, memory_access, memory_flags, QEMU_PLUGIN_MEM_RW,
+                    QEMU_PLUGIN_COND_EQ, filter_admission, 1,
+                    reinterpret_cast<void*>(pc));
+            } else {
+                qemu_plugin_register_vcpu_mem_cb(instruction, memory_access,
+                    memory_flags, QEMU_PLUGIN_MEM_RW, reinterpret_cast<void*>(pc));
+            }
         }
     }
 }
@@ -1078,7 +1124,10 @@ void finish(qemu_plugin_id_t, void*)
     }
     if (has_rich_context_start_pc) {
         ContextFilterCounts counts;
-        for (const auto& source : sources) counts.add(source.filter_counts);
+        for (const auto& source : sources) {
+            if (!counts.add(source.filter_counts))
+                fail(Failure::capture, "cpu2tensor: context filter total counter overflowed\n");
+        }
         const auto summary = context_filter.summary(counts);
         uint8_t frame[header_bytes + context_filter_bytes]{};
         encode_header(frame, {Kind::context_filter, 0, 1, 0, context_filter_bytes});
@@ -1096,6 +1145,12 @@ void finish(qemu_plugin_id_t, void*)
         store_u64(output + 72, summary.unknown);
         if (!publish(frame, sizeof(frame)).ok())
             fail(Failure::transport, "cpu2tensor: cannot publish context filter summary\n");
+    }
+    if (filter_admission_scoreboard != nullptr) {
+        qemu_plugin_scoreboard_free(filter_memory_scoreboard);
+        qemu_plugin_scoreboard_free(filter_admission_scoreboard);
+        filter_memory_scoreboard = nullptr;
+        filter_admission_scoreboard = nullptr;
     }
     send_header({Kind::complete});
 }
@@ -1390,6 +1445,20 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         (flags & O_NONBLOCK) != 0 || (flags & O_ACCMODE) != O_WRONLY) {
         std::fputs("cpu2tensor: trace fd must be a blocking pipe write end\n", stderr);
         return 1;
+    }
+    if (has_rich_context_start_pc && capture_memory) {
+        register_conditional_memory = reinterpret_cast<RegisterConditionalMemory>(
+            dlsym(RTLD_DEFAULT,
+                  "qemu_plugin_cpu2tensor_register_vcpu_mem_cond_cb_v1"));
+        if (register_conditional_memory == nullptr) {
+            std::fputs("cpu2tensor: rich context memory filtering requires the optional "
+                "memory-condition-v1 QEMU hook; see docs/qemu-memory-condition.md\n", stderr);
+            return 1;
+        }
+        filter_admission_scoreboard = qemu_plugin_scoreboard_new(sizeof(uint64_t));
+        filter_memory_scoreboard = qemu_plugin_scoreboard_new(sizeof(uint64_t));
+        filter_admission = {filter_admission_scoreboard, 0};
+        filter_memory_total = {filter_memory_scoreboard, 0};
     }
     const uint64_t features = (capture_memory ? feature_memory : 0) |
         (register_profile != RegisterProfile::none ? feature_registers : 0) |

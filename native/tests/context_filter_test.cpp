@@ -13,19 +13,21 @@ int main()
     ContextFilterCounts source1;
     filter.configure(ContextFilterPolicy::drop);
 
-    // Source zero reaches the target gate. The same context then migrates to
-    // source one while background work continues on both sources.
-    assert(!filter.keep_memory(source0, target, true));
+    // Account the preceding block's unknown memory delta before the gate block
+    // publishes and classifies its paging root. The same context then migrates
+    // to source one while background work continues on both sources.
+    assert(filter.account(source0, filter.relation(target, true), 1));
+    assert(!filter.admits(filter.relation(target, true)));
     assert(filter.latch(0, 0xffffffff81001000, target, true));
     assert(!filter.latch(1, 0xffffffff81001000, background, true));
-    assert(filter.keep_registers(target, true));
-    assert(!filter.keep_registers(background, true));
-    assert(filter.keep_memory(source0, target | 7, true));
-    assert(!filter.keep_memory(source0, background, true));
-    assert(filter.keep_memory(source1, target, true));
-    assert(!filter.keep_memory(source1, background, true));
+    assert(filter.admits(filter.relation(target, true)));
+    assert(!filter.admits(filter.relation(background, true)));
+    assert(filter.account(source0, filter.relation(target | 7, true), 1));
+    assert(filter.account(source0, filter.relation(background, true), 1));
+    assert(filter.account(source1, filter.relation(target, true), 1));
+    assert(filter.account(source1, filter.relation(background, true), 1));
 
-    source0.add(source1);
+    assert(source0.add(source1));
     const auto summary = filter.summary(source0);
     assert(summary.policy == ContextFilterPolicy::drop);
     assert(summary.latch == ContextLatch::known);
@@ -42,11 +44,30 @@ int main()
     ContextFilter permissive;
     ContextFilterCounts permissive_counts;
     permissive.configure(ContextFilterPolicy::keep);
-    assert(permissive.keep_memory(permissive_counts, background, true));
+    assert(permissive.account(permissive_counts, permissive.relation(background, true), 1));
     assert(permissive.latch(1, 7, target, true));
-    assert(permissive.keep_memory(permissive_counts, background, true));
-    assert(permissive.keep_memory(permissive_counts, target, true));
+    assert(permissive.account(permissive_counts, permissive.relation(background, true), 1));
+    assert(permissive.account(permissive_counts, permissive.relation(target, true), 1));
     const auto kept = permissive.summary(permissive_counts);
     assert(kept.kept == 3 && kept.dropped == 0);
     assert(kept.matching == 1 && kept.foreign == 1 && kept.unknown == 1);
+
+    ContextFilterCounts grouped;
+    assert(filter.account(grouped, ContextRelation::unknown, 11));
+    assert(filter.account(grouped, ContextRelation::matching, 7));
+    assert(filter.account(grouped, ContextRelation::foreign, 5));
+    assert(grouped.kept == 7 && grouped.dropped == 16);
+    assert(grouped.matching == 7 && grouped.foreign == 5 && grouped.unknown == 11);
+
+    ContextFilterCounts overflow;
+    overflow.foreign = UINT64_MAX;
+    assert(!filter.account(overflow, ContextRelation::foreign, 1));
+    assert(overflow.foreign == UINT64_MAX && overflow.dropped == 0);
+
+    ContextFilterCounts add_overflow;
+    ContextFilterCounts add_one;
+    add_overflow.kept = UINT64_MAX;
+    add_one.kept = 1;
+    assert(!add_overflow.add(add_one));
+    assert(add_overflow.kept == UINT64_MAX);
 }

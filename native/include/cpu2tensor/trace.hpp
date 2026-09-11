@@ -147,5 +147,6 @@ private:
     bool _layout_seen = false;
     bool _source_data_seen = false;
     bool _context_filter_seen = false;
+    uint64_t _context_filter_memory_rows = 0;
 };
 } // namespace cpu2tensor

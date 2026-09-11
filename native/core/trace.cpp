@@ -577,7 +577,8 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
         const uint64_t foreign = load_u64(bytes + 64);
         const uint64_t unknown = load_u64(bytes + 72);
         if ((policy != 1 && policy != 2) || (latch != 2 && latch != 3) ||
-            source >= max_sources || reserved != 0 || root != (cr3 & ~UINT64_C(0xfff)) ||
+            source >= max_sources || !_seen[source] || !_ended[source] || reserved != 0 ||
+            root != (cr3 & ~UINT64_C(0xfff)) || kept != _context_filter_memory_rows ||
             kept > UINT64_MAX - dropped ||
             matching > UINT64_MAX - foreign || matching + foreign > UINT64_MAX - unknown ||
             kept + dropped != matching + foreign + unknown ||
@@ -668,6 +669,11 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
     if (h.kind == Kind::memory) {
         const auto result = memory(h, bytes);
         if (!result.ok()) return result;
+        if ((_features & feature_context_filter) != 0) {
+            if (_context_filter_memory_rows > UINT64_MAX - h.count)
+                return Result<Done>::failure("Context filter memory row count overflow");
+            _context_filter_memory_rows += h.count;
+        }
     }
     _seen[source] = true;
     _source_data_seen = true;

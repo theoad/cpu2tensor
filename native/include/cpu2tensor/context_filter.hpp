@@ -31,7 +31,7 @@ struct ContextFilterCounts final {
     uint64_t foreign = 0;
     uint64_t unknown = 0;
 
-    void add(const ContextFilterCounts& other);
+    bool add(const ContextFilterCounts& other);
 };
 
 // One filter belongs to one QEMU process. Latching is a one-time cross-vCPU
@@ -41,13 +41,12 @@ public:
     void configure(ContextFilterPolicy policy);
     bool latch(uint32_t source, uint64_t gate_pc, uint64_t cr3, bool known);
     ContextRelation relation(uint64_t cr3, bool known) const;
-    bool keep_registers(uint64_t cr3, bool known) const;
-    bool keep_memory(ContextFilterCounts& counts, uint64_t cr3, bool known) const;
+    bool admits(ContextRelation relation) const;
+    bool account(ContextFilterCounts& counts, ContextRelation relation, uint64_t count) const;
     ContextFilterSummary summary(const ContextFilterCounts& counts = {}) const;
 
 private:
     static uint64_t paging_root(uint64_t cr3);
-    bool keep(ContextRelation relation) const;
 
     ContextFilterPolicy _policy = ContextFilterPolicy::drop;
     std::atomic<ContextLatch> _latch{ContextLatch::waiting};

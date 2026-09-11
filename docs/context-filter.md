@@ -52,14 +52,22 @@ when the latched address space first migrates there. A source that never runs th
 target context can end without register data. These remain boundary samples, not
 every register write or a paused-world snapshot.
 
-Filtered memory callbacks use the CR3 cached at their owning block entry. x86
-paging-control writes terminate translated execution before a later memory
-instruction, so the next callback follows a new block entry and refreshed cache.
-This avoids a register read on every memory transaction. Events before the latch
-are explicitly `unknown`. A callback that races the short one-shot latch
-publication is also `unknown` and never waits for the gate vCPU. The plugin does
-not guess either relation. Unfiltered capture retains its stronger per-memory
-callback context refresh.
+Filtered memory callbacks use the relation selected from CR3 at their owning
+block entry. x86 paging-control writes terminate translated execution before a
+later memory instruction, so the next access follows a new block entry and a
+refreshed relation. The optional [QEMU conditional-memory extension](qemu-memory-condition.md)
+tests a live per-vCPU admission scoreboard before entering the rich callback.
+This avoids both a register read and a rejected C++ callback on every background
+transaction, while already translated blocks respond to later vCPU migration.
+Unfiltered capture retains its stronger per-memory callback context refresh.
+
+Each source retains its latest block relation. If another vCPU publishes the
+latch while that block executes, its accesses keep the previous relation until
+its next block entry. Events before the latch are `unknown`. A block entry that
+observes the short one-shot publication state is also `unknown` and never waits
+for the gate vCPU. The gate source accounts its preceding block first and then
+classifies the gate block as matching. These per-source boundaries do not claim
+a total order across vCPUs.
 
 The last yielded worker-wide batch contains `batch.context_filter`:
 
@@ -68,11 +76,18 @@ The last yielded worker-wide batch contains `batch.context_filter`:
 - `matching`, `foreign`, and `unknown` partition every candidate memory callback.
 - `kept` and `dropped` report the result of the selected policy.
 
-All counters are exact for callbacks admitted by the surrounding observation
-run. They do not count DMA, implicit MMU writes, or memory activity outside QEMU's
+An unconditional inline per-vCPU total counts candidate QEMU plugin callbacks.
+At each block entry and vCPU exit, its delta is assigned to the preceding block's
+cached relation. The conditional rich callback emits only admitted rows. All
+counters are therefore exact for callbacks admitted by the surrounding
+observation run, including rejected callbacks that never enter cpu2tensor C++.
+They do not count DMA, implicit MMU writes, or memory activity outside QEMU's
 plugin callbacks. The summary follows every source end and consumes no vCPU
 sequence. The decoder rejects a missing, repeated, internally inconsistent, or
-early summary.
+early summary. It also counts emitted memory rows, including memory subruns in a
+mixed frame, and requires that count to equal `kept`. The named gate source must
+have appeared and ended. These checks expose a broken admission hook or producer
+counter instead of silently accepting its metadata.
 
 `--max-run-ms` remains one absolute observation budget. Rich filtering does not
 renew it: pipe reads, socket sends and lossless backpressure all consume the same
@@ -103,9 +118,10 @@ override. Its boot log does not independently prove that PTI became active for
 this virtual CPU. The fixture therefore keeps its asserted target values in user
 space and makes no kernel-root attribution claim.
 
+The repository now contains the smallest QEMU extension needed to keep the
+pre-latch and background path out of the rich C++ callback while retaining
+dynamic admission for target blocks translated earlier. QEMU 11.0.3 compiles the
+three changed execution objects locally, and ordinary system tests still pass.
 This mode has not yet passed the real two-vCPU acceptance or demonstrated the
-requested size/runtime reduction. A complete optimization needs to avoid the
-pre-latch full memory callback while still instrumenting every target transaction
-after the latch, including target blocks translated earlier. Translation-time
-gating alone would silently lose those reused blocks and is not an acceptable
-substitute.
+requested size/runtime reduction. It remains incomplete until the patched QEMU
+runs the exact target/background fixture within the bounded deadline.
