@@ -126,7 +126,31 @@ CPU2TENSOR_CI_BUILD=/path/to/build \
 
 The host check exercises the guest grammar and oracle but cannot prove QEMU's
 stopped-world boundary. The generic action-window implementation has separate
-native and socket-fixture coverage. This example has not yet been run as PID 1
-under a full-system QEMU guest, so it makes no trace-distinguishability or timing
-claim. A useful learning experiment still needs held-parent and held-worker
-controls; the example only supplies the mechanics for constructing those inputs.
+native and socket-fixture coverage. The pinned CI image passed 172 unit tests
+with 86 environment-dependent skips, 96% Python line coverage, and 96.3% native
+line coverage in 28 seconds. Its system gate passed all six native and six
+Python checks in 27 seconds.
+
+On 2026-09-11, commit `104975c06cfd9bd7055f51622643fee170e06e14`
+was built and run on `trail-x86`: Linux x86-64, QEMU 11.0.3 TCG multi-thread
+mode, Linux 6.9.0-dirty, and two guest vCPUs. Marker addresses read from the
+matching static guest were begin `0x402270`, end `0x402280`, and abort
+`0x402290`. One `KernelEnv` reset was followed by `open plain 8`,
+`open cloexec 8`, and `quit`. Both actions returned their exact result oracle
+and one ended, zero-overflow window. Raw block/transition counts were
+20,162/20,161 for plain and 19,400/19,398 for cloexec. The worker reaped QEMU,
+closed its listener, and left no matching process behind.
+
+The checked SHA-256 values are
+`2676047693b7a002803a23e11eea708c08d84fbf33f8d5d9de55afb2a3099c97`
+for the guest,
+`9c4806cda13f04128f79101794eab0aa3f03e7a256afd09a7d689d768d43f60b`
+for the worker,
+`06a78719f0206a81b3ae4234fbbb5ba63d58a0dcf803ddfe2dbf1d2ffc3933b0`
+for the plugin, and
+`11e92e1e13aa1842a20beb476725ab37fb5378d1ccbd0801b8aca1e00c4888e4`
+for the initramfs. These identify correctness evidence, not a performance
+measurement or a trace-distinguishability result. The full windows include
+natural concurrent kernel work. A useful learning experiment still needs
+held-parent and held-worker controls; the example supplies the mechanics for
+constructing those inputs.
