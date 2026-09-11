@@ -601,7 +601,11 @@ void account_filter_memory(unsigned int index, Source& source)
         fail(Failure::capture, "cpu2tensor: context filter memory counter overflowed\n");
     }
     const uint64_t count = total - source.filter_memory_total;
-    if (!context_filter.account(source.filter_counts, source.filter_relation, count)) {
+    // A source begins its observation window at the gate, or at its first later
+    // block boundary. Its preceding block is outside that window, so advance the
+    // inline counter baseline without adding those accesses to the summary.
+    if (source.recording &&
+        !context_filter.account(source.filter_counts, source.filter_relation, count)) {
         fail(Failure::capture, "cpu2tensor: context filter summary counter overflowed\n");
     }
     source.filter_memory_total = total;
@@ -618,10 +622,49 @@ void source_start(qemu_plugin_id_t, unsigned int index)
     sources[index].state = State::active;
     if (has_rich_context_start_pc && capture_memory) {
         qemu_plugin_u64_set(filter_memory_total, index, 0);
-        qemu_plugin_u64_set(filter_admission, index,
-                            context_filter_policy == ContextFilterPolicy::keep ? 1 : 0);
+        // The rich gate starts the observation window for both policies.
+        qemu_plugin_u64_set(filter_admission, index, 0);
     }
     register_setup(index, sources[index]);
+}
+
+bool record_block(unsigned int index, Source& source, uint64_t pc,
+                  const BlockAdmission& admission, bool latch_context)
+{
+    if (reduce_transitions) {
+        if (reduce_observations) {
+            if (source.reduced_blocks == UINT64_MAX)
+                fail(Failure::capture, "cpu2tensor: reduced block count overflow\n");
+            ++source.reduced_blocks;
+        }
+        const auto observed = transition_window->observe(index, pc, admission);
+        if (!observed.ok()) fail(Failure::capture, observed.error());
+    }
+    read_context(source, source.register_count != 0);
+    if (latch_context && !context_filter.latch(index, pc, source.raw_state[2], true)) {
+        source.recording = false;
+        return false;
+    }
+    const PublishChanges publication(source);
+    emit_context(index, source, pc);
+    // These changes precede this block; they are not effects of its execution.
+    if (has_rich_context_start_pc) {
+        source.filter_relation = context_filter.relation(source.raw_state[2], true);
+        source.rich_recording = context_filter.admits(source.filter_relation);
+        if (capture_memory) {
+            qemu_plugin_u64_set(filter_admission, index, source.rich_recording ? 1 : 0);
+        }
+    } else {
+        source.rich_recording = true;
+    }
+    if (source.rich_recording) sample_registers(index, source, pc, Checkpoint::block);
+    if (capture_blocks) {
+        store_u64(append(index, source, Kind::blocks, sizeof(uint64_t)), pc);
+        if (source.count == max_addresses) {
+            flush(index, source);
+        }
+    }
+    return true;
 }
 
 void end_source(unsigned int index, Source& source)
@@ -639,6 +682,7 @@ void source_end(qemu_plugin_id_t, unsigned int index)
     auto& source = active_source(index);
     const ColdLock lock(source);
     if (source.register_count != 0 && (!has_start_pc || source.next != 0) &&
+        (!has_rich_context_start_pc || source.recording) &&
         (!has_stop_pc || capture_state.load(std::memory_order_acquire) == CaptureState::running) &&
         (!has_window_start_pc || source.recording)) {
         read_context(source, true);
@@ -666,6 +710,18 @@ void block_entry(unsigned int index, void* address)
     // a one-shot latch for the new block.
     account_filter_memory(index, source);
     const auto pc = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(address));
+    if (has_rich_context_start_pc &&
+        capture_state.load(std::memory_order_acquire) == CaptureState::waiting) {
+        source.recording = false;
+        if (pc != rich_context_start_pc) return;
+        const BlockAdmission admission{0, true};
+        source.recording = true;
+        if (!record_block(index, source, pc, admission, true)) return;
+        // The latch and gate rows are visible before another vCPU can enter its
+        // observation window. That vCPU starts at its next block boundary.
+        capture_state.store(CaptureState::running, std::memory_order_release);
+        return;
+    }
     if (has_start_pc && pc == start_pc) {
         auto expected = CaptureState::waiting;
         capture_state.compare_exchange_strong(expected, CaptureState::running, std::memory_order_acq_rel);
@@ -700,37 +756,7 @@ void block_entry(unsigned int index, void* address)
     source.recording = capture_state.load(std::memory_order_acquire) == CaptureState::running &&
         admission.included;
     if (!source.recording) return;
-    if (reduce_transitions) {
-        if (reduce_observations) {
-            if (source.reduced_blocks == UINT64_MAX)
-                fail(Failure::capture, "cpu2tensor: reduced block count overflow\n");
-            ++source.reduced_blocks;
-        }
-        const auto observed = transition_window->observe(index, pc, admission);
-        if (!observed.ok()) fail(Failure::capture, observed.error());
-    }
-    const PublishChanges publication(source);
-    read_context(source, source.register_count != 0);
-    if (has_rich_context_start_pc && pc == rich_context_start_pc)
-        context_filter.latch(index, pc, source.raw_state[2], true);
-    emit_context(index, source, pc);
-    // These changes precede this block; they are not effects of its execution.
-    if (has_rich_context_start_pc) {
-        source.filter_relation = context_filter.relation(source.raw_state[2], true);
-        source.rich_recording = context_filter.admits(source.filter_relation);
-        if (capture_memory) {
-            qemu_plugin_u64_set(filter_admission, index, source.rich_recording ? 1 : 0);
-        }
-    } else {
-        source.rich_recording = true;
-    }
-    if (source.rich_recording) sample_registers(index, source, pc, Checkpoint::block);
-    if (capture_blocks) {
-        store_u64(append(index, source, Kind::blocks, sizeof(uint64_t)), pc);
-        if (source.count == max_addresses) {
-            flush(index, source);
-        }
-    }
+    (void)record_block(index, source, pc, admission, false);
 }
 
 void memory_access(unsigned int index, qemu_plugin_meminfo_t info, uint64_t address, void* pc)
@@ -1422,7 +1448,10 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         std::fputs("cpu2tensor: rich context filtering needs observation-only rich x86 system capture\n", stderr);
         return 1;
     }
-    if (has_rich_context_start_pc) context_filter.configure(context_filter_policy);
+    if (has_rich_context_start_pc) {
+        context_filter.configure(context_filter_policy);
+        capture_state.store(CaptureState::waiting, std::memory_order_relaxed);
+    }
     if (capture_context) {
         read_x86_state = reinterpret_cast<ReadX86State>(dlsym(RTLD_DEFAULT, "qemu_plugin_cpu2tensor_x86_state_v1"));
         if (read_x86_state == nullptr && register_profile != RegisterProfile::none) {

@@ -20,7 +20,7 @@ def current(frame_bytes):
 
 
 def summary(*, policy=1, latch=2, source=0, gate=0x81001000, cr3=0x12000,
-            kept=2, dropped=3, matching=2, foreign=2, unknown=1):
+            kept=2, dropped=2, matching=2, foreign=2, unknown=0):
     payload = struct.pack("<IIIIQQQQQQQQ", policy, latch, source, 0, gate, cr3,
                           cr3 & ~0xfff,
                           kept, dropped, matching, foreign, unknown)
@@ -80,7 +80,7 @@ class ContextFilterTests(unittest.TestCase):
         self.assertEqual(metadata.context_filter.paging_root, target)
         self.assertEqual((metadata.context_filter.kept, metadata.context_filter.dropped,
                           metadata.context_filter.matching, metadata.context_filter.foreign,
-                          metadata.context_filter.unknown), (2, 3, 2, 2, 1))
+                          metadata.context_filter.unknown), (2, 2, 2, 2, 0))
 
     def test_missing_or_inconsistent_summary_is_rejected(self):
         cases = (

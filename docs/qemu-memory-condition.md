@@ -49,23 +49,23 @@ Each translated memory operation first performs QEMU's existing inline
 rich row only when that vCPU's admission scoreboard is one. At each basic-block
 entry cpu2tensor:
 
-1. reads the current source's total and attributes the delta to the relation of
+1. reads the current source's total, discarding the delta before that source has
+   entered the observation window and otherwise attributing it to the relation of
    its previous block;
 2. samples CR3 and, for the gate block, publishes the one-shot paging root;
 3. classifies the new block and updates only that vCPU's admission entry.
 
-The last delta is read at vCPU exit. This gives exact matching, foreign, unknown,
-kept, and dropped callback counts without entering cpu2tensor C++ for rejected
-accesses. The two scoreboards have independent entries per vCPU; the filter adds
-no cross-vCPU lock.
+The admission scoreboards start at zero for both policies. The last in-window
+delta is read at vCPU exit. This gives exact matching, foreign, unknown, kept, and
+dropped callback counts for the nominated window without entering cpu2tensor C++
+for rejected accesses. The two scoreboards have independent entries per vCPU; the
+filter adds no cross-vCPU lock.
 
-A source retains the relation selected at its latest block entry. If another
-vCPU publishes the latch while that block runs, the source keeps its earlier
-relation until its next block entry. This is deterministic within each source and
-does not invent a total order between concurrent vCPUs. The gate source counts
-its prior block before publishing the latch, then treats the gate block itself as
-matching. A source that observes the short `writing` publication state records
-that next block as unknown and never waits.
+A source retains the relation selected at its latest in-window block entry. The
+gate source discards its prior block, publishes the latch and gate rows, and only
+then releases the global started state. A concurrent source discards the block it
+was already executing and joins at its next block boundary. This is deterministic
+within each source and does not invent a total order between concurrent vCPUs.
 
 ## Apply and validate separately
 
@@ -98,6 +98,10 @@ four. Both guests exited with their expected status. These fixtures establish
 dynamic admission for existing direct and helper-generated code locally; they do
 not substitute for the full Linux acceptance below.
 
-The earlier real Linux fixture has not been rerun with this extension. Completion,
-exact guest values, runtime reduction, and capture-size reduction remain required
-acceptance evidence before the context-filter issue is ready to close.
+One real Linux run used this extension, but a faulty measurement relay disconnected
+after a 761,633,664-byte partial pre-gate block stream. That partial result proved
+neither completion nor rich-row correctness. It did expose that the observation
+window itself had not started at the gate; cpu2tensor now suppresses every public
+signal before it. Completion, exact guest values, runtime reduction, and capture-
+size reduction with the corrected window remain required acceptance evidence
+before the context-filter issue is ready to close.

@@ -169,6 +169,7 @@ class RemoteKernelTests(unittest.TestCase):
                               context_fixture=True, context='on', batching='mixed',
                               max_run_ms=120000, timeout=120000)
         blocks = set()
+        first_block = {}
         contexts = set()
         register_sources = set()
         background_rows = 0
@@ -182,6 +183,7 @@ class RemoteKernelTests(unittest.TestCase):
             for batch in pool.read():
                 if batch.addresses.numel():
                     blocks.add(batch.source)
+                    first_block.setdefault(batch.source, int(batch.addresses[0]))
                 if batch.context is not None:
                     contexts.add(batch.source)
                 if batch.registers is not None:
@@ -208,6 +210,7 @@ class RemoteKernelTests(unittest.TestCase):
                     self.assertIsNone(summary)
                     summary = batch.context_filter
         self.assertEqual(blocks, {0, 1})
+        self.assertEqual(first_block[0], self.context_gate)
         self.assertEqual(contexts, {0, 1})
         self.assertEqual(register_sources, {0, 1})
         self.assertEqual(background_rows, 0)

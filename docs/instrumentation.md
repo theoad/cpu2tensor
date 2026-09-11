@@ -288,8 +288,9 @@ raw-CR3 limits, a vectorized Python example and measured overhead.
 ## Paging-context filtered rich selection
 
 `--rich-context-start-pc ADDRESS` latches a normalized CR3 page-table root at an
-exact block gate, preserves blocks and sparse context changes across every vCPU,
-and admits rich memory/register observations only by the explicit `drop` or
-`keep` policy. A final worker-wide record exposes the latch and exact memory
-accounting. The [filter contract](context-filter.md) defines migration, sequence,
+exact block gate and starts the observation window there. It preserves blocks and
+sparse context changes across every vCPU from that point, and admits rich
+memory/register observations only by the explicit `drop` or `keep` policy. A
+final worker-wide record exposes the latch and exact in-window memory accounting.
+The [filter contract](context-filter.md) defines migration, sequence,
 register-baseline, unknown-context and deadline behavior.
