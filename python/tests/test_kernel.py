@@ -19,6 +19,7 @@ from test_stdio import interactive_worker, receive
 
 
 FEATURES = (1 << 12) | (1 << 13)
+WINDOWS = 1 << 20
 
 
 def event(value: dict) -> bytes:
@@ -28,6 +29,21 @@ def event(value: dict) -> bytes:
 
 def ready(step: int) -> bytes:
     return event({"event": "ready", "step": step}) + frame(10, detail=127)
+
+
+def transition_frame(source: int, window: int,
+                     rows: tuple[tuple[int, int, int], ...]) -> bytes:
+    payload = b"".join(struct.pack("<QQQ", *row) for row in rows)
+    return (struct.pack("<IHHIIQQ", 0x31543243, 2, 15, source, len(rows),
+                        window, len(payload)) + payload)
+
+
+def window_frame(window: int, status: int, *, sources: int, capacity: int,
+                 distinct: int, observed: int, overflow: int = 0) -> bytes:
+    payload = struct.pack("<IIIIQQQ", status, sources, capacity, 0,
+                          distinct, observed, overflow)
+    return (struct.pack("<IHHIIQQ", 0x31543243, 2, 16, 0, 1,
+                        window, len(payload)) + payload)
 
 
 def read_action(connection: socket.socket) -> bytes:
@@ -48,6 +64,101 @@ def result_for(action: int, step: int) -> dict:
 
 
 class KernelTests(unittest.TestCase):
+    @unittest.skipUnless(torch.backends.mps.is_available(), "MPS unavailable")
+    def test_window_summary_empty_tensor_uses_configured_device(self) -> None:
+        def serve(connection: socket.socket) -> None:
+            connection.sendall(frame(1, detail=2 | FEATURES | WINDOWS) + ready(0))
+            self.assertEqual(read_action(connection), COMMANDS[4])
+            connection.sendall(window_frame(1, 1, sources=1, capacity=8,
+                                            distinct=0, observed=0)
+                               + frame(3, source=0)
+                               + event({"event": "complete", "ok": True}) + frame(4))
+
+        with interactive_worker(serve) as endpoint, KernelEnv(endpoint, device="mps") as env:
+            self.assertEqual(list(env.reset()), [])
+            batches = list(env.step(COMMANDS[4]))
+        summary = next(batch for batch in batches if batch.transition_window is not None)
+        self.assertEqual(summary.addresses.device.type, "mps")
+
+    def test_reduced_window_matches_raw_per_source_transitions(self) -> None:
+        def serve(connection: socket.socket) -> None:
+            connection.sendall(frame(1, detail=2 | FEATURES | WINDOWS) + ready(0))
+            self.assertEqual(read_action(connection), COMMANDS[0])
+            connection.sendall(
+                frame(2, source=0, addresses=(10, 20, 10, 20))
+                + frame(2, source=1, addresses=(90, 91))
+                + transition_frame(0, 1, ((10, 20, 2), (20, 10, 1)))
+                + transition_frame(1, 1, ((90, 91, 1),))
+                + window_frame(1, 1, sources=2, capacity=8,
+                               distinct=3, observed=4)
+                + event(result_for(0, 0)) + ready(1)
+            )
+            self.assertEqual(read_action(connection), COMMANDS[4])
+            connection.sendall(window_frame(2, 1, sources=2, capacity=8,
+                                            distinct=0, observed=0)
+                               + frame(3, source=0, sequence=4)
+                               + frame(3, source=1, sequence=2)
+                               + event({"event": "complete", "steps": 1, "ok": True})
+                               + frame(4))
+
+        with interactive_worker(serve) as endpoint, KernelEnv(endpoint) as env:
+            self.assertEqual(list(env.reset()), [])
+            batches = list(env.step(COMMANDS[0]))
+            raw: dict[int, list[int]] = {}
+            reduced: dict[tuple[int, int, int], int] = {}
+            summary = None
+            for batch in batches:
+                if batch.addresses.numel():
+                    raw.setdefault(batch.source, []).extend(batch.addresses.tolist())
+                if batch.transitions is not None:
+                    for source, destination, count in zip(
+                        batch.transitions.from_addresses.tolist(),
+                        batch.transitions.destinations.tolist(),
+                        batch.transitions.counts.tolist(), strict=True,
+                    ):
+                        reduced[(batch.source, source, destination)] = count
+                if batch.transition_window is not None:
+                    summary = batch.transition_window
+            expected: dict[tuple[int, int, int], int] = {}
+            for source, addresses in raw.items():
+                for previous, current in zip(addresses, addresses[1:]):
+                    key = (source, previous, current)
+                    expected[key] = expected.get(key, 0) + 1
+            self.assertEqual(reduced, expected)
+            self.assertIsNotNone(summary)
+            self.assertEqual(summary.status, "ended")
+            self.assertTrue(summary.complete)
+            self.assertEqual((summary.distinct, summary.observed, summary.overflow),
+                             (3, 4, 0))
+            list(env.step(COMMANDS[4]))
+
+    def test_incomplete_and_overflow_window_statuses_are_public(self) -> None:
+        def serve(connection: socket.socket) -> None:
+            connection.sendall(frame(1, detail=2 | FEATURES | WINDOWS) + ready(0))
+            self.assertEqual(read_action(connection), COMMANDS[0])
+            connection.sendall(window_frame(1, 3, sources=2, capacity=8,
+                                            distinct=0, observed=0) + ready(1))
+            self.assertEqual(read_action(connection), COMMANDS[1])
+            connection.sendall(window_frame(2, 1, sources=2, capacity=8,
+                                            distinct=0, observed=3, overflow=3) + ready(2))
+            self.assertEqual(read_action(connection), COMMANDS[4])
+            connection.sendall(window_frame(3, 2, sources=2, capacity=8,
+                                            distinct=0, observed=0)
+                               + frame(3, source=0) + frame(3, source=1)
+                               + event({"event": "complete", "ok": True}) + frame(4))
+
+        with interactive_worker(serve) as endpoint, KernelEnv(endpoint) as env:
+            self.assertEqual(list(env.reset()), [])
+            windows = [batch.transition_window for batch in env.step(COMMANDS[0])
+                       if batch.transition_window is not None]
+            windows.extend(batch.transition_window for batch in env.step(COMMANDS[1])
+                           if batch.transition_window is not None)
+            list(env.step(COMMANDS[4]))
+        self.assertEqual([window.status for window in windows],
+                         ["incomplete", "ended"])
+        self.assertEqual(windows[1].overflow, 3)
+        self.assertFalse(windows[1].complete)
+
     def test_boundary_requires_complete_baselines_on_each_source(self) -> None:
         data = (frame(1, detail=2 | FEATURES | REGISTERS | (1 << 16))
                 + signal_frame(6, schema_row() + schema_row(register=1, name=b"x1"), count=2, source=1)

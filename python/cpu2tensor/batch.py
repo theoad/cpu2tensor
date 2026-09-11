@@ -98,6 +98,42 @@ class MemoryAccesses:
 
 
 @dataclass(frozen=True)
+class BlockTransitions:
+    """Bounded adjacent block counts from one vCPU and one action window.
+
+    The first block observed on a vCPU has no incoming transition. Window
+    boundaries reset that predecessor, so rows never connect separate actions.
+    """
+
+    window: int
+    from_addresses: Tensor
+    destinations: Tensor
+    counts: Tensor
+
+
+@dataclass(frozen=True)
+class TransitionWindow:
+    """Final status for one guest-declared action window.
+
+    Status is ``ended``, ``aborted``, or ``incomplete``. An ended window is a
+    complete reduced observation only when ``overflow`` is zero. Overflow counts
+    transitions that could not fit the fixed per-vCPU table.
+    """
+
+    id: int
+    status: str
+    sources: int
+    capacity_per_source: int
+    distinct: int
+    observed: int
+    overflow: int
+
+    @property
+    def complete(self) -> bool:
+        return self.status == "ended" and self.overflow == 0
+
+
+@dataclass(frozen=True)
 class Batch:
     """Events from one CPU, with independently owned tensor storage.
 
@@ -113,6 +149,8 @@ class Batch:
     Use (worker, source) together when maintaining per-CPU state.
     An opt-in ``layout`` batch describes the worker's initial executable instead:
     ``source`` and ``first_sequence`` are None and no CPU sequence is consumed.
+    Transition batches are per source and window. Final transition-window metadata
+    is worker-wide and also consumes no CPU sequence.
     """
 
     source: int | None
@@ -124,3 +162,5 @@ class Batch:
     layout: ExecutableLayout | None = None
     worker: int = 0
     block_sequences: Tensor | None = None
+    transitions: BlockTransitions | None = None
+    transition_window: TransitionWindow | None = None

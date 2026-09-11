@@ -9,6 +9,8 @@
 - [Capture benchmark](benchmark-capture.md): reproducible signal overhead and [x86 results](benchmark-capture-results.md).
 - [Adding a signal notebook](tutorials/normalization.ipynb): executable layout, owned tensors and measured learning across relocation.
 - [Instrumentation](instrumentation.md): current register/memory contract and limits.
+- [Repeated action windows](action-windows.md): guest boundaries and fixed
+  per-vCPU transition counts.
 - [Instrumentation probe](instrumentation-probe.md): reviewed AlphaFlow and QEMU evidence.
 - [Instrumentation results](instrumentation-results.md): current validation evidence.
 - [Capture efficiency](capture-efficiency.md): hot-path audit, ring/collector reference,

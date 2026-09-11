@@ -1,6 +1,6 @@
 # Work board
 
-Updated 2026-09-08. This file owns work status. The first vertical slice is complete:
+Updated 2026-09-11. This file owns work status. The first vertical slice is complete:
 real observation, integration, packaging, and standard-IDE navigation checks pass.
 Core register and memory instrumentation is checked on ARM, x86 guests, CPU and
 MPS. Mixed frames, bounded multiworker collation and packed MPS uploads are now
@@ -181,6 +181,7 @@ rebooted episodes, and external monitor control are deferred.
 | C2T-23 Native tensor notebook | Done | [Executed tutorial](tutorials/normalization.ipynb): initial three-field executable layout, real same-binary relocation across 11 locations, CPU/MPS learning curves and controls; [evidence](normalization-results.md) |
 | C2T-24 Absolute observation deadline | Implemented and checked | `--max-run-ms` covers active forwarding, backpressure and post-seal exit; 17 real ARM checks and one ordinary x86 kernel boot check pass; [semantics/evidence](worker-deadlines.md) |
 | C2T-25 Context-only x86 system profile | Done; independent client acceptance reported | Independent context selection, benign paging oracle/public fallback, two-vCPU Pool acceptance, 12-run cost matrix and client getpid/26-workload acceptance; [guide](context-only.md) |
+| C2T-26 Repeated action-window reducer | Review candidate; real guest and timing pending | Fixed per-vCPU adjacent-block counts, raw-block opt-out, explicit ended/aborted/incomplete and overflow metadata; portable/Linux native tests and Python raw/reduced fixture; [contract](action-windows.md) |
 
 The user agreed to explicit sampled state and attributed transactions, while
 full RAM reconstruction remains deferred. Runtime fixes, probes, contributor

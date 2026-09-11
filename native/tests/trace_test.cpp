@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cpu2tensor/trace.hpp>
 #include <cpu2tensor/register_selection.hpp>
+#include <cpu2tensor/transition_window.hpp>
 
 using namespace cpu2tensor;
 
@@ -46,6 +47,152 @@ int main() {
     assert(stream.accept({Kind::complete}).ok());
     assert(!stream.accept({Kind::complete}).ok());
     assert(stream.finished());
+
+    uint8_t transition[transition_count_bytes];
+    store_u64(transition, 10);
+    store_u64(transition + 8, 20);
+    store_u64(transition + 16, 3);
+    uint8_t summary[transition_window_bytes]{};
+    store_u32(summary, static_cast<uint32_t>(WindowStatus::ended));
+    store_u32(summary + 4, 2);
+    store_u32(summary + 8, 8);
+    store_u64(summary + 16, 1);
+    store_u64(summary + 24, 3);
+    Stream windows;
+    assert(windows.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                           feature_kernel | feature_transition_windows}).ok());
+    assert(windows.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    assert(windows.accept({Kind::block_transitions, 1, 1, 1,
+                           transition_count_bytes}, transition).ok());
+    assert(windows.accept({Kind::transition_window, 0, 1, 1,
+                           transition_window_bytes}, summary).ok());
+    assert(!windows.accept({Kind::transition_window, 0, 1, 1,
+                            transition_window_bytes}, summary).ok());
+    assert(!windows.accept({Kind::transition_window, 0, 1, 2,
+                            transition_window_bytes}, summary).ok());
+    assert(windows.accept({Kind::source_end, 0, 0, 0, 0}).ok());
+    assert(windows.accept({Kind::source_end, 1, 0, 0, 0}).ok());
+    assert(windows.accept({Kind::complete}).ok());
+
+    Stream bad_transition_source;
+    assert(bad_transition_source.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                                         feature_kernel | feature_transition_windows}).ok());
+    assert(!bad_transition_source.accept({Kind::block_transitions, max_sources, 1, 1,
+                                          transition_count_bytes}, transition).ok());
+
+    Stream before_first_request;
+    assert(before_first_request.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                                        feature_kernel | feature_transition_windows}).ok());
+    assert(!before_first_request.accept({Kind::block_transitions, 0, 1, 1,
+                                         transition_count_bytes}, transition).ok());
+
+    Stream missing_window;
+    assert(missing_window.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                                  feature_kernel | feature_transition_windows}).ok());
+    assert(missing_window.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    assert(missing_window.accept({Kind::block_transitions, 0, 1, 1,
+                                  transition_count_bytes}, transition).ok());
+    assert(!missing_window.accept({Kind::complete}).ok());
+
+    Stream missing_declared_tail;
+    assert(missing_declared_tail.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                                         feature_kernel | feature_transition_windows}).ok());
+    assert(missing_declared_tail.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    assert(missing_declared_tail.accept({Kind::block_transitions, 1, 1, 1,
+                                         transition_count_bytes}, transition).ok());
+    assert(missing_declared_tail.accept({Kind::transition_window, 0, 1, 1,
+                                         transition_window_bytes}, summary).ok());
+    assert(missing_declared_tail.accept({Kind::source_end, 1, 0, 0, 0}).ok());
+    assert(!missing_declared_tail.accept({Kind::complete}).ok());
+
+    store_u64(summary + 32, 1);
+    Stream hidden_overflow;
+    assert(hidden_overflow.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                                   feature_kernel | feature_transition_windows}).ok());
+    assert(hidden_overflow.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    assert(!hidden_overflow.accept({Kind::transition_window, 0, 1, 1,
+                                    transition_window_bytes}, summary).ok());
+
+    store_u64(summary + 16, 0);
+    store_u64(summary + 24, 0);
+    store_u64(summary + 32, 0);
+    Stream no_action;
+    assert(no_action.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                             feature_kernel | feature_transition_windows}).ok());
+    assert(!no_action.accept({Kind::transition_window, 0, 1, 1,
+                              transition_window_bytes}, summary).ok());
+    assert(no_action.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    assert(!no_action.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+
+    Stream between_actions;
+    assert(between_actions.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                                   feature_kernel | feature_transition_windows}).ok());
+    assert(between_actions.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    assert(between_actions.accept({Kind::transition_window, 0, 1, 1,
+                                   transition_window_bytes}, summary).ok());
+    assert(!between_actions.accept({Kind::block_transitions, 0, 1, 2,
+                                    transition_count_bytes}, transition).ok());
+
+    Stream exit_after_action;
+    assert(exit_after_action.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                                     feature_kernel | feature_transition_windows}).ok());
+    assert(exit_after_action.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    assert(exit_after_action.accept({Kind::source_end, 0, 0, 0, 0}).ok());
+    assert(!exit_after_action.accept({Kind::complete}).ok());
+
+    Stream changing_shape;
+    assert(changing_shape.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                                  feature_kernel | feature_transition_windows}).ok());
+    assert(changing_shape.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    assert(changing_shape.accept({Kind::transition_window, 0, 1, 1,
+                                  transition_window_bytes}, summary).ok());
+    assert(changing_shape.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    store_u32(summary + 4, 1);
+    assert(!changing_shape.accept({Kind::transition_window, 0, 1, 2,
+                                   transition_window_bytes}, summary).ok());
+
+    uint8_t duplicate[transition_count_bytes * 2];
+    std::memcpy(duplicate, transition, transition_count_bytes);
+    std::memcpy(duplicate + transition_count_bytes, transition, transition_count_bytes);
+    Stream duplicate_rows;
+    assert(duplicate_rows.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                                  feature_kernel | feature_transition_windows}).ok());
+    assert(duplicate_rows.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    assert(!duplicate_rows.accept({Kind::block_transitions, 0, 2, 1,
+                                   sizeof(duplicate)}, duplicate).ok());
+
+    uint8_t too_many_rows[transition_count_bytes * 3];
+    for (uint32_t row = 0; row < 3; ++row) {
+        store_u64(too_many_rows + row * transition_count_bytes, row + 1);
+        store_u64(too_many_rows + row * transition_count_bytes + 8, row + 2);
+        store_u64(too_many_rows + row * transition_count_bytes + 16, 1);
+    }
+    uint8_t small_summary[transition_window_bytes]{};
+    store_u32(small_summary, static_cast<uint32_t>(WindowStatus::ended));
+    store_u32(small_summary + 4, 1);
+    store_u32(small_summary + 8, 2);
+    store_u64(small_summary + 16, 3);
+    store_u64(small_summary + 24, 3);
+    Stream capacity_overrun;
+    assert(capacity_overrun.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                                    feature_kernel | feature_transition_windows}).ok());
+    assert(capacity_overrun.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    assert(capacity_overrun.accept({Kind::block_transitions, 0, 3, 1,
+                                    sizeof(too_many_rows)}, too_many_rows).ok());
+    assert(!capacity_overrun.accept({Kind::transition_window, 0, 1, 1,
+                                     transition_window_bytes}, small_summary).ok());
+
+    Stream ended_transition_source;
+    assert(ended_transition_source.accept({Kind::hello, 0, 0, 0, 2 | feature_system |
+                                           feature_kernel | feature_transition_windows}).ok());
+    assert(ended_transition_source.accept({Kind::kernel_request, 0, 0, 0, 127}).ok());
+    assert(ended_transition_source.accept({Kind::source_end, 0, 0, 0, 0}).ok());
+    assert(!ended_transition_source.accept({Kind::block_transitions, 0, 1, 1,
+                                            transition_count_bytes}, transition).ok());
+
+    encode_header(bytes, {Kind::block_transitions, 0, max_addresses, 1,
+                          max_addresses * transition_count_bytes});
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
 
     Stream invalid;
     assert(!invalid.accept({Kind::hello, 0, 0, 0, 99}).ok());

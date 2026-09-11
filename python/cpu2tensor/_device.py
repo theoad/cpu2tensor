@@ -21,7 +21,7 @@ def to_device(batch: Batch, device: torch.device) -> Batch:
     columns = [(None, "addresses", batch.addresses)]
     if batch.block_sequences is not None:
         columns.append((None, "block_sequences", batch.block_sequences))
-    for name in ("registers", "memory", "context", "layout"):
+    for name in ("registers", "memory", "context", "layout", "transitions"):
         table = getattr(batch, name)
         if table is not None:
             for field in fields(table):

@@ -45,6 +45,17 @@ class MixedColumns(TypedDict, total=False):
     memory: MixedMemoryColumns
     context: MixedContextColumns
 
+class TransitionColumns(TypedDict):
+    from_addresses: bytearray
+    destinations: bytearray
+    counts: bytearray
+
 def new_stream() -> Any: ...
 def payload_size(header: bytes | bytearray | memoryview) -> int: ...
-def decode(stream: Any, frame: bytes | bytearray | memoryview) -> tuple[int, int, int, int, int, bytearray | dict[int, str] | RegisterColumns | MemoryColumns | ContextColumns | MixedColumns]: ...
+def decode(
+    stream: Any, frame: bytes | bytearray | memoryview
+) -> tuple[
+    int, int, int, int, int,
+    bytearray | dict[int, str] | RegisterColumns | MemoryColumns |
+    ContextColumns | MixedColumns | TransitionColumns,
+]: ...

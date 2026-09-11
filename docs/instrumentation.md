@@ -266,6 +266,12 @@ only then can the worker report successful completion. A missing requested stop
 is an explicit capture failure. Stop markers are incompatible with action
 adapters in this slice. See [window acceptance](kernel-window-results.md).
 
+Kernel action workers can instead use three repeated guest markers plus the
+fixed adjacent-block reducer. The client receives per-vCPU transition tensors
+and explicit ended, aborted, incomplete, capacity, and overflow metadata after a
+stopped-world all-source drain. See [repeated action windows](action-windows.md)
+for the boundary and client contract.
+
 
 ## Explicit context-only selection
 

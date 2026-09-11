@@ -73,6 +73,12 @@ struct Options final {
     bool layout = false;
     const char* start_pc = nullptr;
     const char* stop_pc = nullptr;
+    const char* window_start_pc = nullptr;
+    const char* window_end_pc = nullptr;
+    const char* window_abort_pc = nullptr;
+    const char* reducer = "none";
+    const char* blocks = "on";
+    int transition_capacity = 4096;
     const char* batching = "legacy";
     const char* publication = "pipe";
     int episodes = 1;
@@ -126,14 +132,33 @@ Result<Options> parse(int argc, char** argv) {
                 return Result<Options>::failure("--batching needs legacy or mixed");
             options.batching = value;
         }
-        else if (std::strcmp(key, "--start-pc") == 0 || std::strcmp(key, "--stop-pc") == 0) {
+        else if (std::strcmp(key, "--start-pc") == 0 || std::strcmp(key, "--stop-pc") == 0 ||
+                 std::strcmp(key, "--window-start-pc") == 0 ||
+                 std::strcmp(key, "--window-end-pc") == 0 ||
+                 std::strcmp(key, "--window-abort-pc") == 0) {
             char* end = nullptr;
             errno = 0;
             (void)std::strtoull(value, &end, 0);
             if (end == value || errno != 0 || *end != '\0' || value[0] == '-')
                 return Result<Options>::failure("Capture boundary needs a guest block address");
             if (std::strcmp(key, "--start-pc") == 0) options.start_pc = value;
-            else options.stop_pc = value;
+            else if (std::strcmp(key, "--stop-pc") == 0) options.stop_pc = value;
+            else if (std::strcmp(key, "--window-start-pc") == 0) options.window_start_pc = value;
+            else if (std::strcmp(key, "--window-end-pc") == 0) options.window_end_pc = value;
+            else options.window_abort_pc = value;
+        } else if (std::strcmp(key, "--reducer") == 0) {
+            if (std::strcmp(value, "none") != 0 && std::strcmp(value, "block-transitions") != 0)
+                return Result<Options>::failure("--reducer needs none or block-transitions");
+            options.reducer = value;
+        } else if (std::strcmp(key, "--blocks") == 0) {
+            if (std::strcmp(value, "on") != 0 && std::strcmp(value, "off") != 0)
+                return Result<Options>::failure("--blocks needs on or off");
+            options.blocks = value;
+        } else if (std::strcmp(key, "--transition-capacity") == 0) {
+            const auto parsed = number(value, 2, 65536);
+            if (!parsed.ok() || (parsed.value() & (parsed.value() - 1)) != 0)
+                return Result<Options>::failure("--transition-capacity needs a power of two from 2 to 65536");
+            options.transition_capacity = parsed.value();
         } else if (std::strcmp(key, "--system") == 0 || std::strcmp(key, "--kernel-adapter") == 0) {
             if (std::strcmp(value, "on") != 0 && std::strcmp(value, "off") != 0)
                 return Result<Options>::failure("System settings need on or off");
@@ -177,6 +202,18 @@ Result<Options> parse(int argc, char** argv) {
     if (options.system && options.layout) return Result<Options>::failure("--layout on requires a user-mode target");
     if (options.stop_pc != nullptr && (options.stdio || options.kernel))
         return Result<Options>::failure("--stop-pc requires observation-only capture");
+    const bool any_window = options.window_start_pc != nullptr || options.window_end_pc != nullptr ||
+                            options.window_abort_pc != nullptr;
+    const bool all_window = options.window_start_pc != nullptr && options.window_end_pc != nullptr &&
+                            options.window_abort_pc != nullptr;
+    if (any_window && !all_window)
+        return Result<Options>::failure("Action windows need start, end, and abort guest block addresses");
+    if (all_window && !options.kernel)
+        return Result<Options>::failure("Action windows require --kernel-adapter on");
+    if (all_window != (std::strcmp(options.reducer, "block-transitions") == 0))
+        return Result<Options>::failure("Action windows and block transition reduction must be enabled together");
+    if (std::strcmp(options.blocks, "off") == 0 && std::strcmp(options.reducer, "none") == 0)
+        return Result<Options>::failure("--blocks off requires a reducer");
     if (options.system && !options.kernel && options.input == nullptr) options.input = "/dev/null";
     if (options.qemu == nullptr || options.plugin == nullptr || (!options.stdio && !options.kernel && options.input == nullptr) || options.target == nullptr)
         return Result<Options>::failure("Required: --qemu PATH --plugin PATH (--input FILE or --stdio on) -- TARGET [ARGS]");
@@ -416,7 +453,10 @@ Result<int> listen_at(const Options& options) {
 Result<RunOutcome> run(const Options& options, int listener) {
     if (options.kernel) {
         const auto result = run_kernel({options.qemu, options.plugin, options.registers, options.memory,
-            options.values, options.context, options.start_pc, options.batching, options.publication, options.timeout_ms, options.target}, listener);
+            options.values, options.context, options.start_pc, options.window_start_pc,
+            options.window_end_pc, options.window_abort_pc, options.reducer, options.blocks,
+            options.transition_capacity, options.batching, options.publication,
+            options.timeout_ms, options.target}, listener);
         if (!result.ok()) return Result<RunOutcome>::failure(result.error());
         return Result<RunOutcome>::success(result.value() ? RunOutcome::cancelled : RunOutcome::completed);
     }

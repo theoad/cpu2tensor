@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 import socket
+import struct
 import threading
 from types import MappingProxyType, TracebackType
 from typing import cast
@@ -15,7 +16,10 @@ import torch
 from cpu2tensor import _native
 from cpu2tensor._batching import BatchCollator, MAX_BATCH_BYTES
 from cpu2tensor._device import to_device
-from cpu2tensor.batch import AddressContext, Batch, ExecutableLayout, MemoryAccesses, RegisterChanges
+from cpu2tensor.batch import (
+    AddressContext, Batch, BlockTransitions, ExecutableLayout, MemoryAccesses,
+    RegisterChanges, TransitionWindow,
+)
 
 
 _HEADER_BYTES = 32
@@ -28,6 +32,10 @@ _MEMORY = 8
 _ADDRESS_CONTEXT = 12
 _EXECUTABLE_LAYOUT = 13
 _MIXED = 14
+_BLOCK_TRANSITIONS = 15
+_TRANSITION_WINDOW = 16
+_WINDOW = struct.Struct("<IIIIQQQ")
+_WINDOW_STATUS = {1: "ended", 2: "aborted", 3: "incomplete"}
 _FAILURES = {
     1: "capture failed",
     2: "target was killed",
@@ -219,7 +227,9 @@ class Pool:
                     # immutable snapshot, not a dictionary changed by later reads.
                     update = cast(dict[int, str], payload)
                     names[source] = MappingProxyType({**names.get(source, {}), **update})
-                elif kind in (_BLOCKS, _REGISTERS, _MEMORY, _ADDRESS_CONTEXT, _EXECUTABLE_LAYOUT, _MIXED):
+                elif kind in (_BLOCKS, _REGISTERS, _MEMORY, _ADDRESS_CONTEXT,
+                              _EXECUTABLE_LAYOUT, _MIXED, _BLOCK_TRANSITIONS,
+                              _TRANSITION_WINDOW):
                     batch = self._batch(kind, source, count, sequence, payload, names.get(source))
                     if collator is None:
                         yield batch
@@ -260,12 +270,35 @@ class Pool:
         source: int,
         count: int,
         sequence: int,
-        payload: bytearray | dict[int, str] | _native.RegisterColumns | _native.MemoryColumns,
+        payload: (
+            bytearray | dict[int, str] | _native.RegisterColumns |
+            _native.MemoryColumns | _native.TransitionColumns
+        ),
         names: Mapping[int, str] | None,
     ) -> Batch:
         registers = None
         memory = None
         context = None
+        if kind == _BLOCK_TRANSITIONS:
+            columns = cast("_native.TransitionColumns", payload)
+            transitions = BlockTransitions(
+                sequence,
+                **{name: self._tensor(data, torch.int64) for name, data in columns.items()},
+            )
+            return to_device(Batch(source, None, torch.empty(0, dtype=torch.int64),
+                                   transitions=transitions), self._column_device)
+        if kind == _TRANSITION_WINDOW:
+            status, sources, capacity, reserved, distinct, observed, overflow = (
+                _WINDOW.unpack(cast(bytearray, payload))
+            )
+            assert reserved == 0
+            window = TransitionWindow(sequence, _WINDOW_STATUS[status], sources, capacity,
+                                      distinct, observed, overflow)
+            return to_device(
+                Batch(None, None, torch.empty(0, dtype=torch.int64),
+                      transition_window=window),
+                self._column_device,
+            )
         if kind == _MIXED:
             columns = cast(dict, payload)
             addresses = (self._tensor(columns['blocks'], torch.int64) if 'blocks' in columns else

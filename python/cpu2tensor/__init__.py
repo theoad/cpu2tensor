@@ -4,14 +4,18 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from cpu2tensor.batch import AddressContext, Batch, ExecutableLayout, MemoryAccesses, RegisterChanges
+    from cpu2tensor.batch import (
+        AddressContext, Batch, BlockTransitions, ExecutableLayout,
+        MemoryAccesses, RegisterChanges, TransitionWindow,
+    )
     from cpu2tensor.pool import Pool
     from cpu2tensor.stdio import StdioEnv
     from cpu2tensor.kernel import KernelEnv
 
 # Worker-side benchmarks use the native decoder without loading a learner runtime.
 _EXPORTS = {
-    'ExecutableLayout': 'batch',
+    'ExecutableLayout': 'batch', 'BlockTransitions': 'batch',
+    'TransitionWindow': 'batch',
     'AddressContext': 'batch', 'Batch': 'batch', 'MemoryAccesses': 'batch',
     'RegisterChanges': 'batch', 'Pool': 'pool', 'StdioEnv': 'stdio', 'KernelEnv': 'kernel',
 }

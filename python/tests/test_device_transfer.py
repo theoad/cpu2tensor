@@ -9,7 +9,10 @@ from unittest import mock
 
 import torch
 
-from cpu2tensor import AddressContext, Batch, ExecutableLayout, MemoryAccesses, RegisterChanges
+from cpu2tensor import (
+    AddressContext, Batch, BlockTransitions, ExecutableLayout, MemoryAccesses,
+    RegisterChanges, TransitionWindow,
+)
 from cpu2tensor._device import to_device
 
 
@@ -17,7 +20,7 @@ def columns(batch):
     result = [("addresses", batch.addresses)]
     if batch.block_sequences is not None:
         result.append(("block_sequences", batch.block_sequences))
-    for name in ("registers", "memory", "context", "layout"):
+    for name in ("registers", "memory", "context", "layout", "transitions"):
         table = getattr(batch, name)
         if table is not None:
             result.extend((f"{name}.{field.name}", value) for field in fields(table)
@@ -46,8 +49,12 @@ def rich_batch():
         cr4=torch.tensor([0, 0]), efer=torch.tensor([0, 0]), cs_base=torch.tensor([0, 0]),
         mode=torch.tensor([32, 64]), known=torch.tensor([63, 63]), sequences=torch.tensor([0, 6]),
     )
+    transitions = BlockTransitions(
+        9, from_addresses=addresses[:3], destinations=addresses[1:],
+        counts=torch.tensor([11, 12, 13]),
+    )
     return Batch(3, 0, addresses, registers, memory, context, worker=4,
-                 block_sequences=torch.tensor([4, 9, 10, 11]))
+                 block_sequences=torch.tensor([4, 9, 10, 11]), transitions=transitions)
 
 
 class DeviceTransferTests(unittest.TestCase):
@@ -123,6 +130,13 @@ class DeviceTransferTests(unittest.TestCase):
         moved = to_device(empty, torch.device("mps"))
         self.assertEqual((moved.addresses.device.type, moved.addresses.numel()), ("mps", 0))
         self.assertIsNone(moved.block_sequences)
+        summary = Batch(
+            None, None, torch.empty(0, dtype=torch.int64),
+            transition_window=TransitionWindow(1, "ended", 2, 8, 0, 0, 0),
+        )
+        moved_summary = to_device(summary, torch.device("mps"))
+        self.assertEqual(moved_summary.addresses.device.type, "mps")
+        self.assertEqual(moved_summary.transition_window, summary.transition_window)
         layout = Batch(None, None, empty.addresses,
                        layout=ExecutableLayout(torch.tensor([0x400000, 0x401000, 0x400010])), worker=2)
         moved = to_device(layout, torch.device("mps"))

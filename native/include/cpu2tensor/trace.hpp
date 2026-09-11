@@ -29,14 +29,17 @@ inline constexpr uint64_t feature_address_context = 1 << 16;
 inline constexpr uint64_t feature_executable_layout = 1 << 17;
 inline constexpr uint64_t feature_mixed = 1 << 18;
 inline constexpr uint64_t feature_stop = 1 << 19;
+inline constexpr uint64_t feature_transition_windows = 1 << 20;
 inline constexpr size_t layout_bytes = 24;
+inline constexpr size_t transition_count_bytes = 24;
+inline constexpr size_t transition_window_bytes = 40;
 inline constexpr uint32_t max_action_bytes = 256;
 
 enum class Kind : uint16_t {
     hello = 1, blocks = 2, source_end = 3, complete = 4, error = 5,
     register_schema = 6, registers = 7, memory = 8, input_request = 9,
     kernel_request = 10, guest_event = 11, address_context = 12, executable_layout = 13,
-    mixed = 14
+    mixed = 14, block_transitions = 15, transition_window = 16
 };
 enum class Architecture : uint64_t { aarch64 = 1, x86_64 = 2 };
 enum class Failure : uint64_t { capture = 1, target_killed = 2, unsupported_target = 3, transport = 4 };
@@ -75,9 +78,18 @@ private:
         bool sampled[max_registers]{};
         char names[max_registers][64]{};
     };
+    struct TransitionKey final {
+        uint64_t window = 0;
+        uint64_t from_address = 0;
+        uint64_t destination = 0;
+        uint32_t source = 0;
+    };
     Result<Done> schema(const Header& header, const uint8_t* payload);
     Result<Done> registers(const Header& header, const uint8_t* payload);
     Result<Done> memory(const Header& header, const uint8_t* payload);
+    Result<Done> remember_transition(uint32_t source, uint64_t from_address,
+                                     uint64_t destination);
+    Result<Done> grow_transition_keys(uint32_t capacity);
     Registers* _registers[max_sources]{};
     uint64_t _next[max_sources]{};
     bool _seen[max_sources]{};
@@ -87,6 +99,17 @@ private:
     bool _has_context[max_sources]{};
     uint64_t _context_sequence[max_sources]{};
     uint64_t _features = 0;
+    uint64_t _next_window = 1;
+    uint64_t _window_distinct = 0;
+    uint64_t _window_observed = 0;
+    TransitionKey* _window_keys = nullptr;
+    uint32_t _window_key_capacity = 0;
+    uint32_t _window_rows_per_source[max_sources]{};
+    uint32_t _window_sources = 0;
+    uint32_t _window_capacity_per_source = 0;
+    uint32_t _window_max_source_plus_one = 0;
+    bool _window_expected = false;
+    bool _window_rows = false;
     bool _started = false;
     bool _finished = false;
     bool _layout_seen = false;

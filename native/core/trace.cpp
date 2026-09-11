@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include <cpu2tensor/trace.hpp>
+#include <cpu2tensor/transition_window.hpp>
 #include <cstring>
 #include <new>
 
@@ -33,7 +34,8 @@ size_t payload_size(const Header& header) {
     if (header.kind == Kind::guest_event) return static_cast<size_t>(header.detail);
     if (header.kind == Kind::blocks) return header.count * sizeof(uint64_t);
     if (header.kind == Kind::register_schema || header.kind == Kind::registers || header.kind == Kind::memory ||
-        header.kind == Kind::address_context || header.kind == Kind::executable_layout || header.kind == Kind::mixed)
+        header.kind == Kind::address_context || header.kind == Kind::executable_layout || header.kind == Kind::mixed ||
+        header.kind == Kind::block_transitions || header.kind == Kind::transition_window)
         return static_cast<size_t>(header.detail);
     return 0;
 }
@@ -53,6 +55,15 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
     case Kind::executable_layout:
         if (h.source != 0 || h.sequence != 0 || h.count != 1 || h.detail != layout_bytes)
             return Result<Header>::failure("Invalid executable layout fields");
+        break;
+    case Kind::block_transitions:
+        if (h.count == 0 || h.sequence == 0 || h.detail > max_payload_bytes ||
+            h.detail != h.count * transition_count_bytes)
+            return Result<Header>::failure("Invalid block transition batch fields");
+        break;
+    case Kind::transition_window:
+        if (h.source != 0 || h.count != 1 || h.sequence == 0 || h.detail != transition_window_bytes)
+            return Result<Header>::failure("Invalid transition window fields");
         break;
     case Kind::kernel_request:
     case Kind::guest_event:
@@ -95,7 +106,7 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
             const auto architecture = h.detail & 255;
             constexpr auto allowed = uint64_t{255} | feature_memory | feature_registers | feature_memory_values | feature_stdio |
                 feature_system | feature_kernel | feature_window | feature_system_memory | feature_address_context |
-                feature_executable_layout | feature_mixed | feature_stop;
+                feature_executable_layout | feature_mixed | feature_stop | feature_transition_windows;
             if ((architecture != 1 && architecture != 2) || (h.detail & ~allowed) != 0)
                 return Result<Header>::failure("Unsupported target architecture or features");
             if ((h.detail & feature_memory_values) && !(h.detail & feature_memory))
@@ -113,6 +124,8 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
             if (((h.detail & feature_kernel) && !(h.detail & feature_system)) ||
                 ((h.detail & feature_stdio) && (h.detail & feature_system)))
                 return Result<Header>::failure("Incompatible system and action features");
+            if ((h.detail & feature_transition_windows) && !(h.detail & feature_kernel))
+                return Result<Header>::failure("Transition windows need an interactive system worker");
         }
         if (h.kind == Kind::complete && h.detail > 255) return Result<Header>::failure("Invalid target exit code");
         if (h.kind == Kind::error && (h.detail < 1 || h.detail > 4)) return Result<Header>::failure("Unknown trace failure");
@@ -121,7 +134,66 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
     }
     return Result<Header>::success(h);
 }
-Stream::~Stream() { for (auto* registers : _registers) delete registers; }
+Stream::~Stream() {
+    for (auto* registers : _registers) delete registers;
+    delete[] _window_keys;
+}
+
+namespace {
+uint64_t transition_hash(uint32_t source, uint64_t from_address, uint64_t destination) {
+    uint64_t value = from_address ^ (destination + UINT64_C(0x9e3779b97f4a7c15)) ^ source;
+    value ^= value >> 30;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value *= UINT64_C(0x94d049bb133111eb);
+    return value ^ (value >> 31);
+}
+}
+
+Result<Done> Stream::grow_transition_keys(uint32_t capacity) {
+    auto* keys = new (std::nothrow) TransitionKey[capacity];
+    if (keys == nullptr) return Result<Done>::failure("Cannot allocate transition validation table");
+    const uint32_t mask = capacity - 1;
+    for (uint32_t index = 0; index < _window_key_capacity; ++index) {
+        const auto& old = _window_keys[index];
+        if (old.window != _next_window) continue;
+        uint32_t destination = static_cast<uint32_t>(
+            transition_hash(old.source, old.from_address, old.destination)) & mask;
+        while (keys[destination].window == _next_window)
+            destination = (destination + 1) & mask;
+        keys[destination] = old;
+    }
+    delete[] _window_keys;
+    _window_keys = keys;
+    _window_key_capacity = capacity;
+    return Result<Done>::success({});
+}
+
+Result<Done> Stream::remember_transition(uint32_t source, uint64_t from_address,
+                                         uint64_t destination) {
+    if (_window_distinct >= max_transition_slots)
+        return Result<Done>::failure("Transition rows exceed the fixed total capacity");
+    if (_window_key_capacity == 0 ||
+        (_window_distinct + 1) * 2 > _window_key_capacity) {
+        const uint32_t capacity = _window_key_capacity == 0 ? 512 : _window_key_capacity * 2;
+        const auto grown = grow_transition_keys(capacity);
+        if (!grown.ok()) return grown;
+    }
+    const uint32_t mask = _window_key_capacity - 1;
+    uint32_t index = static_cast<uint32_t>(
+        transition_hash(source, from_address, destination)) & mask;
+    for (;;) {
+        auto& key = _window_keys[index];
+        if (key.window != _next_window) {
+            key = {_next_window, from_address, destination, source};
+            return Result<Done>::success({});
+        }
+        if (key.source == source && key.from_address == from_address &&
+            key.destination == destination)
+            return Result<Done>::failure("Duplicate block transition row");
+        index = (index + 1) & mask;
+    }
+}
 Result<Done> Stream::schema(const Header& h, const uint8_t* bytes) {
     if (!(_features & feature_registers) || _data[h.source])
         return Result<Done>::failure("Register schema is disabled or arrived after source data");
@@ -273,11 +345,84 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
                         return Result<Done>::failure("Kernel boundary needs complete source register baselines");
             }
         }
+        if (h.kind == Kind::kernel_request && (_features & feature_transition_windows)) {
+            if (_window_expected)
+                return Result<Done>::failure("Action boundary arrived without exactly one transition window");
+            _window_expected = true;
+        }
         // Adapter events have no vCPU attribution and consume no source sequence.
+        return Result<Done>::success({});
+    }
+    if (h.kind == Kind::block_transitions) {
+        if (!(_features & feature_transition_windows) || bytes == nullptr ||
+            h.sequence != _next_window || h.source >= max_sources || _ended[h.source] ||
+            !_window_expected)
+            return Result<Done>::failure("Block transitions need their current window");
+        for (uint32_t row = 0; row < h.count; ++row) {
+            const uint8_t* item = bytes + row * transition_count_bytes;
+            const auto remembered = remember_transition(h.source, load_u64(item), load_u64(item + 8));
+            if (!remembered.ok()) return remembered;
+            const uint64_t count = load_u64(bytes + row * transition_count_bytes + 16);
+            if (count == 0 || _window_observed > UINT64_MAX - count)
+                return Result<Done>::failure("Invalid or overflowing block transition count");
+            _window_observed += count;
+            ++_window_distinct;
+        }
+        if (_window_rows_per_source[h.source] > max_transition_slots - h.count)
+            return Result<Done>::failure("Per-source transition row count overflow");
+        _window_rows_per_source[h.source] += h.count;
+        if (_window_max_source_plus_one <= h.source)
+            _window_max_source_plus_one = h.source + 1;
+        _window_rows = true;
+        return Result<Done>::success({});
+    }
+    if (h.kind == Kind::transition_window) {
+        if (!(_features & feature_transition_windows) || bytes == nullptr ||
+            h.sequence != _next_window || !_window_expected)
+            return Result<Done>::failure("Transition metadata needs its current window");
+        const auto status = static_cast<WindowStatus>(load_u32(bytes));
+        const uint32_t sources = load_u32(bytes + 4);
+        const uint32_t capacity = load_u32(bytes + 8);
+        const uint32_t reserved = load_u32(bytes + 12);
+        const uint64_t distinct = load_u64(bytes + 16);
+        const uint64_t observed = load_u64(bytes + 24);
+        const uint64_t overflow = load_u64(bytes + 32);
+        const bool valid_status = status == WindowStatus::ended || status == WindowStatus::aborted ||
+                                  status == WindowStatus::incomplete;
+        bool rows_fit = true;
+        for (uint32_t source = 0; source < max_sources; ++source)
+            if (_window_rows_per_source[source] > capacity) rows_fit = false;
+        if (!valid_status || sources == 0 || sources > max_sources || capacity < 2 ||
+            (capacity & (capacity - 1)) != 0 || reserved != 0 ||
+            uint64_t{sources} * capacity > max_transition_slots ||
+            distinct > uint64_t{sources} * capacity || !rows_fit ||
+            _window_max_source_plus_one > sources ||
+            (_window_sources != 0 && (_window_sources != sources ||
+                                      _window_capacity_per_source != capacity)) ||
+            distinct != _window_distinct || overflow > observed ||
+            _window_observed > observed - overflow || _window_observed + overflow != observed)
+            return Result<Done>::failure("Transition window summary does not close its rows");
+        if (_window_sources == 0) {
+            _window_sources = sources;
+            _window_capacity_per_source = capacity;
+        }
+        _window_expected = false;
+        ++_next_window;
+        if (_next_window == 0) return Result<Done>::failure("Transition window sequence overflow");
+        _window_distinct = 0;
+        _window_observed = 0;
+        std::memset(_window_rows_per_source, 0, sizeof(_window_rows_per_source));
+        _window_max_source_plus_one = 0;
+        _window_rows = false;
         return Result<Done>::success({});
     }
     if (h.kind == Kind::error) { _finished = true; return Result<Done>::success({}); }
     if (h.kind == Kind::complete) {
+        if (_window_rows || _window_expected)
+            return Result<Done>::failure("Trace ended before its required transition window");
+        for (uint32_t source = 0; source < _window_sources; ++source)
+            if (!_ended[source])
+                return Result<Done>::failure("Trace ended before a declared window source ended");
         for (uint32_t source = 0; source < max_sources; ++source)
             if (_seen[source] && !_ended[source]) return Result<Done>::failure("Trace ended before all sources ended");
         _finished = true;

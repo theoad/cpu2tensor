@@ -11,6 +11,12 @@ struct KernelOptions final {
     const char* values;
     const char* context;
     const char* start_pc;
+    const char* window_start_pc;
+    const char* window_end_pc;
+    const char* window_abort_pc;
+    const char* reducer;
+    const char* blocks;
+    int transition_capacity;
     const char* batching;
     const char* publication;
     int timeout_ms;

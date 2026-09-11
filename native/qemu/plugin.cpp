@@ -2,6 +2,7 @@
 #include <cpu2tensor/trace.hpp>
 #include <cpu2tensor/register_selection.hpp>
 #include <cpu2tensor/frame_ring.hpp>
+#include <cpu2tensor/transition_window.hpp>
 #include <dlfcn.h>
 #include <qemu-plugin.h>
 
@@ -97,12 +98,22 @@ bool capture_stdio = false;
 bool capture_system = false;
 bool capture_kernel = false;
 bool capture_layout = false;
+bool capture_blocks = true;
 pthread_once_t layout_once = PTHREAD_ONCE_INIT;
 unsigned int system_cpus = 0;
 bool has_start_pc = false;
 uint64_t start_pc = 0;
 bool has_stop_pc = false;
 uint64_t stop_pc = 0;
+bool has_window_start_pc = false;
+bool has_window_end_pc = false;
+bool has_window_abort_pc = false;
+uint64_t window_start_pc = 0;
+uint64_t window_end_pc = 0;
+uint64_t window_abort_pc = 0;
+bool reduce_transitions = false;
+uint32_t transition_capacity = 4096;
+TransitionWindow transition_window;
 bool mixed_batches = false;
 bool ring_publication = false;
 pthread_t collector_thread{};
@@ -554,7 +565,8 @@ void source_end(qemu_plugin_id_t, unsigned int index)
     auto& source = active_source(index);
     const ColdLock lock(source);
     if (source.register_count != 0 && (!has_start_pc || source.next != 0) &&
-        (!has_stop_pc || capture_state.load(std::memory_order_acquire) == CaptureState::running)) {
+        (!has_stop_pc || capture_state.load(std::memory_order_acquire) == CaptureState::running) &&
+        (!has_window_start_pc || source.recording)) {
         read_context(source, true);
         const auto offset = current_pc(source);
         // Register RIP is raw storage; event PCs use the linear code address.
@@ -573,6 +585,24 @@ void block_entry(unsigned int index, void* address)
         auto expected = CaptureState::waiting;
         capture_state.compare_exchange_strong(expected, CaptureState::running, std::memory_order_acq_rel);
     }
+    if (has_window_start_pc && pc == window_start_pc) {
+        const auto opened = transition_window.begin();
+        if (!opened.ok()) fail(Failure::capture, opened.error());
+        source.recording = false;
+        return;
+    }
+    if (has_window_end_pc && pc == window_end_pc) {
+        const auto ended = transition_window.end();
+        if (!ended.ok()) fail(Failure::capture, ended.error());
+        source.recording = false;
+        return;
+    }
+    if (has_window_abort_pc && pc == window_abort_pc) {
+        const auto aborted = transition_window.abort();
+        if (!aborted.ok()) fail(Failure::capture, aborted.error());
+        source.recording = false;
+        return;
+    }
     if (has_stop_pc && pc == stop_pc) {
         auto expected = CaptureState::running;
         capture_state.compare_exchange_strong(expected, CaptureState::stopped, std::memory_order_acq_rel);
@@ -580,23 +610,33 @@ void block_entry(unsigned int index, void* address)
         source.recording = false;
         return;
     }
-    source.recording = capture_state.load(std::memory_order_acquire) == CaptureState::running;
+    const BlockAdmission admission = has_window_start_pc ? transition_window.admit() :
+        BlockAdmission{0, true};
+    source.recording = capture_state.load(std::memory_order_acquire) == CaptureState::running &&
+        admission.included;
     if (!source.recording) return;
+    if (reduce_transitions) {
+        const auto observed = transition_window.observe(index, pc, admission);
+        if (!observed.ok()) fail(Failure::capture, observed.error());
+    }
     const PublishChanges publication(source);
     read_context(source, source.register_count != 0);
     emit_context(index, source, pc);
     // These changes precede this block; they are not effects of its execution.
     sample_registers(index, source, pc, Checkpoint::block);
-    store_u64(append(index, source, Kind::blocks, sizeof(uint64_t)), pc);
-    if (source.count == max_addresses) {
-        flush(index, source);
+    if (capture_blocks) {
+        store_u64(append(index, source, Kind::blocks, sizeof(uint64_t)), pc);
+        if (source.count == max_addresses) {
+            flush(index, source);
+        }
     }
 }
 
 void memory_access(unsigned int index, qemu_plugin_meminfo_t info, uint64_t address, void* pc)
 {
     auto& source = active_source(index);
-    if (!source.recording || (has_stop_pc && capture_state.load(std::memory_order_acquire) != CaptureState::running)) return;
+    if (!source.recording ||
+        (has_stop_pc && capture_state.load(std::memory_order_acquire) != CaptureState::running)) return;
     const PublishChanges publication(source);
     const unsigned int shift = qemu_plugin_mem_size_shift(info);
     if (shift >= 32 || (capture_values && shift > 4)) {
@@ -695,7 +735,8 @@ void syscall_entry(qemu_plugin_id_t, unsigned int index, int64_t number, uint64_
 {
     auto& source = active_source(index);
     if (source.register_count != 0 && (!has_start_pc || source.recording) &&
-        (!has_stop_pc || capture_state.load(std::memory_order_acquire) == CaptureState::running)) {
+        (!has_stop_pc || capture_state.load(std::memory_order_acquire) == CaptureState::running) &&
+        (!has_window_start_pc || source.recording)) {
         sample_registers(index, source, current_pc(source), Checkpoint::syscall);
     }
     const bool arm = architecture == Architecture::aarch64;
@@ -750,6 +791,47 @@ void source_idle(qemu_plugin_id_t, unsigned int index)
     if (source.state == State::active) flush(index, source);
 }
 
+void publish_transition_window()
+{
+    const auto closed = transition_window.close();
+    if (!closed.ok()) fail(Failure::capture, closed.error());
+    const auto summary = closed.value();
+    if (summary.status == WindowStatus::none) return;
+    constexpr uint32_t rows_per_frame =
+        static_cast<uint32_t>(max_payload_bytes / transition_count_bytes);
+    uint8_t frame[max_frame_bytes];
+    for (uint32_t source = 0; source < summary.sources; ++source) {
+        const uint32_t rows = transition_window.row_count(source, summary.id);
+        for (uint32_t first = 0; first < rows; first += rows_per_frame) {
+            const uint32_t remaining = rows - first;
+            const uint32_t count = remaining < rows_per_frame ? remaining : rows_per_frame;
+            encode_header(frame, {Kind::block_transitions, source, count, summary.id,
+                                  count * transition_count_bytes});
+            for (uint32_t index = 0; index < count; ++index) {
+                const auto row = transition_window.row(source, summary.id, first + index);
+                uint8_t* output = frame + header_bytes + index * transition_count_bytes;
+                store_u64(output, row.from_address);
+                store_u64(output + 8, row.destination);
+                store_u64(output + 16, row.count);
+            }
+            if (!publish(frame, header_bytes + count * transition_count_bytes).ok())
+                fail(Failure::transport, "cpu2tensor: cannot publish transition rows\n");
+        }
+    }
+    encode_header(frame, {Kind::transition_window, 0, 1, summary.id,
+                          transition_window_bytes});
+    uint8_t* output = frame + header_bytes;
+    std::memset(output, 0, transition_window_bytes);
+    store_u32(output, static_cast<uint32_t>(summary.status));
+    store_u32(output + 4, summary.sources);
+    store_u32(output + 8, summary.capacity_per_source);
+    store_u64(output + 16, summary.distinct);
+    store_u64(output + 24, summary.observed);
+    store_u64(output + 32, summary.overflow);
+    if (!publish(frame, header_bytes + transition_window_bytes).ok())
+        fail(Failure::transport, "cpu2tensor: cannot publish transition window\n");
+}
+
 void* control(void*)
 {
     while (!closing.load(std::memory_order_acquire)) {
@@ -778,6 +860,10 @@ void* control(void*)
             // buffer/count fields changed by the stopped-world drain.
             source.drained.store(generation, std::memory_order_release);
         }
+        if (transition_window.open())
+            fail(Failure::capture,
+                 "cpu2tensor: guest requested an action before ending or aborting its window\n");
+        publish_transition_window();
         if (!closing.load(std::memory_order_acquire))
             send_header({Kind::kernel_request, 0, 0, 0, 127});
     }
@@ -795,6 +881,18 @@ void finish(qemu_plugin_id_t, void*)
     if (capture_kernel) {
         closing.store(true, std::memory_order_release);
         pthread_join(control_thread, nullptr);
+    }
+    if (has_window_start_pc) {
+        // Atexit runs after execution callbacks stop. Drain raw tails first so
+        // reducer metadata cannot claim a frontier that raw publication lacks.
+        for (unsigned int index = 0; index < system_cpus; ++index) {
+            const ColdLock lock(sources[index]);
+            if (sources[index].state == State::active) {
+                flush(index, sources[index]);
+                if (ring_publication) wait_for_frames(sources[index]);
+            }
+        }
+        publish_transition_window();
     }
     for (unsigned int index = 0; index < max_sources; ++index) {
         const ColdLock lock(sources[index]);
@@ -844,6 +942,9 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
     bool layout_seen = false;
     bool batching_seen = false;
     bool publication_seen = false;
+    bool blocks_seen = false;
+    bool reducer_seen = false;
+    bool capacity_seen = false;
     for (int index = 0; index < argc; ++index) {
         const char* argument = argv[index];
         if (std::strncmp(argument, "fd=", 3) == 0 && output_fd < 0) {
@@ -873,6 +974,41 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
             stop_pc = std::strtoull(argument + 5, &end, 0);
             if (end == argument + 5 || errno != 0 || *end != '\0' || argument[5] == '-') return 1;
             has_stop_pc = true;
+        } else if (std::strncmp(argument, "window_start=", 13) == 0 && !has_window_start_pc) {
+            char* end = nullptr;
+            errno = 0;
+            window_start_pc = std::strtoull(argument + 13, &end, 0);
+            if (end == argument + 13 || errno != 0 || *end != '\0' || argument[13] == '-') return 1;
+            has_window_start_pc = true;
+        } else if (std::strncmp(argument, "window_end=", 11) == 0 && !has_window_end_pc) {
+            char* end = nullptr;
+            errno = 0;
+            window_end_pc = std::strtoull(argument + 11, &end, 0);
+            if (end == argument + 11 || errno != 0 || *end != '\0' || argument[11] == '-') return 1;
+            has_window_end_pc = true;
+        } else if (std::strncmp(argument, "window_abort=", 13) == 0 && !has_window_abort_pc) {
+            char* end = nullptr;
+            errno = 0;
+            window_abort_pc = std::strtoull(argument + 13, &end, 0);
+            if (end == argument + 13 || errno != 0 || *end != '\0' || argument[13] == '-') return 1;
+            has_window_abort_pc = true;
+        } else if (std::strncmp(argument, "blocks=", 7) == 0 && !blocks_seen) {
+            blocks_seen = true;
+            if (std::strcmp(argument + 7, "on") == 0) capture_blocks = true;
+            else if (std::strcmp(argument + 7, "off") == 0) capture_blocks = false;
+            else return 1;
+        } else if (std::strncmp(argument, "reducer=", 8) == 0 && !reducer_seen) {
+            reducer_seen = true;
+            if (std::strcmp(argument + 8, "block-transitions") == 0) reduce_transitions = true;
+            else if (std::strcmp(argument + 8, "none") != 0) return 1;
+        } else if (std::strncmp(argument, "transition_capacity=", 20) == 0 && !capacity_seen) {
+            capacity_seen = true;
+            char* end = nullptr;
+            errno = 0;
+            const unsigned long parsed = std::strtoul(argument + 20, &end, 10);
+            if (end == argument + 20 || errno != 0 || *end != '\0' || parsed < 2 ||
+                parsed > 65536 || (parsed & (parsed - 1)) != 0) return 1;
+            transition_capacity = static_cast<uint32_t>(parsed);
         } else if (std::strncmp(argument, "batching=", 9) == 0 && !batching_seen) {
             batching_seen = true;
             if (std::strcmp(argument + 9, "mixed") == 0) mixed_batches = true;
@@ -967,6 +1103,17 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         std::fputs("cpu2tensor: kernel interaction requires system emulation and its control pipe\n", stderr);
         return 1;
     }
+    const bool any_window = has_window_start_pc || has_window_end_pc || has_window_abort_pc;
+    if (any_window && (!has_window_start_pc || !has_window_end_pc || !has_window_abort_pc ||
+        !capture_kernel || window_start_pc == window_end_pc || window_start_pc == window_abort_pc ||
+        window_end_pc == window_abort_pc)) {
+        std::fputs("cpu2tensor: action windows need three distinct markers and kernel interaction\n", stderr);
+        return 1;
+    }
+    if (reduce_transitions != any_window || (!capture_blocks && !reduce_transitions)) {
+        std::fputs("cpu2tensor: action windows and transition reduction must be enabled together\n", stderr);
+        return 1;
+    }
     if (capture_kernel) {
         if (info->system.smp_vcpus < 1 || info->system.smp_vcpus > static_cast<int>(max_sources) ||
             info->system.smp_vcpus != info->system.max_vcpus) {
@@ -974,6 +1121,14 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
             return 1;
         }
         system_cpus = static_cast<unsigned int>(info->system.smp_vcpus);
+        if (any_window) {
+            const auto configured = transition_window.configure(system_cpus, transition_capacity);
+            if (!configured.ok()) {
+                std::fputs(configured.error(), stderr);
+                std::fputc('\n', stderr);
+                return 1;
+            }
+        }
     }
     if (requested_context && (!capture_system || architecture != Architecture::x86_64)) {
         std::fputs("cpu2tensor: context=on requires x86 system emulation\n", stderr);
@@ -1012,7 +1167,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         (capture_context ? feature_address_context : 0) |
         (capture_context && capture_memory ? feature_system_memory : 0) |
         (capture_layout ? feature_executable_layout : 0) | (mixed_batches ? feature_mixed : 0) |
-        (has_stop_pc ? feature_stop : 0);
+        (has_stop_pc ? feature_stop : 0) | (any_window ? feature_transition_windows : 0);
     send_header({Kind::hello, 0, 0, 0, static_cast<uint64_t>(architecture) | features});
     if (ring_publication && pthread_create(&collector_thread, nullptr, collect_frames, nullptr) != 0) {
         std::fputs("cpu2tensor: cannot start trace collector\n", stderr);

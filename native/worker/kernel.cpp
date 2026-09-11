@@ -230,11 +230,15 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
     Fd serial_guest(serial_pair[1]);
     if (!nonblocking(trace_read.value).ok() || !nonblocking(qmp.value).ok() || !nonblocking(serial.value).ok())
         return Result<bool>::failure("Cannot configure kernel channels");
-    char plugin[PATH_MAX + 256];
-    const int length = std::snprintf(plugin, sizeof(plugin), "%s,fd=%d,control=%d,kernel=on,registers=%s,memory=%s,values=%s,context=%s,batching=%s,publication=%s%s%s",
+    char plugin[PATH_MAX + 512];
+    const int length = std::snprintf(plugin, sizeof(plugin), "%s,fd=%d,control=%d,kernel=on,registers=%s,memory=%s,values=%s,context=%s,batching=%s,publication=%s,blocks=%s,reducer=%s,transition_capacity=%d%s%s%s%s%s%s%s%s",
         options.plugin, trace_write.value, control_read.value, options.registers, options.memory, options.values, options.context,
-        options.batching, options.publication,
-        options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc);
+        options.batching, options.publication, options.blocks, options.reducer,
+        options.transition_capacity,
+        options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc,
+        options.window_start_pc == nullptr ? "" : ",window_start=", options.window_start_pc == nullptr ? "" : options.window_start_pc,
+        options.window_end_pc == nullptr ? "" : ",window_end=", options.window_end_pc == nullptr ? "" : options.window_end_pc,
+        options.window_abort_pc == nullptr ? "" : ",window_abort=", options.window_abort_pc == nullptr ? "" : options.window_abort_pc);
     if (length < 0 || static_cast<size_t>(length) >= sizeof(plugin)) return Result<bool>::failure("Kernel plugin options too long");
     char qmp_spec[128], serial_spec[128];
     std::snprintf(qmp_spec, sizeof(qmp_spec), "socket,id=c2tqmp,fd=%d", qmp_guest.value);
