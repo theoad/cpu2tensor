@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from cpu2tensor.batch import (
         AddressContext, Batch, BlockTransitions, ExecutableLayout,
-        MemoryAccesses, RegisterChanges, TransitionWindow,
+        MemoryAccesses, ObservationContext, ObservationSummary,
+        ObservationTransitions, RegisterChanges, TransitionWindow,
     )
     from cpu2tensor.pool import Pool
     from cpu2tensor.stdio import StdioEnv
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
 _EXPORTS = {
     'ExecutableLayout': 'batch', 'BlockTransitions': 'batch',
     'TransitionWindow': 'batch',
+    'ObservationContext': 'batch', 'ObservationSummary': 'batch',
+    'ObservationTransitions': 'batch',
     'AddressContext': 'batch', 'Batch': 'batch', 'MemoryAccesses': 'batch',
     'RegisterChanges': 'batch', 'Pool': 'pool', 'StdioEnv': 'stdio', 'KernelEnv': 'kernel',
     'BoundaryProgress': 'terminal', 'TerminalOutcome': 'terminal',

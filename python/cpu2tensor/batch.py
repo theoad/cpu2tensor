@@ -134,6 +134,65 @@ class TransitionWindow:
 
 
 @dataclass(frozen=True)
+class ObservationTransitions:
+    """Bounded adjacent-block counts from one vCPU's complete run.
+
+    Rows are aggregate keys rather than a contiguous occurrence stream. Use the
+    per-source ``ObservationSummary`` for the exact processed transition count.
+    """
+
+    from_addresses: Tensor
+    destinations: Tensor
+    counts: Tensor
+
+
+@dataclass(frozen=True)
+class ObservationContext:
+    """A bounded prefix of context changes with exact block positions.
+
+    ``block_positions`` indexes every processed block from zero on this vCPU.
+    These rows have their own retained-record order and are not raw block events.
+    Availability bits and address-space semantics match ``AddressContext``.
+    """
+
+    block_positions: Tensor
+    pc: Tensor
+    cr0: Tensor
+    cr3: Tensor
+    cr4: Tensor
+    efer: Tensor
+    cs_base: Tensor
+    mode: Tensor
+    known: Tensor
+
+
+@dataclass(frozen=True)
+class ObservationSummary:
+    """Exact per-vCPU totals for a completed bounded observation run.
+
+    Pool publishes this only after the worker's Complete frame. ``exact`` says
+    whether every distinct transition and context change fit; it does not claim
+    that aggregate rows retain raw occurrence order.
+    """
+
+    sources: int
+    transition_capacity: int
+    context_capacity: int
+    blocks: int
+    transitions: int
+    distinct_transitions: int
+    transition_overflow: int
+    context_changes: int
+    retained_contexts: int
+    context_overflow: int
+    upstream_complete: bool = True
+
+    @property
+    def exact(self) -> bool:
+        return self.upstream_complete and self.transition_overflow == 0 and self.context_overflow == 0
+
+
+@dataclass(frozen=True)
 class Batch:
     """Events from one CPU, with independently owned tensor storage.
 
@@ -151,6 +210,9 @@ class Batch:
     ``source`` and ``first_sequence`` are None and no CPU sequence is consumed.
     Transition batches are per source and window. Final transition-window metadata
     is worker-wide and also consumes no CPU sequence.
+    Observation reduction uses separate context/transition tables with no raw
+    occurrence sequence. Its per-source summary appears only after successful
+    upstream completion; context rows carry their original block positions.
     """
 
     source: int | None
@@ -164,3 +226,6 @@ class Batch:
     block_sequences: Tensor | None = None
     transitions: BlockTransitions | None = None
     transition_window: TransitionWindow | None = None
+    observation_transitions: ObservationTransitions | None = None
+    observation_context: ObservationContext | None = None
+    observation_summary: ObservationSummary | None = None

@@ -160,6 +160,35 @@ void invalid_markers_and_sources_fail()
     (void)window.close();
 }
 
+void high_rate_run_stays_at_fixed_row_capacity()
+{
+    constexpr uint64_t blocks = 1000000;
+    TransitionWindow window;
+    assert(window.configure(2, 8).ok());
+    assert(window.begin().ok());
+    for (uint64_t index = 0; index < blocks; ++index) {
+        constexpr uint64_t pattern[] = {10, 20, 30, 20};
+        assert(observe(window, 0, pattern[index % 4]).ok());
+        assert(observe(window, 1, 1000 + index).ok());
+    }
+    assert(window.end().ok());
+    const auto closed = window.close();
+    assert(closed.ok());
+    const auto summary = closed.value();
+    assert(summary.observed == 2 * (blocks - 1));
+    assert(window.row_count(0, summary.id) == 4);
+    assert(window.row_count(1, summary.id) == 8);
+    const auto first = window.source_summary(0, summary.id);
+    const auto second = window.source_summary(1, summary.id);
+    assert(first.distinct == 4 && first.observed == blocks - 1 && first.overflow == 0);
+    assert(second.distinct == 8 && second.observed == blocks - 1 &&
+           second.overflow == blocks - 9);
+    assert(find(window, 0, summary.id, 10, 20).count == blocks / 4);
+    assert(find(window, 0, summary.id, 20, 30).count == blocks / 4);
+    assert(find(window, 0, summary.id, 30, 20).count == blocks / 4);
+    assert(find(window, 0, summary.id, 20, 10).count == blocks / 4 - 1);
+}
+
 } // namespace
 
 int main()
@@ -169,4 +198,5 @@ int main()
     overflow_is_not_silent();
     admitted_block_finishes_after_end();
     invalid_markers_and_sources_fail();
+    high_rate_run_stays_at_fixed_row_capacity();
 }

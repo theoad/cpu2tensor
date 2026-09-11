@@ -38,6 +38,12 @@ struct WindowSummary final {
     uint64_t overflow = 0;
 };
 
+struct TransitionSourceSummary final {
+    uint32_t distinct = 0;
+    uint64_t observed = 0;
+    uint64_t overflow = 0;
+};
+
 class TransitionWindow final {
 public:
     TransitionWindow() = default;
@@ -59,6 +65,7 @@ public:
     Result<WindowSummary> close();
     uint32_t row_count(uint32_t source, uint64_t window) const;
     TransitionCount row(uint32_t source, uint64_t window, uint32_t index) const;
+    TransitionSourceSummary source_summary(uint32_t source, uint64_t window) const;
     bool open() const;
 
 private:

@@ -310,6 +310,49 @@ int main() {
                           max_addresses * transition_count_bytes});
     assert(!decode_header(bytes, sizeof(bytes)).ok());
 
+    const uint64_t reduction_features = 2 | feature_system | feature_address_context |
+                                        feature_observation_reduction;
+    Header legacy_reduction{Kind::hello, 0, 0, 0, reduction_features};
+    legacy_reduction.version = legacy_wire_version;
+    encode_header(bytes, legacy_reduction);
+    assert(!decode_header(bytes, sizeof(bytes)).ok());
+    uint8_t reduced_context[reduced_context_bytes]{};
+    store_u64(reduced_context, 0);
+    store_u64(reduced_context + 8, 0x1000);
+    store_u64(reduced_context + 56, 64);
+    store_u64(reduced_context + 64, 63);
+    uint8_t reduced_summary[observation_summary_bytes]{};
+    store_u32(reduced_summary, 2);
+    store_u32(reduced_summary + 4, 8);
+    store_u32(reduced_summary + 8, 8);
+    store_u64(reduced_summary + 16, 4);
+    store_u64(reduced_summary + 24, 3);
+    store_u64(reduced_summary + 32, 1);
+    store_u64(reduced_summary + 48, 1);
+    store_u64(reduced_summary + 56, 1);
+    Stream reduced;
+    assert(reduced.accept({Kind::hello, 0, 0, 0, reduction_features}).ok());
+    assert(reduced.accept({Kind::reduced_context, 0, 1, 0,
+                           reduced_context_bytes}, reduced_context).ok());
+    assert(reduced.accept({Kind::block_transitions, 0, 1, 1,
+                           transition_count_bytes}, transition).ok());
+    assert(reduced.accept({Kind::observation_summary, 0, 1, 0,
+                           observation_summary_bytes}, reduced_summary).ok());
+    std::memset(reduced_summary + 16, 0, observation_summary_bytes - 16);
+    assert(reduced.accept({Kind::observation_summary, 1, 1, 0,
+                           observation_summary_bytes}, reduced_summary).ok());
+    assert(reduced.accept({Kind::source_end, 0, 0, 1, 0}).ok());
+    assert(reduced.accept({Kind::source_end, 1, 0, 0, 0}).ok());
+    assert(reduced.accept({Kind::complete}).ok());
+
+    Stream reduced_raw;
+    assert(reduced_raw.accept({Kind::hello, 0, 0, 0, reduction_features}).ok());
+    assert(!reduced_raw.accept({Kind::blocks, 0, 1, 0, 0}).ok());
+    Stream reduced_missing_summary;
+    assert(reduced_missing_summary.accept({Kind::hello, 0, 0, 0,
+                                           reduction_features}).ok());
+    assert(!reduced_missing_summary.accept({Kind::source_end, 0, 0, 0, 0}).ok());
+
     Stream invalid;
     assert(!invalid.accept({Kind::hello, 0, 0, 0, 99}).ok());
     assert(invalid.accept({Kind::hello, 0, 0, 0, 2}).ok());

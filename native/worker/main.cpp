@@ -42,13 +42,15 @@ bool observation_frame(Kind kind) {
     return kind == Kind::blocks || kind == Kind::registers || kind == Kind::memory ||
         kind == Kind::address_context || kind == Kind::executable_layout ||
         kind == Kind::mixed || kind == Kind::block_transitions ||
-        kind == Kind::transition_window;
+        kind == Kind::transition_window || kind == Kind::observation_summary ||
+        kind == Kind::reduced_context;
 }
 
 bool execution_frame(Kind kind) {
     return kind == Kind::blocks || kind == Kind::registers || kind == Kind::memory ||
         kind == Kind::address_context || kind == Kind::mixed ||
-        kind == Kind::block_transitions || kind == Kind::transition_window;
+        kind == Kind::block_transitions || kind == Kind::transition_window ||
+        kind == Kind::observation_summary || kind == Kind::reduced_context;
 }
 
 void report_deadline(int client, const TerminalProgress& progress) {
@@ -265,8 +267,17 @@ Result<Options> parse(int argc, char** argv) {
         return Result<Options>::failure("Action windows need start, end, and abort guest block addresses");
     if (all_window && !options.kernel)
         return Result<Options>::failure("Action windows require --kernel-adapter on");
-    if (all_window != (std::strcmp(options.reducer, "block-transitions") == 0))
-        return Result<Options>::failure("Action windows and block transition reduction must be enabled together");
+    const bool reduced = std::strcmp(options.reducer, "block-transitions") == 0;
+    if (all_window && !reduced)
+        return Result<Options>::failure("Action windows require block transition reduction");
+    if (reduced && !all_window && (!options.system || options.kernel ||
+        std::strcmp(options.blocks, "off") != 0 ||
+        std::strcmp(options.registers, "none") != 0 ||
+        std::strcmp(options.memory, "off") != 0 ||
+        std::strcmp(options.context, "on") != 0 ||
+        std::strcmp(options.batching, "legacy") != 0))
+        return Result<Options>::failure(
+            "Observation reduction needs context-only system capture, --blocks off, and legacy batching");
     if (std::strcmp(options.blocks, "off") == 0 && std::strcmp(options.reducer, "none") == 0)
         return Result<Options>::failure("--blocks off requires a reducer");
     if (options.system && !options.kernel_protocol && options.input == nullptr) options.input = "/dev/null";
@@ -537,8 +548,8 @@ Result<RunOutcome> run(const Options& options, int listener) {
     if (pipe2(pipes, O_CLOEXEC) != 0) return Result<RunOutcome>::failure("Cannot create capture pipe");
     const Descriptor reader(pipes[0]);
     // Writer is closed by the parent immediately after fork.
-    char plugin_option[PATH_MAX + 256];
-    const int option_size = std::snprintf(plugin_option, sizeof(plugin_option), "%s,fd=%d,registers=%s,memory=%s,values=%s,context=%s,stdio=%s,layout=%s,batching=%s,publication=%s%s%s%s%s", options.plugin, pipes[1], options.registers, options.memory, options.values, options.context, options.stdio ? "on" : "off", options.layout ? "on" : "off", options.batching, options.publication, options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc, options.stop_pc == nullptr ? "" : ",stop=", options.stop_pc == nullptr ? "" : options.stop_pc);
+    char plugin_option[PATH_MAX + 384];
+    const int option_size = std::snprintf(plugin_option, sizeof(plugin_option), "%s,fd=%d,registers=%s,memory=%s,values=%s,context=%s,stdio=%s,layout=%s,batching=%s,publication=%s,blocks=%s,reducer=%s,transition_capacity=%d%s%s%s%s", options.plugin, pipes[1], options.registers, options.memory, options.values, options.context, options.stdio ? "on" : "off", options.layout ? "on" : "off", options.batching, options.publication, options.blocks, options.reducer, options.transition_capacity, options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc, options.stop_pc == nullptr ? "" : ",stop=", options.stop_pc == nullptr ? "" : options.stop_pc);
     if (option_size < 0 || static_cast<size_t>(option_size) >= sizeof(plugin_option)) {
         close(pipes[1]);
         return Result<RunOutcome>::failure("Plugin path is too long");

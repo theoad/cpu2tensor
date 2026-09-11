@@ -194,4 +194,13 @@ TransitionCount TransitionWindow::row(uint32_t source_index, uint64_t window, ui
     return {slot.from_address, slot.destination, slot.count};
 }
 
+TransitionSourceSummary TransitionWindow::source_summary(uint32_t source_index,
+                                                          uint64_t window) const
+{
+    if (source_index >= _source_count) return {};
+    const auto& source = _sources[source_index];
+    if (source.window != window) return {};
+    return {source.distinct, source.observed, source.overflow};
+}
+
 } // namespace cpu2tensor
