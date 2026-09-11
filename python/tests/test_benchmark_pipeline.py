@@ -122,7 +122,7 @@ class PipelineBenchmarkTests(unittest.TestCase):
             self.assertFalse(failure["all_traces_complete"])
             self.assertEqual((failure["batches"], failure["updates"]), (1, 1))
             self.assertEqual(failure["rows"]["blocks"], 1)
-            self.assertEqual(failure["error_type"], "RuntimeError")
+            self.assertEqual(failure["error_type"], "TraceTerminalError")
 
     def test_empty_training_stream_is_not_a_successful_training_run(self):
         data = frame(1, detail=1) + frame(3) + frame(4)

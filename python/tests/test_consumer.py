@@ -19,12 +19,13 @@ from cpu2tensor import Pool
 def frame(
     kind: int,
     *,
+    version: int = 2,
     source: int = 0,
     sequence: int = 0,
     detail: int = 0,
     addresses: tuple[int, ...] = (),
 ) -> bytes:
-    header = struct.pack("<IHHIIQQ", 0x31543243, 2, kind, source, len(addresses), sequence, detail)
+    header = struct.pack("<IHHIIQQ", 0x31543243, version, kind, source, len(addresses), sequence, detail)
     return header + struct.pack(f"<{len(addresses)}Q", *addresses)
 
 

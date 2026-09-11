@@ -23,10 +23,57 @@ using namespace cpu2tensor;
 constexpr int socket_buffer_bytes = 64 * 1024;
 constexpr int default_timeout_ms = 30000;
 constexpr size_t max_arguments = 256;
+constexpr char run_deadline_error[] = "Target exceeded --max-run-ms deadline";
 
 enum class Transfer : uint8_t { ready, cancelled };
 enum class RunOutcome : uint8_t { completed, cancelled };
 struct ChildExit final { int status = 0; bool cancelled = false; };
+struct TerminalProgress final {
+    bool hello_sent = false;
+    bool data_sent = false;
+    bool start_configured = false;
+    bool start_observed = false;
+    bool stop_configured = false;
+    bool stop_observed = false;
+    uint16_t version = wire_version;
+};
+
+bool observation_frame(Kind kind) {
+    return kind == Kind::blocks || kind == Kind::registers || kind == Kind::memory ||
+        kind == Kind::address_context || kind == Kind::executable_layout ||
+        kind == Kind::mixed || kind == Kind::block_transitions ||
+        kind == Kind::transition_window;
+}
+
+bool execution_frame(Kind kind) {
+    return kind == Kind::blocks || kind == Kind::registers || kind == Kind::memory ||
+        kind == Kind::address_context || kind == Kind::mixed ||
+        kind == Kind::block_transitions || kind == Kind::transition_window;
+}
+
+void report_deadline(int client, const TerminalProgress& progress) {
+    if (progress.version != wire_version) return;
+    uint8_t flags = (progress.hello_sent ? terminal_hello : 0) |
+        (progress.data_sent ? terminal_data : 0) |
+        (progress.start_configured ? terminal_start_configured : 0) |
+        (progress.start_observed ? terminal_start_observed : 0) |
+        (progress.stop_configured ? terminal_stop_configured : 0) |
+        (progress.stop_observed ? terminal_stop_observed : 0);
+    uint8_t bytes[header_bytes];
+    encode_header(bytes, {Kind::terminal_report, 0, 0, 0,
+                          terminal_report_detail(TerminalReason::max_run_deadline, flags)});
+    // One nonblocking attempt cannot extend the run deadline. A full socket may
+    // lose this optional diagnostic; the client then reports the actual EOF or
+    // truncated frame instead of inventing a worker reason.
+    (void)send(client, bytes, sizeof(bytes), MSG_NOSIGNAL | MSG_DONTWAIT);
+}
+
+Result<RunOutcome> fail_before_client_frame(int client, const TerminalProgress& progress,
+                                            const char* error) {
+    if (std::strcmp(error, run_deadline_error) == 0)
+        report_deadline(client, progress);
+    return Result<RunOutcome>::failure(error);
+}
 
 int remaining_timeout(const timespec& start, int timeout_ms) {
     timespec now{};
@@ -43,7 +90,7 @@ public:
     Result<int> limit(int operation_ms) const {
         if (_end_ms == 0) return Result<int>::success(operation_ms);
         const int64_t remaining = _end_ms - now_ms();
-        if (remaining <= 0) return Result<int>::failure("Target exceeded --max-run-ms deadline");
+        if (remaining <= 0) return Result<int>::failure(run_deadline_error);
         return Result<int>::success(remaining < operation_ms ? static_cast<int>(remaining) : operation_ms);
     }
 private:
@@ -521,10 +568,16 @@ Result<RunOutcome> run(const Options& options, int listener) {
     if (pid < 0) return Result<RunOutcome>::failure("Cannot start target");
     Child child(pid);
     Stream stream;
+    TerminalProgress progress{
+        false, false, options.start_pc != nullptr, false,
+        options.stop_pc != nullptr, false,
+    };
     uint8_t frame[max_frame_bytes];
     for (;;) {
         auto read_result = read_exact(reader.get(), client.get(), frame, header_bytes, options.timeout_ms, deadline);
-        if (!read_result.ok() || read_result.value() == Transfer::cancelled)
+        if (!read_result.ok())
+            return fail_before_client_frame(client.get(), progress, read_result.error());
+        if (read_result.value() == Transfer::cancelled)
             return stopped_transfer(options, read_result);
         const auto decoded = decode_header(frame, header_bytes);
         if (!decoded.ok()) return Result<RunOutcome>::failure(decoded.error());
@@ -533,7 +586,9 @@ Result<RunOutcome> run(const Options& options, int listener) {
             return Result<RunOutcome>::failure("QEMU mode does not match --system setting");
         const size_t payload = payload_size(header);
         read_result = read_exact(reader.get(), client.get(), frame + header_bytes, payload, options.timeout_ms, deadline);
-        if (!read_result.ok() || read_result.value() == Transfer::cancelled)
+        if (!read_result.ok())
+            return fail_before_client_frame(client.get(), progress, read_result.error());
+        if (read_result.value() == Transfer::cancelled)
             return stopped_transfer(options, read_result);
         const auto valid = stream.accept(header, frame + header_bytes);
         if (!valid.ok()) return Result<RunOutcome>::failure(valid.error());
@@ -555,8 +610,11 @@ Result<RunOutcome> run(const Options& options, int listener) {
             continue;
         }
         if (header.kind == Kind::complete) {
+            if (progress.start_configured) progress.start_observed = true;
+            if (progress.stop_configured) progress.stop_observed = true;
             const auto ended = child.finish(client.get(), options.timeout_ms, deadline);
-            if (!ended.ok()) return Result<RunOutcome>::failure(ended.error());
+            if (!ended.ok())
+                return fail_before_client_frame(client.get(), progress, ended.error());
             if (ended.value().cancelled)
                 return stopped_transfer(options, Result<Transfer>::success(Transfer::cancelled));
             uint8_t extra;
@@ -565,11 +623,13 @@ Result<RunOutcome> run(const Options& options, int listener) {
             ssize_t tail;
             do {
                 const auto budget = deadline.limit(options.timeout_ms);
-                if (!budget.ok()) return Result<RunOutcome>::failure(budget.error());
+                if (!budget.ok())
+                    return fail_before_client_frame(client.get(), progress, budget.error());
                 tail = read(reader.get(), &extra, 1);
             } while (tail < 0 && errno == EINTR);
             if (tail != 0) return Result<RunOutcome>::failure("Capture pipe stayed open or contained data after its seal");
             Header terminal{Kind::complete};
+            terminal.version = header.version;
             if (WIFEXITED(ended.value().status)) terminal.detail = WEXITSTATUS(ended.value().status);
             else { terminal.kind = Kind::error; terminal.detail = static_cast<uint64_t>(Failure::target_killed); }
             encode_header(frame, terminal);
@@ -582,6 +642,15 @@ Result<RunOutcome> run(const Options& options, int listener) {
         // receiving it; cancellation must not turn invalid capture into success.
         if (header.kind == Kind::error) return Result<RunOutcome>::failure("Capture reported a failure");
         if (!sent.ok() || sent.value() == Transfer::cancelled) return stopped_transfer(options, sent);
+        if (header.kind == Kind::hello) {
+            progress.hello_sent = true;
+            progress.version = header.version;
+        }
+        if (observation_frame(header.kind)) {
+            progress.data_sent = true;
+            if (progress.start_configured && execution_frame(header.kind))
+                progress.start_observed = true;
+        }
     }
 }
 } // namespace

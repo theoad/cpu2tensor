@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import replace
 import socket
 import struct
 import threading
@@ -20,6 +21,10 @@ from cpu2tensor.batch import (
     AddressContext, Batch, BlockTransitions, ExecutableLayout, MemoryAccesses,
     RegisterChanges, TransitionWindow,
 )
+from cpu2tensor.terminal import (
+    BoundaryProgress, TerminalOutcome, TerminalReason, TraceConnectionError,
+    TraceTerminalError, TraceTimeoutError, TransportEnd,
+)
 
 
 _HEADER_BYTES = 32
@@ -34,6 +39,20 @@ _EXECUTABLE_LAYOUT = 13
 _MIXED = 14
 _BLOCK_TRANSITIONS = 15
 _TRANSITION_WINDOW = 16
+_TERMINAL_REPORT = 17
+_TERMINAL_REPORT_VERSION = 1
+_TERMINAL_HELLO = 1 << 0
+_TERMINAL_DATA = 1 << 1
+_TERMINAL_START_CONFIGURED = 1 << 2
+_TERMINAL_START_OBSERVED = 1 << 3
+_TERMINAL_STOP_CONFIGURED = 1 << 4
+_TERMINAL_STOP_OBSERVED = 1 << 5
+_WINDOW_FEATURE = 1 << 14
+_STOP_FEATURE = 1 << 19
+_DATA_KINDS = {
+    _BLOCKS, _REGISTERS, _MEMORY, _ADDRESS_CONTEXT, _EXECUTABLE_LAYOUT,
+    _MIXED, _BLOCK_TRANSITIONS, _TRANSITION_WINDOW,
+}
 _WINDOW = struct.Struct("<IIIIQQQ")
 _WINDOW_STATUS = {1: "ended", 2: "aborted", 3: "incomplete"}
 _FAILURES = {
@@ -42,6 +61,17 @@ _FAILURES = {
     3: "target behavior is not supported",
     4: "worker transport failed",
 }
+_FAILURE_REASONS = {
+    1: TerminalReason.CAPTURE_FAILURE,
+    2: TerminalReason.TARGET_KILLED,
+    3: TerminalReason.UNSUPPORTED_TARGET,
+    4: TerminalReason.WORKER_TRANSPORT_FAILURE,
+}
+
+
+class _CleanEnd(Exception):
+    def __init__(self, truncated: bool) -> None:
+        self.truncated = truncated
 
 
 class Pool:
@@ -75,6 +105,8 @@ class Pool:
         batch_bytes: int = 0,
     ) -> None:
         self._readers = None
+        self._endpoints = tuple(endpoints)
+        self._outcome: TerminalOutcome | None = None
         self._closed = False
         if not isinstance(batch_bytes, int) or not 0 <= batch_bytes <= MAX_BATCH_BYTES:
             raise ValueError("batch_bytes must be an integer between 0 and 4 MiB")
@@ -103,6 +135,7 @@ class Pool:
         if timeout <= 0:
             raise ValueError("Socket timeout must be positive")
         self._address = (endpoint.hostname, endpoint.port)
+        self._endpoint = endpoints[0]
         self._device = torch.device(device)
         self._column_device = torch.device("cpu") if batch_bytes else self._device
         if self._device.type not in ("cpu", "mps", "cuda"):
@@ -147,6 +180,13 @@ class Pool:
                 pass  # A peer that has already closed still needs local cleanup.
             connection.close()
 
+    @property
+    def outcomes(self) -> tuple[TerminalOutcome | None, ...]:
+        """The outcome of each endpoint, or ``None`` while it is still running."""
+        if self._readers is not None:
+            return self._readers.outcomes
+        return (self._outcome,)
+
     def read(self) -> Iterator[Batch]:
         """Yield batches once, receiving only when the caller asks for the next."""
         if self._readers is not None:
@@ -159,13 +199,22 @@ class Pool:
             self._started = True
         return self._read()
 
-    def _receive(self, connection: socket.socket, size: int) -> bytearray:
+    def _receive(
+        self,
+        connection: socket.socket,
+        size: int,
+        *,
+        classify_end: bool = False,
+        frame_started: bool = False,
+    ) -> bytearray:
         data = bytearray(size)
         view = memoryview(data)
         received = 0
         while received < size:
             count = connection.recv_into(view[received:])
             if count == 0:
+                if classify_end:
+                    raise _CleanEnd(frame_started or received != 0)
                 raise RuntimeError("Incomplete trace: worker disconnected before completion")
             received += count
         return data
@@ -206,18 +255,32 @@ class Pool:
         raise OSError("Worker address resolved to no stream sockets")
 
     def _read(self) -> Iterator[Batch]:
+        hello_received = False
+        data_received = False
+        start_configured: bool | None = None
+        stop_configured: bool | None = None
+        connected = False
         try:
             if self._closed:
                 raise RuntimeError("Pool was closed before reading started")
             connection = self._connect()
+            connected = True
             stream = _native.new_stream()
             names: dict[int, Mapping[int, str]] = {}
             collator = BatchCollator(self._batch_bytes) if self._batch_bytes else None
             while True:
-                header = self._receive(connection, _HEADER_BYTES)
+                header = self._receive(connection, _HEADER_BYTES, classify_end=True)
                 payload_bytes = _native.payload_size(header)
-                frame = header + self._receive(connection, payload_bytes)
+                frame = header + self._receive(
+                    connection, payload_bytes, classify_end=True, frame_started=True,
+                )
                 kind, source, count, sequence, detail, payload = _native.decode(stream, frame)
+                if kind == 1:
+                    hello_received = True
+                    start_configured = bool(detail & _WINDOW_FEATURE)
+                    stop_configured = bool(detail & _STOP_FEATURE)
+                elif kind in _DATA_KINDS:
+                    data_received = True
                 if kind == 1 and detail & 2048:
                     raise ValueError("Use StdioEnv for an interactive worker")
                 if kind == 1 and detail & (1 << 13):
@@ -247,17 +310,148 @@ class Pool:
                         for ready in collator.finish():
                             yield to_device(ready, self._device)
                             del ready
+                    self._outcome = self._make_outcome(
+                        TerminalReason.COMPLETE if detail == 0 else TerminalReason.TARGET_EXIT,
+                        hello_received, data_received,
+                        start=self._completed_boundary(start_configured),
+                        stop=self._completed_boundary(stop_configured),
+                        complete=True,
+                    )
                     if detail != 0:
-                        raise RuntimeError(f"Target exited with code {detail}")
+                        raise TraceTerminalError(f"Target exited with code {detail}", self._outcome)
                     return
                 elif kind == _ERROR:
-                    raise RuntimeError(f"Incomplete trace: {_FAILURES[detail]}")
+                    self._outcome = self._make_outcome(
+                        _FAILURE_REASONS[detail], hello_received, data_received,
+                    )
+                    raise TraceTerminalError(
+                        f"Incomplete trace: {_FAILURES[detail]}", self._outcome,
+                    )
+                elif kind == _TERMINAL_REPORT:
+                    self._raise_reported_terminal(
+                        connection, detail, hello_received, data_received,
+                        start_configured, stop_configured,
+                    )
+        except _CleanEnd as error:
+            reason = (TerminalReason.TRUNCATED_STREAM if error.truncated
+                      else TerminalReason.UNKNOWN_DISCONNECTION)
+            self._outcome = self._make_outcome(
+                reason, hello_received, data_received,
+                transport=TransportEnd.CLEAN,
+            )
+            raise TraceTerminalError(
+                ("Incomplete trace: worker disconnected inside a frame" if error.truncated
+                 else "Incomplete trace: worker disconnected before completion"),
+                self._outcome,
+            ) from error
+        except TraceTerminalError:
+            raise
         except TimeoutError as error:
-            raise TimeoutError("Trace connection timed out before completion") from error
+            self._outcome = self._make_outcome(
+                TerminalReason.CLIENT_TIMEOUT, hello_received, data_received,
+                transport=TransportEnd.TIMEOUT,
+            )
+            raise TraceTimeoutError(
+                "Trace connection timed out before completion", self._outcome,
+            ) from error
         except OSError as error:
-            raise ConnectionError("Trace connection failed before completion") from error
+            transport = TransportEnd.RESET if isinstance(error, ConnectionResetError) else TransportEnd.ERROR
+            self._outcome = self._make_outcome(
+                (TerminalReason.UNKNOWN_DISCONNECTION if connected
+                 else TerminalReason.CONNECTION_FAILURE),
+                hello_received, data_received,
+                transport=transport,
+            )
+            raise TraceConnectionError(
+                "Trace connection failed before completion", self._outcome,
+            ) from error
         finally:
             self.close()
+
+    def _make_outcome(
+        self,
+        reason: TerminalReason,
+        hello_received: bool,
+        data_received: bool,
+        *,
+        hello_reported: bool | None = None,
+        data_reported: bool | None = None,
+        start: BoundaryProgress = BoundaryProgress.UNKNOWN,
+        stop: BoundaryProgress = BoundaryProgress.UNKNOWN,
+        transport: TransportEnd = TransportEnd.NOT_OBSERVED,
+        complete: bool = False,
+    ) -> TerminalOutcome:
+        return TerminalOutcome(
+            reason=reason, endpoint=self._endpoint, worker=0, source=None,
+            hello_received=hello_received, data_received=data_received,
+            hello_reported=hello_reported, data_reported=data_reported,
+            start=start, stop=stop, transport=transport, complete=complete,
+        )
+
+    @staticmethod
+    def _completed_boundary(configured: bool | None) -> BoundaryProgress:
+        if configured is None:
+            return BoundaryProgress.UNKNOWN
+        return BoundaryProgress.OBSERVED if configured else BoundaryProgress.NOT_CONFIGURED
+
+    @staticmethod
+    def _reported_boundary(flags: int, configured: int, observed: int) -> BoundaryProgress:
+        if not flags & configured:
+            return BoundaryProgress.NOT_CONFIGURED
+        return BoundaryProgress.OBSERVED if flags & observed else BoundaryProgress.NOT_OBSERVED
+
+    def _raise_reported_terminal(
+        self,
+        connection: socket.socket,
+        detail: int,
+        hello_received: bool,
+        data_received: bool,
+        start_configured: bool | None,
+        stop_configured: bool | None,
+    ) -> None:
+        version = detail & 255
+        reason_code = (detail >> 8) & 255
+        flags = (detail >> 16) & 255
+        if version != _TERMINAL_REPORT_VERSION or reason_code != 1:
+            raise ValueError("Unknown terminal report version or reason")
+        hello_reported = bool(flags & _TERMINAL_HELLO)
+        data_reported = bool(flags & _TERMINAL_DATA)
+        if hello_received != hello_reported or data_received != data_reported:
+            raise ValueError("Terminal report contradicts received trace progress")
+        if hello_received and (
+            start_configured != bool(flags & _TERMINAL_START_CONFIGURED)
+            or stop_configured != bool(flags & _TERMINAL_STOP_CONFIGURED)
+        ):
+            raise ValueError("Terminal report contradicts Hello boundary configuration")
+        outcome = self._make_outcome(
+            TerminalReason.MAX_RUN_DEADLINE, hello_received, data_received,
+            hello_reported=hello_reported, data_reported=data_reported,
+            start=self._reported_boundary(
+                flags, _TERMINAL_START_CONFIGURED, _TERMINAL_START_OBSERVED,
+            ),
+            stop=self._reported_boundary(
+                flags, _TERMINAL_STOP_CONFIGURED, _TERMINAL_STOP_OBSERVED,
+            ),
+        )
+        try:
+            trailing = connection.recv(1)
+        except TimeoutError as error:
+            self._outcome = replace(outcome, transport=TransportEnd.TIMEOUT)
+            raise TraceTimeoutError(
+                "Incomplete trace: target exceeded its max-run deadline", self._outcome,
+            ) from error
+        except OSError as error:
+            transport = TransportEnd.RESET if isinstance(error, ConnectionResetError) else TransportEnd.ERROR
+            self._outcome = replace(outcome, transport=transport)
+            raise TraceConnectionError(
+                "Incomplete trace: target exceeded its max-run deadline", self._outcome,
+            ) from error
+        if trailing:
+            raise ValueError("Trace contains data after its terminal report")
+        self._outcome = replace(outcome, transport=TransportEnd.CLEAN)
+        raise TraceTerminalError(
+            "Incomplete trace: target exceeded its max-run deadline", self._outcome,
+        )
 
     def _tensor(self, data: bytearray, dtype: torch.dtype) -> torch.Tensor:
         # CPU tensors retain their decoded column storage without a copy. Once

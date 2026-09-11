@@ -12,6 +12,7 @@ import torch
 from cpu2tensor.batch import Batch
 from cpu2tensor._device import to_device
 from cpu2tensor.pool import Pool
+from cpu2tensor.terminal import TerminalOutcome, TraceTerminalError
 
 
 class EndpointReaders:
@@ -47,6 +48,16 @@ class EndpointReaders:
             self._started = True
         return self._read()
 
+    @property
+    def outcomes(self) -> tuple[TerminalOutcome | None, ...]:
+        values = []
+        for worker, pool in enumerate(self._pools):
+            outcome = pool.outcomes[0]
+            values.append(None if outcome is None else replace(
+                outcome, worker=worker, endpoint=self._endpoints[worker],
+            ))
+        return tuple(values)
+
     def _receive(self, worker: int) -> None:
         try:
             for batch in self._pools[worker].read():
@@ -60,6 +71,11 @@ class EndpointReaders:
                 # Do not retain an extra reference while the next read blocks.
                 del batch
         except BaseException as error:
+            if isinstance(error, TraceTerminalError):
+                outcome = replace(
+                    error.outcome, worker=worker, endpoint=self._endpoints[worker],
+                )
+                error = type(error)(str(error), outcome)
             with self._ready:
                 if not self._closed and self._failure is None:
                     # A failure must not wait behind a full batch queue.
@@ -93,9 +109,10 @@ class EndpointReaders:
                     ))
                     if self._failure is not None:
                         worker, error = self._failure
-                        raise RuntimeError(
-                            f"Worker {worker} ({self._endpoints[worker]}) failed: {error}"
-                        ) from error
+                        message = f"Worker {worker} ({self._endpoints[worker]}) failed: {error}"
+                        if isinstance(error, TraceTerminalError):
+                            raise type(error)(message, error.outcome) from error
+                        raise RuntimeError(message) from error
                     if self._closed:
                         return
                     # Rotating the first slot avoids starving a sparse worker

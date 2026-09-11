@@ -11,6 +11,10 @@ if TYPE_CHECKING:
     from cpu2tensor.pool import Pool
     from cpu2tensor.stdio import StdioEnv
     from cpu2tensor.kernel import KernelEnv
+    from cpu2tensor.terminal import (
+        BoundaryProgress, TerminalOutcome, TerminalReason, TraceConnectionError,
+        TraceTerminalError, TraceTimeoutError, TransportEnd,
+    )
 
 # Worker-side benchmarks use the native decoder without loading a learner runtime.
 _EXPORTS = {
@@ -18,6 +22,10 @@ _EXPORTS = {
     'TransitionWindow': 'batch',
     'AddressContext': 'batch', 'Batch': 'batch', 'MemoryAccesses': 'batch',
     'RegisterChanges': 'batch', 'Pool': 'pool', 'StdioEnv': 'stdio', 'KernelEnv': 'kernel',
+    'BoundaryProgress': 'terminal', 'TerminalOutcome': 'terminal',
+    'TerminalReason': 'terminal', 'TraceConnectionError': 'terminal',
+    'TraceTerminalError': 'terminal', 'TraceTimeoutError': 'terminal',
+    'TransportEnd': 'terminal',
 }
 __all__ = list(_EXPORTS)
 
