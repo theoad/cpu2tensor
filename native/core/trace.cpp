@@ -36,7 +36,8 @@ size_t payload_size(const Header& header) {
     if (header.kind == Kind::register_schema || header.kind == Kind::registers || header.kind == Kind::memory ||
         header.kind == Kind::address_context || header.kind == Kind::executable_layout || header.kind == Kind::mixed ||
         header.kind == Kind::block_transitions || header.kind == Kind::transition_window ||
-        header.kind == Kind::observation_summary || header.kind == Kind::reduced_context)
+        header.kind == Kind::context_filter || header.kind == Kind::observation_summary ||
+        header.kind == Kind::reduced_context)
         return static_cast<size_t>(header.detail);
     return 0;
 }
@@ -67,6 +68,11 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
     case Kind::transition_window:
         if (h.source != 0 || h.count != 1 || h.sequence == 0 || h.detail != transition_window_bytes)
             return Result<Header>::failure("Invalid transition window fields");
+        break;
+    case Kind::context_filter:
+        if (h.version != wire_version || h.source != 0 || h.count != 1 ||
+            h.sequence != 0 || h.detail != context_filter_bytes)
+            return Result<Header>::failure("Invalid context filter summary fields");
         break;
     case Kind::observation_summary:
         if (h.count != 1 || h.sequence != 0 || h.detail != observation_summary_bytes)
@@ -118,7 +124,7 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
             constexpr auto allowed = uint64_t{255} | feature_memory | feature_registers | feature_memory_values | feature_stdio |
                 feature_system | feature_kernel | feature_window | feature_system_memory | feature_address_context |
                 feature_executable_layout | feature_mixed | feature_stop | feature_transition_windows |
-                feature_observation_reduction;
+                feature_context_filter | feature_observation_reduction;
             if ((architecture != 1 && architecture != 2) || (h.detail & ~allowed) != 0)
                 return Result<Header>::failure("Unsupported target architecture or features");
             if ((h.detail & feature_memory_values) && !(h.detail & feature_memory))
@@ -145,6 +151,11 @@ Result<Header> decode_header(const uint8_t* bytes, size_t size) {
                                  feature_transition_windows)))
                     return Result<Header>::failure("Reduced observations need v3 context-only system capture");
             }
+            if ((h.detail & feature_context_filter) &&
+                (h.version != wire_version || !(h.detail & feature_address_context) ||
+                 !(h.detail & feature_system) || architecture != 2 ||
+                 !(h.detail & (feature_memory | feature_registers))))
+                return Result<Header>::failure("Context filtering needs rich x86 system capture");
         }
         if (h.kind == Kind::complete && h.detail > 255) return Result<Header>::failure("Invalid target exit code");
         if (h.kind == Kind::error && (h.detail < 1 || h.detail > 4)) return Result<Header>::failure("Unknown trace failure");
@@ -383,6 +394,10 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
                 if (!_data[source]) continue;
                 const auto* registers = _registers[source];
                 if (registers == nullptr) return Result<Done>::failure("Kernel boundary needs a register schema");
+                bool any_sampled = false;
+                for (uint32_t id = 0; id < max_registers; ++id)
+                    any_sampled |= registers->sampled[id];
+                if ((_features & feature_context_filter) && !any_sampled) continue;
                 for (uint32_t id = 0; id < max_registers; ++id)
                     if (registers->widths[id] != 0 && !registers->sampled[id])
                         return Result<Done>::failure("Kernel boundary needs complete source register baselines");
@@ -544,6 +559,35 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
         _window_rows = false;
         return Result<Done>::success({});
     }
+    if (h.kind == Kind::context_filter) {
+        if (!(_features & feature_context_filter) || bytes == nullptr || _context_filter_seen)
+            return Result<Done>::failure("Context filter summary needs its feature and appears once");
+        for (uint32_t source = 0; source < max_sources; ++source)
+            if (_seen[source] && !_ended[source])
+                return Result<Done>::failure("Context filter summary needs every observed source end");
+        const uint32_t policy = load_u32(bytes);
+        const uint32_t latch = load_u32(bytes + 4);
+        const uint32_t source = load_u32(bytes + 8);
+        const uint32_t reserved = load_u32(bytes + 12);
+        const uint64_t cr3 = load_u64(bytes + 24);
+        const uint64_t root = load_u64(bytes + 32);
+        const uint64_t kept = load_u64(bytes + 40);
+        const uint64_t dropped = load_u64(bytes + 48);
+        const uint64_t matching = load_u64(bytes + 56);
+        const uint64_t foreign = load_u64(bytes + 64);
+        const uint64_t unknown = load_u64(bytes + 72);
+        if ((policy != 1 && policy != 2) || (latch != 2 && latch != 3) ||
+            source >= max_sources || !_seen[source] || !_ended[source] || reserved != 0 ||
+            root != (cr3 & ~UINT64_C(0xfff)) || kept != _context_filter_memory_rows ||
+            kept > UINT64_MAX - dropped ||
+            matching > UINT64_MAX - foreign || matching + foreign > UINT64_MAX - unknown ||
+            kept + dropped != matching + foreign + unknown ||
+            (policy == 1 && (kept != matching || dropped != foreign + unknown)) ||
+            (policy == 2 && dropped != 0))
+            return Result<Done>::failure("Invalid context filter summary values");
+        _context_filter_seen = true;
+        return Result<Done>::success({});
+    }
     if (h.kind == Kind::error || h.kind == Kind::terminal_report) {
         _finished = true;
         return Result<Done>::success({});
@@ -563,6 +607,8 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
                 if (!_observation_summary[source] || !_ended[source])
                     return Result<Done>::failure("Reduced trace ended before every source summary");
         }
+        if ((_features & feature_context_filter) && !_context_filter_seen)
+            return Result<Done>::failure("Trace ended before its context filter summary");
         _finished = true;
         return Result<Done>::success({});
     }
@@ -600,8 +646,10 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
         _has_context[source] = true;
         _context_sequence[source] = h.sequence;
     }
-    const bool needs_baseline = h.kind == Kind::blocks || h.kind == Kind::memory || h.kind == Kind::input_request ||
-        (h.kind == Kind::source_end && _data[source]);
+    const bool filtered_registers = (_features & feature_context_filter) != 0;
+    const bool needs_baseline = !filtered_registers &&
+        (h.kind == Kind::blocks || h.kind == Kind::memory || h.kind == Kind::input_request ||
+         (h.kind == Kind::source_end && _data[source]));
     if ((_features & feature_address_context) && h.kind == Kind::blocks && !_has_context[source])
         return Result<Done>::failure("System blocks need an initial address context");
     if ((_features & feature_registers) && needs_baseline && !_baseline_complete[source]) {
@@ -621,6 +669,11 @@ Result<Done> Stream::accept(const Header& h, const uint8_t* bytes) {
     if (h.kind == Kind::memory) {
         const auto result = memory(h, bytes);
         if (!result.ok()) return result;
+        if ((_features & feature_context_filter) != 0) {
+            if (_context_filter_memory_rows > UINT64_MAX - h.count)
+                return Result<Done>::failure("Context filter memory row count overflow");
+            _context_filter_memory_rows += h.count;
+        }
     }
     _seen[source] = true;
     _source_data_seen = true;

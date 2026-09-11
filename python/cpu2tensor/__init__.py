@@ -7,7 +7,8 @@ if TYPE_CHECKING:
     from cpu2tensor.batch import (
         AddressContext, Batch, BlockTransitions, ExecutableLayout,
         MemoryAccesses, ObservationContext, ObservationSummary,
-        ObservationTransitions, RegisterChanges, TransitionWindow,
+        ObservationTransitions, ContextFilterSummary, RegisterChanges,
+        TransitionWindow,
     )
     from cpu2tensor.pool import Pool
     from cpu2tensor.stdio import StdioEnv
@@ -23,6 +24,7 @@ _EXPORTS = {
     'TransitionWindow': 'batch',
     'ObservationContext': 'batch', 'ObservationSummary': 'batch',
     'ObservationTransitions': 'batch',
+    'ContextFilterSummary': 'batch',
     'AddressContext': 'batch', 'Batch': 'batch', 'MemoryAccesses': 'batch',
     'RegisterChanges': 'batch', 'Pool': 'pool', 'StdioEnv': 'stdio', 'KernelEnv': 'kernel',
     'BoundaryProgress': 'terminal', 'TerminalOutcome': 'terminal',

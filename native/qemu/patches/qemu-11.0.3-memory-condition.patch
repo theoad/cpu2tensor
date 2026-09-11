@@ -1,0 +1,338 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+diff --git a/accel/tcg/plugin-gen.c b/accel/tcg/plugin-gen.c
+index 1ffcb4b..a67d743 100644
+--- a/accel/tcg/plugin-gen.c
++++ b/accel/tcg/plugin-gen.c
+@@ -248,6 +248,29 @@ static void gen_mem_cb(struct qemu_plugin_regular_cb *cb,
+     tcg_temp_free_i32(clear_flags);
+ }
+
++static void gen_mem_cond_cb(struct qemu_plugin_conditional_mem_cb *cb,
++                            qemu_plugin_meminfo_t meminfo, TCGv_i64 addr)
++{
++    TCGv_ptr ptr = gen_plugin_u64_ptr(cb->entry);
++    TCGv_i64 val = tcg_temp_ebb_new_i64();
++    TCGLabel *after_cb = gen_new_label();
++    TCGCond cond = tcg_invert_cond(plugin_cond_to_tcgcond(cb->cond));
++
++    tcg_gen_ld_i64(val, ptr, 0);
++    tcg_gen_brcondi_i64(cond, val, cb->imm, after_cb);
++    struct qemu_plugin_regular_cb regular = {
++        .f = cb->f,
++        .info = cb->info,
++        .userp = cb->userp,
++        .rw = cb->rw,
++    };
++    gen_mem_cb(&regular, meminfo, addr);
++    gen_set_label(after_cb);
++
++    tcg_temp_free_i64(val);
++    tcg_temp_free_ptr(ptr);
++}
++
+ static void inject_cb(struct qemu_plugin_dyn_cb *cb)
+
+ {
+@@ -279,6 +302,11 @@ static void inject_mem_cb(struct qemu_plugin_dyn_cb *cb,
+             gen_mem_cb(&cb->regular, meminfo, addr);
+         }
+         break;
++    case PLUGIN_CB_MEM_COND:
++        if (rw & cb->mem_cond.rw) {
++            gen_mem_cond_cb(&cb->mem_cond, meminfo, addr);
++        }
++        break;
+     case PLUGIN_CB_INLINE_ADD_U64:
+     case PLUGIN_CB_INLINE_STORE_U64:
+         if (rw & cb->inline_insn.rw) {
+@@ -290,6 +318,41 @@ static void inject_mem_cb(struct qemu_plugin_dyn_cb *cb,
+     }
+ }
+
++static bool plugin_tb_has_mem_cond(struct qemu_plugin_tb *tb)
++{
++    for (size_t i = 0; i < tb->n; i++) {
++        struct qemu_plugin_insn *insn = g_ptr_array_index(tb->insns, i);
++        GArray *cbs = insn->mem_cbs;
++
++        for (size_t j = 0, n = cbs ? cbs->len : 0; j < n; j++) {
++            struct qemu_plugin_dyn_cb *cb =
++                &g_array_index(cbs, struct qemu_plugin_dyn_cb, j);
++            if (cb->type == PLUGIN_CB_MEM_COND) {
++                return true;
++            }
++        }
++    }
++    return false;
++}
++
++static void preserve_mem_cond_temps(struct qemu_plugin_tb *tb)
++{
++    if (!plugin_tb_has_mem_cond(tb)) {
++        return;
++    }
++
++    /*
++     * A conditional memory callback introduces a branch after translation.
++     * Let the normal liveness pass decide which translated temporaries now
++     * cross that new EBB boundary instead of assuming none of them do.
++     */
++    for (int i = tcg_ctx->nb_globals; i < tcg_ctx->nb_temps; i++) {
++        if (tcg_ctx->temps[i].kind == TEMP_EBB) {
++            tcg_ctx->temps[i].kind = TEMP_TB;
++        }
++    }
++}
++
+ static void plugin_gen_inject(struct qemu_plugin_tb *plugin_tb)
+ {
+     TCGOp *op, *next;
+@@ -306,6 +369,8 @@ static void plugin_gen_inject(struct qemu_plugin_tb *plugin_tb)
+         }
+     }
+
++    preserve_mem_cond_temps(plugin_tb);
++
+     /*
+      * While injecting code, we cannot afford to reuse any ebb temps
+      * that might be live within the existing opcode stream.
+diff --git a/include/plugins/qemu-plugin.h b/include/plugins/qemu-plugin.h
+index 4eb1d2c..4dfc8bb 100644
+--- a/include/plugins/qemu-plugin.h
++++ b/include/plugins/qemu-plugin.h
+@@ -779,6 +779,34 @@ void qemu_plugin_register_vcpu_mem_cb(struct qemu_plugin_insn *insn,
+                                       enum qemu_plugin_mem_rw rw,
+                                       void *userdata);
+
++/**
++ * qemu_plugin_cpu2tensor_register_vcpu_mem_cond_cb_v1() - conditional memory cb
++ * @insn: handle for instruction to instrument
++ * @cb: callback of type qemu_plugin_vcpu_mem_cb_t
++ * @flags: callback flags
++ * @rw: monitor reads, writes or both
++ * @cond: unsigned comparison between @entry and @imm
++ * @entry: per-vCPU first operand for @cond
++ * @imm: immediate second operand for @cond
++ * @userdata: opaque pointer for userdata
++ *
++ * This optional extension behaves like qemu_plugin_register_vcpu_mem_cb(), but
++ * enters the callback only when entry @cond imm is true on the executing vCPU.
++ * The scoreboard is read at each memory access, including accesses dispatched
++ * through QEMU's memory helper path. Already translated blocks therefore see
++ * later qemu_plugin_u64_set() updates without translation or cache flushing.
++ */
++QEMU_PLUGIN_API
++void qemu_plugin_cpu2tensor_register_vcpu_mem_cond_cb_v1(
++    struct qemu_plugin_insn *insn,
++    qemu_plugin_vcpu_mem_cb_t cb,
++    enum qemu_plugin_cb_flags flags,
++    enum qemu_plugin_mem_rw rw,
++    enum qemu_plugin_cond cond,
++    qemu_plugin_u64 entry,
++    uint64_t imm,
++    void *userdata);
++
+ /**
+  * qemu_plugin_register_vcpu_mem_inline_per_vcpu() - inline op for mem access
+  * @insn: handle for instruction to instrument
+diff --git a/include/qemu/plugin.h b/include/qemu/plugin.h
+index ddd77bd..df1e333 100644
+--- a/include/qemu/plugin.h
++++ b/include/qemu/plugin.h
+@@ -72,6 +72,7 @@ enum plugin_dyn_cb_type {
+     PLUGIN_CB_REGULAR,
+     PLUGIN_CB_COND,
+     PLUGIN_CB_MEM_REGULAR,
++    PLUGIN_CB_MEM_COND,
+     PLUGIN_CB_INLINE_ADD_U64,
+     PLUGIN_CB_INLINE_STORE_U64,
+ };
+@@ -98,6 +99,16 @@ struct qemu_plugin_conditional_cb {
+     uint64_t imm;
+ };
+
++struct qemu_plugin_conditional_mem_cb {
++    union qemu_plugin_cb_sig f;
++    TCGHelperInfo *info;
++    void *userp;
++    qemu_plugin_u64 entry;
++    enum qemu_plugin_cond cond;
++    uint64_t imm;
++    enum qemu_plugin_mem_rw rw;
++};
++
+ /*
+  * A dynamic callback has an insertion point that is determined at run-time.
+  * Usually the insertion point is somewhere in the code cache; think for
+@@ -108,6 +119,7 @@ struct qemu_plugin_dyn_cb {
+     union {
+         struct qemu_plugin_regular_cb regular;
+         struct qemu_plugin_conditional_cb cond;
++        struct qemu_plugin_conditional_mem_cb mem_cond;
+         struct qemu_plugin_inline_cb inline_insn;
+     };
+ };
+diff --git a/plugins/api.c b/plugins/api.c
+index 0c348a7..f75795c 100644
+--- a/plugins/api.c
++++ b/plugins/api.c
+@@ -180,6 +180,27 @@ void qemu_plugin_register_vcpu_mem_cb(struct qemu_plugin_insn *insn,
+     plugin_register_vcpu_mem_cb(&insn->mem_cbs, cb, flags, rw, udata);
+ }
+
++void qemu_plugin_cpu2tensor_register_vcpu_mem_cond_cb_v1(
++    struct qemu_plugin_insn *insn,
++    qemu_plugin_vcpu_mem_cb_t cb,
++    enum qemu_plugin_cb_flags flags,
++    enum qemu_plugin_mem_rw rw,
++    enum qemu_plugin_cond cond,
++    qemu_plugin_u64 entry,
++    uint64_t imm,
++    void *udata)
++{
++    if (cond == QEMU_PLUGIN_COND_NEVER) {
++        return;
++    }
++    if (cond == QEMU_PLUGIN_COND_ALWAYS) {
++        qemu_plugin_register_vcpu_mem_cb(insn, cb, flags, rw, udata);
++        return;
++    }
++    plugin_register_vcpu_mem_cond_cb(&insn->mem_cbs, cb, flags, rw,
++                                     cond, entry, imm, udata);
++}
++
+ void qemu_plugin_register_vcpu_mem_inline_per_vcpu(
+     struct qemu_plugin_insn *insn,
+     enum qemu_plugin_mem_rw rw,
+@@ -685,4 +706,3 @@ uint64_t qemu_plugin_u64_sum(qemu_plugin_u64 entry)
+     }
+     return total;
+ }
+-
+diff --git a/plugins/core.c b/plugins/core.c
+index 2324bbf..f66e33e 100644
+--- a/plugins/core.c
++++ b/plugins/core.c
+@@ -494,6 +494,48 @@ void plugin_register_vcpu_mem_cb(GArray **arr,
+     dyn_cb->regular = regular_cb;
+ }
+
++void plugin_register_vcpu_mem_cond_cb(GArray **arr,
++                                      void *cb,
++                                      enum qemu_plugin_cb_flags flags,
++                                      enum qemu_plugin_mem_rw rw,
++                                      enum qemu_plugin_cond cond,
++                                      qemu_plugin_u64 entry,
++                                      uint64_t imm,
++                                      void *udata)
++{
++    QEMU_BUILD_BUG_ON(
++        !__builtin_types_compatible_p(qemu_plugin_meminfo_t, uint32_t) &&
++        !__builtin_types_compatible_p(qemu_plugin_meminfo_t, int32_t));
++
++    static TCGHelperInfo info[4] = {
++        [QEMU_PLUGIN_CB_NO_REGS].flags = TCG_CALL_NO_RWG,
++        [QEMU_PLUGIN_CB_R_REGS].flags = TCG_CALL_NO_WG,
++        [QEMU_PLUGIN_CB_RW_REGS].flags = 0,
++        [QEMU_PLUGIN_CB_RW_REGS_PC].flags = 0,
++        [0 ... 3].typemask =
++            (dh_typemask(void, 0) |
++             dh_typemask(i32, 1) |
++             (__builtin_types_compatible_p(qemu_plugin_meminfo_t, uint32_t)
++              ? dh_typemask(i32, 2) : dh_typemask(s32, 2)) |
++             dh_typemask(i64, 3) |
++             dh_typemask(ptr, 4))
++    };
++    assert((unsigned)flags < ARRAY_SIZE(info));
++
++    struct qemu_plugin_dyn_cb *dyn_cb = plugin_get_dyn_cb(arr);
++    struct qemu_plugin_conditional_mem_cb cond_cb = {
++        .userp = udata,
++        .rw = rw,
++        .f.vcpu_mem = cb,
++        .cond = cond,
++        .entry = entry,
++        .imm = imm,
++        .info = &info[flags],
++    };
++    dyn_cb->type = PLUGIN_CB_MEM_COND;
++    dyn_cb->mem_cond = cond_cb;
++}
++
+ /*
+  * Disable CFI checks.
+  * The callback function has been loaded from an external library so we do not
+@@ -731,6 +773,31 @@ void exec_inline_op(enum plugin_dyn_cb_type type,
+     }
+ }
+
++static bool plugin_u64_condition(enum qemu_plugin_cond cond,
++                                 uint64_t value, uint64_t imm)
++{
++    switch (cond) {
++    case QEMU_PLUGIN_COND_EQ:
++        return value == imm;
++    case QEMU_PLUGIN_COND_NE:
++        return value != imm;
++    case QEMU_PLUGIN_COND_LT:
++        return value < imm;
++    case QEMU_PLUGIN_COND_LE:
++        return value <= imm;
++    case QEMU_PLUGIN_COND_GT:
++        return value > imm;
++    case QEMU_PLUGIN_COND_GE:
++        return value >= imm;
++    case QEMU_PLUGIN_COND_ALWAYS:
++        return true;
++    case QEMU_PLUGIN_COND_NEVER:
++        return false;
++    default:
++        g_assert_not_reached();
++    }
++}
++
+ QEMU_DISABLE_CFI
+ void qemu_plugin_vcpu_mem_cb(CPUState *cpu, uint64_t vaddr,
+                              uint64_t value_low,
+@@ -763,6 +830,21 @@ void qemu_plugin_vcpu_mem_cb(CPUState *cpu, uint64_t vaddr,
+                 qemu_plugin_set_cb_flags(cpu, QEMU_PLUGIN_CB_NO_REGS);
+             }
+             break;
++        case PLUGIN_CB_MEM_COND:
++            if (rw & cb->mem_cond.rw &&
++                plugin_u64_condition(
++                    cb->mem_cond.cond,
++                    qemu_plugin_u64_get(cb->mem_cond.entry, cpu->cpu_index),
++                    cb->mem_cond.imm)) {
++                qemu_plugin_set_cb_flags(cpu,
++                    tcg_call_to_qemu_plugin_cb_flags(cb->mem_cond.info->flags));
++
++                cb->mem_cond.f.vcpu_mem(cpu->cpu_index,
++                                        make_plugin_meminfo(oi, rw),
++                                        vaddr, cb->mem_cond.userp);
++                qemu_plugin_set_cb_flags(cpu, QEMU_PLUGIN_CB_NO_REGS);
++            }
++            break;
+         case PLUGIN_CB_INLINE_ADD_U64:
+         case PLUGIN_CB_INLINE_STORE_U64:
+             if (rw & cb->inline_insn.rw) {
+diff --git a/plugins/plugin.h b/plugins/plugin.h
+index 6fbc443..4c71fba 100644
+--- a/plugins/plugin.h
++++ b/plugins/plugin.h
+@@ -109,6 +109,15 @@ void plugin_register_vcpu_mem_cb(GArray **arr,
+                                  enum qemu_plugin_mem_rw rw,
+                                  void *udata);
+
++void plugin_register_vcpu_mem_cond_cb(GArray **arr,
++                                      void *cb,
++                                      enum qemu_plugin_cb_flags flags,
++                                      enum qemu_plugin_mem_rw rw,
++                                      enum qemu_plugin_cond cond,
++                                      qemu_plugin_u64 entry,
++                                      uint64_t imm,
++                                      void *udata);
++
+ void exec_inline_op(enum plugin_dyn_cb_type type,
+                     struct qemu_plugin_inline_cb *cb,
+                     int cpu_index);

@@ -33,16 +33,23 @@ class RemoteKernelTests(unittest.TestCase):
         self.action_end = int(re.search(r'^([0-9a-f]+) T cpu2tensor_action_end$', symbols, re.M)[1], 16)
         self.action_abort = int(re.search(r'^([0-9a-f]+) T cpu2tensor_action_abort$', symbols, re.M)[1], 16)
         self.parallel = int(re.search(r'^([0-9a-f]+) T cpu2tensor_parallel_memory$', symbols, re.M)[1], 16)
+        self.context_gate = int(re.search(r'^([0-9a-f]+) T cpu2tensor_context_gate$', symbols, re.M)[1], 16)
         sized_symbols = self.ssh(['nm', '-S', '-n', self.init]).decode()
         compute = re.search(r'^([0-9a-f]+) ([0-9a-f]+) T cpu2tensor_compute$',
                             sized_symbols, re.M)
         self.compute = int(compute[1], 16)
         self.compute_end = self.compute + int(compute[2], 16)
+        def function_span(name):
+            match = re.search(rf'^([0-9a-f]+) ([0-9a-f]+) T {name}$', sized_symbols, re.M)
+            return int(match[1], 16), int(match[1], 16) + int(match[2], 16)
+        self.context_first = function_span('cpu2tensor_context_first')
+        self.context_second = function_span('cpu2tensor_context_second')
+        self.context_background = function_span('cpu2tensor_context_background')
 
     def ssh(self, args):
         return subprocess.check_output(['ssh', '-o', 'BatchMode=yes', self.host, shlex.join(args)], timeout=20)
 
-    def start(self, *, interactive=True, episodes=1, rich=False, timeout=30000, start=None, full_boot=False, cpus='2', stop=None, batching='legacy', publication='pipe', workload_bytes=None, max_run_ms=None, context='auto', action_windows=False, observation_reduction=False):
+    def start(self, *, interactive=True, episodes=1, rich=False, timeout=30000, start=None, full_boot=False, cpus='2', stop=None, batching='legacy', publication='pipe', workload_bytes=None, max_run_ms=None, context='auto', action_windows=False, observation_reduction=False, rich_context=False, context_fixture=False):
         port = int(self.ssh(['python3', '-c', 'import socket; s=socket.socket(); s.bind(("0.0.0.0",0)); print(s.getsockname()[1])']))
         args = [f'{self.build}/cpu2tensor-worker', '--qemu', self.qemu, '--plugin', f'{self.build}/libcpu2tensor_plugin.so',
                 '--system', 'on', '--host', self.address, '--port', str(port), '--episodes', str(episodes),
@@ -51,8 +58,11 @@ class RemoteKernelTests(unittest.TestCase):
                 '--batching', batching, '--publication', publication, '--context', context]
         if max_run_ms is not None:
             args += ['--max-run-ms', str(max_run_ms)]
-        if not full_boot:
+        if not full_boot and not rich_context:
             args += ['--start-pc', hex(self.begin if start is None else start)]
+        if rich_context:
+            args += ['--rich-context-start-pc', hex(self.context_gate),
+                     '--rich-context-policy', 'drop']
         if stop is not None:
             args += ['--stop-pc', hex(stop)]
         if interactive:
@@ -77,6 +87,8 @@ class RemoteKernelTests(unittest.TestCase):
                  + (' cpu2tensor.parallel_timeout=300' if rich else '')]
         if workload_bytes is not None:
             args[-1] += f' cpu2tensor.bytes={workload_bytes}'
+        if context_fixture:
+            args[-1] += ' cpu2tensor.context_filter=on'
         self.arguments = args
         command = 'echo cpu2tensor-pid:$$; exec ' + shlex.join(args)
         # A full boot can fill an unread stdout pipe. Keep both diagnostic
@@ -151,6 +163,70 @@ class RemoteKernelTests(unittest.TestCase):
         self.assertEqual(set(blocks), {0, 1})
         self.assertEqual(set(changes), {0, 1})
         self.assertIn('C2T {"event":"complete","steps":4,"ok":true}', self.finish())
+
+    def test_rich_context_filter_keeps_target_values_across_migration(self):
+        endpoint = self.start(interactive=False, rich=True, rich_context=True,
+                              context_fixture=True, context='on', batching='mixed',
+                              max_run_ms=120000, timeout=120000)
+        blocks = set()
+        first_block = {}
+        contexts = set()
+        register_sources = set()
+        background_rows = 0
+        target_rows = {'first': [], 'second': []}
+        expected = {
+            'first': bytes.fromhex('8877665544332211'),
+            'second': bytes.fromhex('1122334455667788'),
+        }
+        summary = None
+        with Pool([endpoint], timeout=120, batch_bytes=4 * 1024 * 1024) as pool:
+            for batch in pool.read():
+                if batch.addresses.numel():
+                    blocks.add(batch.source)
+                    first_block.setdefault(batch.source, int(batch.addresses[0]))
+                if batch.context is not None:
+                    contexts.add(batch.source)
+                if batch.registers is not None:
+                    register_sources.add(batch.source)
+                    sequences = batch.registers.sequences
+                    if sequences is not None:
+                        self.assertTrue(bool((sequences[1:] > sequences[:-1]).all()))
+                if batch.memory is not None:
+                    table = batch.memory
+                    self.assertIsNotNone(table.values)
+                    self.assertTrue(bool((table.sequences[1:] > table.sequences[:-1]).all()))
+                    for index, pc in enumerate(table.pc.tolist()):
+                        if self.context_background[0] <= pc < self.context_background[1]:
+                            background_rows += 1
+                        for name, span in (('first', self.context_first),
+                                           ('second', self.context_second)):
+                            value = bytes(table.values[index, :8].tolist())
+                            if (span[0] <= pc < span[1] and
+                                int(table.sizes[index]) == 8 and
+                                int(table.flags[index]) & 1 and value == expected[name]):
+                                target_rows[name].append((batch.source,
+                                                          int(table.sequences[index])))
+                if batch.context_filter is not None:
+                    self.assertIsNone(summary)
+                    summary = batch.context_filter
+        self.assertEqual(blocks, {0, 1})
+        self.assertEqual(first_block[0], self.context_gate)
+        self.assertEqual(contexts, {0, 1})
+        self.assertEqual(register_sources, {0, 1})
+        self.assertEqual(background_rows, 0)
+        self.assertEqual([source for source, _ in target_rows['first']], [0])
+        self.assertEqual([source for source, _ in target_rows['second']], [1])
+        self.assertIsNotNone(summary)
+        self.assertEqual((summary.policy, summary.latch_known, summary.gate_source),
+                         ('drop', True, 0))
+        self.assertEqual(summary.gate_pc, self.context_gate)
+        self.assertEqual(summary.kept, summary.matching)
+        self.assertEqual(summary.dropped, summary.foreign + summary.unknown)
+        self.assertGreater(summary.matching, 0)
+        self.assertGreater(summary.foreign, 0)
+        text = self.finish()
+        self.assertIn('"action":"context-filter","cpu0":0,"cpu1":1', text)
+        self.assertIn('C2T {"event":"complete","steps":1,"ok":true}', text)
 
     def test_observation_total_deadline_reaps_guest(self):
         endpoint = self.start(interactive=False, full_boot=True, max_run_ms=1000)

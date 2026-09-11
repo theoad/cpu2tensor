@@ -82,11 +82,105 @@ int main() {
     assert(decode_header(bytes, sizeof(bytes)).ok());
     encode_header(bytes, {Kind::transition_window, 0, 1, 1, transition_window_bytes});
     assert(decode_header(bytes, sizeof(bytes)).ok());
+    encode_header(bytes, {Kind::context_filter, 0, 1, 0, context_filter_bytes});
+    assert(decode_header(bytes, sizeof(bytes)).ok());
     encode_header(bytes, {Kind::memory, 0, 1, 0, 24});
     assert(decode_header(bytes, sizeof(bytes)).ok());
 
     encode_header(bytes, {Kind::input_request, 1, 0, 0, 1});
     assert(!decode_header(bytes, sizeof(bytes)).ok());
+
+    uint8_t filter[context_filter_bytes]{};
+    store_u32(filter, 1);
+    store_u32(filter + 4, 2);
+    store_u64(filter + 16, 0x81001000);
+    store_u64(filter + 24, 0x12000);
+    store_u64(filter + 32, 0x12000);
+    store_u64(filter + 40, 2);
+    store_u64(filter + 48, 3);
+    store_u64(filter + 56, 2);
+    store_u64(filter + 64, 2);
+    store_u64(filter + 72, 1);
+    uint8_t filter_context[context_bytes]{};
+    store_u64(filter_context + 56, 15);
+    uint8_t filter_memory[48 * 2]{};
+    store_u32(filter_memory + 16, 4);
+    store_u64(filter_memory + 40, 0);
+    store_u32(filter_memory + 48 + 16, 4);
+    store_u64(filter_memory + 48 + 40, 0);
+    Stream filtered;
+    assert(filtered.accept({Kind::hello, 0, 0, 0,
+                            2 | feature_system | feature_memory | feature_system_memory |
+                            feature_address_context | feature_context_filter}).ok());
+    assert(filtered.accept({Kind::address_context, 0, 1, 0, context_bytes}, filter_context).ok());
+    assert(filtered.accept({Kind::memory, 0, 2, 1, sizeof(filter_memory)}, filter_memory).ok());
+    assert(filtered.accept({Kind::source_end, 0, 0, 3, 0}).ok());
+    assert(!filtered.accept({Kind::complete}).ok());
+    assert(filtered.accept({Kind::context_filter, 0, 1, 0, context_filter_bytes}, filter).ok());
+    assert(filtered.accept({Kind::complete}).ok());
+
+    // A mixed memory subrun contributes to the same accepted-row total. The
+    // producer summary must close that total instead of being trusted alone.
+    uint8_t mixed_memory[8 + 48]{};
+    store_u16(mixed_memory, static_cast<uint16_t>(Kind::memory));
+    store_u16(mixed_memory + 2, 1);
+    store_u32(mixed_memory + 4, 48);
+    store_u32(mixed_memory + 8 + 16, 4);
+    store_u64(mixed_memory + 8 + 40, 0);
+    uint8_t one_kept[context_filter_bytes]{};
+    store_u32(one_kept, 1);
+    store_u32(one_kept + 4, 2);
+    store_u64(one_kept + 16, 0x81001000);
+    store_u64(one_kept + 24, 0x12000);
+    store_u64(one_kept + 32, 0x12000);
+    store_u64(one_kept + 40, 1);
+    store_u64(one_kept + 56, 1);
+    Stream filtered_mixed;
+    assert(filtered_mixed.accept({Kind::hello, 0, 0, 0,
+                                  2 | feature_system | feature_memory | feature_system_memory |
+                                  feature_address_context | feature_mixed |
+                                  feature_context_filter}).ok());
+    assert(filtered_mixed.accept({Kind::address_context, 0, 1, 0, context_bytes},
+                                  filter_context).ok());
+    assert(filtered_mixed.accept({Kind::mixed, 0, 1, 1, sizeof(mixed_memory)},
+                                  mixed_memory).ok());
+    assert(filtered_mixed.accept({Kind::source_end, 0, 0, 2, 0}).ok());
+    assert(filtered_mixed.accept({Kind::context_filter, 0, 1, 0, context_filter_bytes},
+                                  one_kept).ok());
+
+    uint8_t wrong_kept[context_filter_bytes];
+    std::memcpy(wrong_kept, one_kept, sizeof(wrong_kept));
+    store_u64(wrong_kept + 40, 0);
+    store_u64(wrong_kept + 48, 1);
+    store_u64(wrong_kept + 56, 0);
+    store_u64(wrong_kept + 64, 1);
+    Stream filtered_wrong_count;
+    assert(filtered_wrong_count.accept({Kind::hello, 0, 0, 0,
+                                        2 | feature_system | feature_memory |
+                                        feature_system_memory | feature_address_context |
+                                        feature_mixed | feature_context_filter}).ok());
+    assert(filtered_wrong_count.accept({Kind::address_context, 0, 1, 0, context_bytes},
+                                        filter_context).ok());
+    assert(filtered_wrong_count.accept({Kind::mixed, 0, 1, 1, sizeof(mixed_memory)},
+                                        mixed_memory).ok());
+    assert(filtered_wrong_count.accept({Kind::source_end, 0, 0, 2, 0}).ok());
+    assert(!filtered_wrong_count.accept({Kind::context_filter, 0, 1, 0,
+                                         context_filter_bytes}, wrong_kept).ok());
+
+    uint8_t absent_gate[context_filter_bytes];
+    std::memcpy(absent_gate, one_kept, sizeof(absent_gate));
+    store_u32(absent_gate + 8, 1);
+    Stream filtered_absent_gate;
+    assert(filtered_absent_gate.accept({Kind::hello, 0, 0, 0,
+                                        2 | feature_system | feature_memory |
+                                        feature_system_memory | feature_address_context |
+                                        feature_context_filter}).ok());
+    assert(filtered_absent_gate.accept({Kind::address_context, 0, 1, 0, context_bytes},
+                                        filter_context).ok());
+    assert(filtered_absent_gate.accept({Kind::memory, 0, 1, 1, 48}, filter_memory).ok());
+    assert(filtered_absent_gate.accept({Kind::source_end, 0, 0, 2, 0}).ok());
+    assert(!filtered_absent_gate.accept({Kind::context_filter, 0, 1, 0,
+                                         context_filter_bytes}, absent_gate).ok());
     encode_header(bytes, {Kind::complete, 1, 0, 0, 0});
     assert(!decode_header(bytes, sizeof(bytes)).ok());
     encode_header(bytes, {Kind::hello, 0, 0, 0,

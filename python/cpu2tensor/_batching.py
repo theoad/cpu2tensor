@@ -116,7 +116,7 @@ class BatchCollator:
         return merge_batches(pending.batches)
 
     def add(self, batch: Batch) -> list[Batch]:
-        if batch.layout is not None:
+        if batch.layout is not None or batch.context_filter is not None:
             return [batch]
         if batch.source is None or batch.first_sequence is None:
             raise ValueError("CPU observations need a source and sequence")

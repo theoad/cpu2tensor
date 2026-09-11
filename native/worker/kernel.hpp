@@ -12,6 +12,8 @@ struct KernelOptions final {
     const char* context;
     const char* start_pc;
     const char* stop_pc;
+    const char* rich_context_start_pc;
+    const char* rich_context_policy;
     const char* window_start_pc;
     const char* window_end_pc;
     const char* window_abort_pc;

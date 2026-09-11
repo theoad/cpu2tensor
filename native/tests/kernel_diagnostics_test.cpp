@@ -51,7 +51,7 @@ static void answer_qmp_command(int qmp) {
 static KernelOptions test_options(const char* self, char** arguments,
                                   bool interactive = true, int maximum_ms = 0) {
     return {self, "/unused-plugin", "none", "off", "off", "auto",
-            nullptr, nullptr, nullptr, nullptr, nullptr, "none", "on", 4096,
+            nullptr, nullptr, nullptr, "drop", nullptr, nullptr, nullptr, "none", "on", 4096,
             "legacy", "pipe", 2000, maximum_ms, interactive, arguments};
 }
 

@@ -33,11 +33,13 @@ inline constexpr uint64_t feature_stop = 1 << 19;
 inline constexpr uint64_t feature_transition_windows = 1 << 20;
 inline constexpr uint64_t feature_observation_reduction = 1 << 22;
 inline constexpr uint8_t terminal_report_version = 1;
+inline constexpr uint64_t feature_context_filter = 1 << 21;
 inline constexpr size_t layout_bytes = 24;
 inline constexpr size_t transition_count_bytes = 24;
 inline constexpr size_t transition_window_bytes = 40;
 inline constexpr size_t reduced_context_bytes = 72;
 inline constexpr size_t observation_summary_bytes = 72;
+inline constexpr size_t context_filter_bytes = 80;
 inline constexpr uint32_t max_action_bytes = 256;
 
 enum class Kind : uint16_t {
@@ -45,7 +47,7 @@ enum class Kind : uint16_t {
     register_schema = 6, registers = 7, memory = 8, input_request = 9,
     kernel_request = 10, guest_event = 11, address_context = 12, executable_layout = 13,
     mixed = 14, block_transitions = 15, transition_window = 16, terminal_report = 17,
-    observation_summary = 19, reduced_context = 20
+    context_filter = 18, observation_summary = 19, reduced_context = 20
 };
 enum class Architecture : uint64_t { aarch64 = 1, x86_64 = 2 };
 enum class Failure : uint64_t { capture = 1, target_killed = 2, unsupported_target = 3, transport = 4 };
@@ -144,5 +146,7 @@ private:
     bool _finished = false;
     bool _layout_seen = false;
     bool _source_data_seen = false;
+    bool _context_filter_seen = false;
+    uint64_t _context_filter_memory_rows = 0;
 };
 } // namespace cpu2tensor

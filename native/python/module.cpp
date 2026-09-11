@@ -513,6 +513,7 @@ PyObject* decode(PyObject*, PyObject* arguments) {
         payload = PyByteArray_FromStringAndSize(nullptr, size);
         if (payload != nullptr && (frame.kind == Kind::guest_event ||
                                    frame.kind == Kind::transition_window ||
+                                   frame.kind == Kind::context_filter ||
                                    frame.kind == Kind::observation_summary))
             std::memcpy(PyByteArray_AsString(payload), bytes + header_bytes, size);
         if (payload != nullptr && (frame.kind == Kind::blocks || frame.kind == Kind::executable_layout)) {
