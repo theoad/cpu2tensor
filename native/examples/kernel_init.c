@@ -41,6 +41,7 @@ static int event_channel = STDOUT_FILENO;
 
 struct options {
     bool interactive;
+    bool context_filter;
     uint32_t seed;
     uint32_t bytes;
 };
@@ -50,6 +51,33 @@ struct options {
 __attribute__((noinline)) void cpu2tensor_capture_begin(void)
 {
     __asm__ volatile("" ::: "memory");
+}
+
+// The context-filter acceptance workload latches at this user-space block. Its
+// two stores also stay in user space, so the fixture does not claim that a
+// KPTI-paired kernel page table belongs to the nominated process.
+__attribute__((noinline)) void cpu2tensor_context_gate(void)
+{
+    __asm__ volatile("" ::: "memory");
+}
+
+__attribute__((noinline)) void cpu2tensor_context_first(volatile uint64_t *values)
+{
+    values[0] = UINT64_C(0x1122334455667788);
+}
+
+__attribute__((noinline)) void cpu2tensor_context_second(volatile uint64_t *values)
+{
+    values[1] = UINT64_C(0x8877665544332211);
+}
+
+__attribute__((noinline)) uint64_t cpu2tensor_context_background(
+    volatile uint64_t *value, uint32_t iterations)
+{
+    for (uint32_t index = 0; index < iterations; ++index) {
+        *value = *value * UINT64_C(6364136223846793005) + index + UINT64_C(1);
+    }
+    return *value;
 }
 
 // These function addresses are the guest-to-plugin action boundary contract.
@@ -552,6 +580,135 @@ cleanup:
                       parent_result.checksum, child_result.checksum);
 }
 
+enum context_child_stage {
+    context_child_waiting,
+    context_child_ready,
+    context_child_moved,
+    context_child_failed
+};
+
+struct context_filter_gate {
+    atomic_uint child_stage;
+    atomic_uint parent_stage;
+    uint64_t background;
+};
+
+static bool complete_event(uint64_t steps, bool ok);
+
+static bool wait_for_context_stage(atomic_uint *stage, unsigned int expected,
+                                   const struct timespec *started)
+{
+    unsigned int current;
+    while ((current = atomic_load_explicit(stage, memory_order_acquire)) < expected) {
+        if (current == context_child_failed || remaining_parallel_ms(started) == 0 ||
+            sched_yield() != 0) {
+            return false;
+        }
+    }
+    return current == expected;
+}
+
+static bool context_filter_observe(void)
+{
+    cpu_set_t original;
+    if (sched_getaffinity(0, sizeof(original), &original) != 0) {
+        return false;
+    }
+    int cpus[2] = { -1, -1 };
+    for (int cpu = 0, found = 0; cpu < CPU_SETSIZE && found < 2; ++cpu) {
+        if (CPU_ISSET(cpu, &original)) {
+            cpus[found++] = cpu;
+        }
+    }
+    if (cpus[1] < 0) {
+        return false;
+    }
+    struct context_filter_gate *gate = mmap(NULL, sizeof(*gate), PROT_READ | PROT_WRITE,
+                                            MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    volatile uint64_t *values = mmap(NULL, 2 * sizeof(*values), PROT_READ | PROT_WRITE,
+                                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (gate == MAP_FAILED || values == MAP_FAILED) {
+        if (gate != MAP_FAILED) munmap(gate, sizeof(*gate));
+        if (values != MAP_FAILED) munmap((void *)values, 2 * sizeof(*values));
+        return false;
+    }
+    atomic_init(&gate->child_stage, context_child_waiting);
+    atomic_init(&gate->parent_stage, 0);
+    gate->background = UINT64_C(0xa5a5a5a5a5a5a5a5);
+    if (!atomic_is_lock_free(&gate->child_stage)) {
+        munmap((void *)values, 2 * sizeof(*values));
+        munmap(gate, sizeof(*gate));
+        return false;
+    }
+    struct timespec started;
+    if (clock_gettime(CLOCK_MONOTONIC, &started) != 0) {
+        munmap((void *)values, 2 * sizeof(*values));
+        munmap(gate, sizeof(*gate));
+        return false;
+    }
+    const pid_t child = fork();
+    if (child == 0) {
+        if (!pin_cpu(cpus[1])) {
+            atomic_store_explicit(&gate->child_stage, context_child_failed,
+                                  memory_order_release);
+            _exit(1);
+        }
+        atomic_store_explicit(&gate->child_stage, context_child_ready, memory_order_release);
+        while (atomic_load_explicit(&gate->parent_stage, memory_order_acquire) == 0 &&
+               remaining_parallel_ms(&started) != 0) {
+            cpu2tensor_context_background(&gate->background, 256);
+        }
+        cpu2tensor_context_background(&gate->background, max_memory_bytes);
+        if (!pin_cpu(cpus[0])) {
+            atomic_store_explicit(&gate->child_stage, context_child_failed,
+                                  memory_order_release);
+            _exit(1);
+        }
+        atomic_store_explicit(&gate->child_stage, context_child_moved, memory_order_release);
+        while (atomic_load_explicit(&gate->parent_stage, memory_order_acquire) < 2 &&
+               remaining_parallel_ms(&started) != 0) {
+            cpu2tensor_context_background(&gate->background, 256);
+        }
+        _exit(atomic_load_explicit(&gate->parent_stage, memory_order_acquire) == 2 ? 0 : 1);
+    }
+    bool ok = child > 0 && pin_cpu(cpus[0]) &&
+              wait_for_context_stage(&gate->child_stage, context_child_ready, &started);
+    if (ok) {
+        cpu2tensor_context_gate();
+        cpu2tensor_context_first(values);
+        atomic_store_explicit(&gate->parent_stage, 1, memory_order_release);
+        ok = wait_for_context_stage(&gate->child_stage, context_child_moved, &started) &&
+             pin_cpu(cpus[1]);
+    }
+    if (ok) {
+        cpu2tensor_context_second(values);
+        atomic_store_explicit(&gate->parent_stage, 2, memory_order_release);
+    }
+    int status = 0;
+    if (child > 0) {
+        if (!ok) kill(child, SIGKILL);
+        pid_t waited;
+        do {
+            waited = waitpid(child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        ok = ok && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    const uint64_t first = values[0];
+    const uint64_t second = values[1];
+    ok = ok && first == UINT64_C(0x1122334455667788) &&
+         second == UINT64_C(0x8877665544332211);
+    const bool affinity_restored = sched_setaffinity(0, sizeof(original), &original) == 0;
+    const bool values_released = munmap((void *)values, 2 * sizeof(*values)) == 0;
+    const bool gate_released = munmap(gate, sizeof(*gate)) == 0;
+    if (!ok || !affinity_restored || !values_released || !gate_released) {
+        return false;
+    }
+    return emit_event("C2T {\"event\":\"result\",\"step\":0,\"action\":\"context-filter\""
+                      ",\"cpu0\":%d,\"cpu1\":%d,\"first\":%" PRIu64
+                      ",\"second\":%" PRIu64 "}\n",
+                      cpus[0], cpus[1], first, second) && complete_event(1, true);
+}
+
 static bool getpid_action(uint64_t step, bool windowed)
 {
     begin_action(windowed);
@@ -692,6 +849,7 @@ static bool read_options(struct options *options)
     bool seed_seen = false;
     bool bytes_seen = false;
     bool timeout_seen = false;
+    bool context_filter_seen = false;
     const char timeout_key[] = "cpu2tensor.parallel_timeout=";
     for (char *word = strtok_r(line, " \t\r\n", &position); word != NULL;
          word = strtok_r(NULL, " \t\r\n", &position)) {
@@ -720,9 +878,15 @@ static bool read_options(struct options *options)
                 return false;
             }
             bytes_seen = true;
+        } else if (strncmp(word, "cpu2tensor.context_filter=", 26) == 0) {
+            if (context_filter_seen || strcmp(word + 26, "on") != 0) {
+                return false;
+            }
+            context_filter_seen = true;
+            options->context_filter = true;
         }
     }
-    return true;
+    return !options->context_filter || !options->interactive;
 }
 
 static void poweroff(void)
@@ -741,7 +905,7 @@ int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
-    struct options options = { false, default_seed, default_memory_bytes };
+    struct options options = { false, false, default_seed, default_memory_bytes };
     if (argc == 2 && strcmp(argv[1], "--check") == 0) {
         // This safe host check never mounts filesystems or shuts down a machine.
         return observe(&options) ? 0 : 1;
@@ -771,6 +935,11 @@ int main(int argc, char **argv)
     }
     if (options.interactive) {
         interact();
+    } else if (options.context_filter) {
+        if (!context_filter_observe()) {
+            (void)error_event(0, "context filter fixture failed");
+            (void)complete_event(0, false);
+        }
     } else {
         observe(&options);
     }
