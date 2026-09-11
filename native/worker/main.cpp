@@ -70,6 +70,7 @@ struct Options final {
     bool stdio = false;
     bool system = false;
     bool kernel = false;
+    bool kernel_protocol = false;
     bool layout = false;
     const char* start_pc = nullptr;
     const char* stop_pc = nullptr;
@@ -159,10 +160,14 @@ Result<Options> parse(int argc, char** argv) {
             if (!parsed.ok() || (parsed.value() & (parsed.value() - 1)) != 0)
                 return Result<Options>::failure("--transition-capacity needs a power of two from 2 to 65536");
             options.transition_capacity = parsed.value();
-        } else if (std::strcmp(key, "--system") == 0 || std::strcmp(key, "--kernel-adapter") == 0) {
+        } else if (std::strcmp(key, "--system") == 0 ||
+                   std::strcmp(key, "--kernel-protocol") == 0 ||
+                   std::strcmp(key, "--kernel-adapter") == 0) {
             if (std::strcmp(value, "on") != 0 && std::strcmp(value, "off") != 0)
                 return Result<Options>::failure("System settings need on or off");
             if (std::strcmp(key, "--system") == 0) options.system = std::strcmp(value, "on") == 0;
+            else if (std::strcmp(key, "--kernel-protocol") == 0)
+                options.kernel_protocol = std::strcmp(value, "on") == 0;
             else options.kernel = std::strcmp(value, "on") == 0;
         }
         else if (std::strcmp(key, "--layout") == 0) {
@@ -198,6 +203,9 @@ Result<Options> parse(int argc, char** argv) {
         return Result<Options>::failure("--max-run-ms requires observation-only capture");
     if (options.kernel && (!options.system || options.stdio || options.input != nullptr))
         return Result<Options>::failure("--kernel-adapter on needs --system on and owns guest input");
+    if (options.kernel_protocol && (!options.system || options.stdio || options.input != nullptr))
+        return Result<Options>::failure("--kernel-protocol on needs --system on and owns guest input");
+    if (options.kernel) options.kernel_protocol = true;
     if (options.system && options.stdio) return Result<Options>::failure("System guests use --kernel-adapter, not --stdio");
     if (options.system && options.layout) return Result<Options>::failure("--layout on requires a user-mode target");
     if (options.stop_pc != nullptr && (options.stdio || options.kernel))
@@ -214,8 +222,10 @@ Result<Options> parse(int argc, char** argv) {
         return Result<Options>::failure("Action windows and block transition reduction must be enabled together");
     if (std::strcmp(options.blocks, "off") == 0 && std::strcmp(options.reducer, "none") == 0)
         return Result<Options>::failure("--blocks off requires a reducer");
-    if (options.system && !options.kernel && options.input == nullptr) options.input = "/dev/null";
-    if (options.qemu == nullptr || options.plugin == nullptr || (!options.stdio && !options.kernel && options.input == nullptr) || options.target == nullptr)
+    if (options.system && !options.kernel_protocol && options.input == nullptr) options.input = "/dev/null";
+    if (options.qemu == nullptr || options.plugin == nullptr ||
+        (!options.stdio && !options.kernel_protocol && options.input == nullptr) ||
+        options.target == nullptr)
         return Result<Options>::failure("Required: --qemu PATH --plugin PATH (--input FILE or --stdio on) -- TARGET [ARGS]");
     if (std::strchr(options.plugin, ',') != nullptr)
         return Result<Options>::failure("Plugin path cannot contain a comma (QEMU option separator)");
@@ -451,12 +461,12 @@ Result<int> listen_at(const Options& options) {
 }
 
 Result<RunOutcome> run(const Options& options, int listener) {
-    if (options.kernel) {
+    if (options.kernel_protocol) {
         const auto result = run_kernel({options.qemu, options.plugin, options.registers, options.memory,
-            options.values, options.context, options.start_pc, options.window_start_pc,
+            options.values, options.context, options.start_pc, options.stop_pc, options.window_start_pc,
             options.window_end_pc, options.window_abort_pc, options.reducer, options.blocks,
             options.transition_capacity, options.batching, options.publication,
-            options.timeout_ms, options.target}, listener);
+            options.timeout_ms, options.max_run_ms, options.kernel, options.target}, listener);
         if (!result.ok()) return Result<RunOutcome>::failure(result.error());
         return Result<RunOutcome>::success(result.value() ? RunOutcome::cancelled : RunOutcome::completed);
     }

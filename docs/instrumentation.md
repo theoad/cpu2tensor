@@ -227,9 +227,13 @@ have bounded timeouts; the worker resumes QEMU after delivery. See the
 
 ## Kernel interaction and capture windows
 
-`--system on` selects the system worker contract. `--kernel-adapter on` adds
-exclusive QMP/serial ownership and the named guest adapter. Observation-only
-system runs have neither an action loop nor the plugin control thread.
+`--system on` selects the system worker contract. Guests that emit the named C2T
+protocol use `--kernel-protocol on`; the worker then provisions ttyS0 for raw
+diagnostics and a private ttyS1 for validated protocol records. Observation-only
+records are checked but stay out of the tensor stream consumed by `Pool`.
+`--kernel-adapter on` implies this protocol transport and adds the action loop.
+Observation-only system runs have neither an action loop nor the plugin control
+thread. Unmodified system guests omit both protocol options.
 
 KernelRequest=10 has source/count/sequence zero, detail 1..127, and no payload.
 It is published only after QMP confirms all vCPUs stopped and the plugin drains

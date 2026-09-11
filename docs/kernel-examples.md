@@ -79,9 +79,9 @@ The operator supplies an ordinary x86-64 Linux kernel, a compatible plugin-enabl
 KVM is a separate execution mode and does not provide these TCG plugin events.
 The kernel needs initramfs, gzip, ELF execution, procfs, serial console, and SMP
 support. The small [archive builder](../python/cpu2tensor/examples/build_initramfs.py)
-uses Python's standard library and writes the guest console device entry into
-the archive without creating a host device node. It does not fetch or build a
-kernel or QEMU.
+uses Python's standard library and writes the guest console and adapter device
+entries into the archive without creating host device nodes. It does not fetch
+or build a kernel or QEMU.
 
 With cpu2tensor installed on the build host:
 
@@ -98,14 +98,17 @@ The initramfs must contain:
 | `/init` | The static `kernel_init` executable, mode 0755 |
 | `/dev` | Directory, mode 0755 |
 | `/dev/console` | Character device, major 5, minor 1, mode 0600 |
+| `/dev/ttyS1` | Character device, major 4, minor 65, mode 0600 |
 | `/proc` | Directory, mode 0555 |
 
-Connect the guest serial console to the operator's transport and use
-`console=ttyS0 rdinit=/init` in its kernel command line. The target reads and writes
-its inherited console descriptors. It mounts only procfs, to read its command
-line. On completion or a fatal workload error it requests guest poweroff. It
-stays alive if poweroff fails, so the worker still needs a timeout and explicit
-incomplete-capture reporting.
+Connect the first ordered serial device to kernel console ttyS0 and the second
+to the private adapter ttyS1. Use `console=ttyS0 rdinit=/init` in the kernel
+command line. Workload stdout and stderr remain on ttyS0; only C2T events and
+adapter commands use ttyS1. This prevents asynchronous kernel diagnostics or
+future workload output from entering the protocol stream. The target mounts
+only procfs, to read its command line. On completion or a fatal workload error
+it requests guest poweroff. It stays alive if poweroff fails, so the worker
+still needs a timeout and explicit incomplete-capture reporting.
 
 To check only the ordinary guest workload with operator-supplied files:
 
@@ -113,15 +116,21 @@ To check only the ordinary guest workload with operator-supplied files:
 export QEMU_SYSTEM=/path/to/qemu-system-x86_64
 export KERNEL=/path/to/ordinary/x86_64/bzImage
 "$QEMU_SYSTEM" -accel tcg -smp 2 -m 256M \
-  -nographic -monitor none -nic none -no-reboot \
+  -display none -monitor none -nic none -no-reboot \
+  -chardev file,id=c2tconsole,path="$C2T_KERNEL_BUILD/console.log" \
+  -serial chardev:c2tconsole \
+  -chardev stdio,id=c2tadapter,signal=off \
+  -serial chardev:c2tadapter \
   -kernel "$KERNEL" -initrd "$C2T_KERNEL_BUILD/initramfs.cpio.gz" \
   -append 'console=ttyS0 rdinit=/init panic=-1 cpu2tensor.mode=observe'
 ```
 
 This guest check works without the plugin APIs needed for rich capture; it is
-not a cpu2tensor worker command. Replace `observe` with `interactive` to enter
-the named commands on the console. The tested runs each had a 60-second deadline
-and terminated only their own QEMU process if that deadline was reached.
+not a cpu2tensor worker command. C2T output appears on the second, stdio-backed
+serial device; kernel and workload diagnostics go to `console.log`. Replace
+`observe` with `interactive` to enter named commands on the adapter terminal.
+The tested runs each had a 60-second deadline and terminated only their own QEMU
+process if that deadline was reached.
 
 The workload options are:
 
@@ -135,6 +144,14 @@ The workload options are:
 Duplicate or malformed workload options fail explicitly. Other kernel options
 are ignored by the target. In interactive mode each memory or pipe command carries
 its own seed and size; the command-line seed and size configure observation only.
+
+When this guest runs through `cpu2tensor-worker`, select `--kernel-protocol on`
+for observation-only `Pool` captures. Select `--kernel-adapter on` for
+`KernelEnv`; it implies the same two-UART protocol and additionally enables
+paused action boundaries. In both modes the worker owns QMP, display startup and
+both serial devices, so do not pass `-serial`, `-monitor`, `-nographic` or `-S`.
+An invalid record, unsuccessful guest completion or missing completion fails the
+capture, and console diagnostics cannot enter protocol framing.
 
 ## Observation-only pretraining
 

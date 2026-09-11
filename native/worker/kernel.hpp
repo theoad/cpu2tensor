@@ -11,6 +11,7 @@ struct KernelOptions final {
     const char* values;
     const char* context;
     const char* start_pc;
+    const char* stop_pc;
     const char* window_start_pc;
     const char* window_end_pc;
     const char* window_abort_pc;
@@ -20,6 +21,8 @@ struct KernelOptions final {
     const char* batching;
     const char* publication;
     int timeout_ms;
+    int maximum_ms;
+    bool interactive;
     char** arguments;
 };
 // True means the consumer cancelled; all child resources have been released.

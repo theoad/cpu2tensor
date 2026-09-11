@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import selectors
 import signal
+import socket
 import subprocess
 import time
 import unittest
@@ -16,6 +17,7 @@ QEMU = os.environ.get("CPU2TENSOR_QEMU_SYSTEM")
 KERNEL = os.environ.get("CPU2TENSOR_KERNEL")
 INITRAMFS = os.environ.get("CPU2TENSOR_INITRAMFS")
 RESULTS = os.environ.get("CPU2TENSOR_KERNEL_RESULTS")
+MAXIMUM_GUEST_OUTPUT_BYTES = 1024 * 1024
 
 
 def checksum(seed: int, count: int) -> int:
@@ -31,56 +33,101 @@ def events(output: str) -> list[dict]:
             if line.strip().startswith("C2T ")]
 
 
-def run_guest(mode: str, commands: tuple[str, ...] = ()) -> tuple[int, list[dict]]:
+def run_guest(
+    mode: str, commands: tuple[str, ...] = ()
+) -> tuple[int, list[dict], bytes, bytes]:
+    console_host, console_guest = socket.socketpair()
+    adapter_host, adapter_guest = socket.socketpair()
     command = [QEMU, "-accel", "tcg,thread=multi", "-smp", "2", "-m", "256M",
-               "-nographic", "-monitor", "none", "-nic", "none", "-no-reboot",
+               "-display", "none", "-monitor", "none", "-nic", "none", "-no-reboot",
+               "-chardev", f"socket,id=c2tconsole,fd={console_guest.fileno()}",
+               "-serial", "chardev:c2tconsole",
+               "-chardev", f"socket,id=c2tadapter,fd={adapter_guest.fileno()}",
+               "-serial", "chardev:c2tadapter",
                "-kernel", KERNEL, "-initrd", INITRAMFS, "-append",
                f"console=ttyS0 rdinit=/init panic=-1 nokaslr cpu2tensor.mode={mode}"]
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, start_new_session=True)
-    output = bytearray()
+    process = None
+    qemu_output = bytearray()
+    console_output = bytearray()
+    adapter_output = bytearray()
     pending = bytearray()
+    rows = []
     sent = 0
     deadline = time.monotonic() + 60
     try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            pass_fds=(console_guest.fileno(), adapter_guest.fileno()),
+            start_new_session=True,
+        )
+        console_guest.close()
+        adapter_guest.close()
         with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            while True:
+            selector.register(console_host, selectors.EVENT_READ,
+                              ("console", console_output))
+            selector.register(adapter_host, selectors.EVENT_READ,
+                              ("adapter", adapter_output))
+            selector.register(process.stdout, selectors.EVENT_READ,
+                              ("QEMU diagnostics", qemu_output))
+            while selector.get_map():
                 remaining = deadline - time.monotonic()
-                if remaining <= 0 or not selector.select(remaining):
+                ready = selector.select(max(0.0, remaining))
+                if remaining <= 0 or not ready:
                     raise AssertionError("Guest did not complete within its 60-second deadline")
-                data = os.read(process.stdout.fileno(), 4096)
-                if not data:
-                    break
-                output.extend(data)
-                pending.extend(data)
-                if len(output) > 1024 * 1024:
-                    raise AssertionError("Guest console exceeded the test's bounded log size")
-                while b"\n" in pending:
-                    line, _, rest = pending.partition(b"\n")
-                    pending = bytearray(rest)
-                    if line.strip().startswith(b"C2T "):
-                        event = json.loads(line.strip()[4:])
+                for key, _ in ready:
+                    name, output = key.data
+                    data = os.read(key.fd, 4096)
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        continue
+                    output.extend(data)
+                    if len(output) > MAXIMUM_GUEST_OUTPUT_BYTES:
+                        raise AssertionError(f"Guest {name} exceeded the bounded log size")
+                    if name != "adapter":
+                        continue
+                    pending.extend(data)
+                    while b"\n" in pending:
+                        line, _, rest = pending.partition(b"\n")
+                        pending = bytearray(rest)
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if not line.startswith(b"C2T "):
+                            raise AssertionError(
+                                f"Protocol UART contained non-C2T bytes: {line[:128]!r}"
+                            )
+                        event = json.loads(line[4:])
+                        rows.append(event)
                         if event["event"] == "ready":
                             if sent == len(commands):
                                 raise AssertionError("Guest requested an unexpected extra command")
-                            process.stdin.write((commands[sent] + "\n").encode("ascii"))
-                            process.stdin.flush()
+                            adapter_host.sendall((commands[sent] + "\n").encode("ascii"))
                             sent += 1
         status = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        if pending:
+            raise AssertionError(f"Protocol UART ended inside a line: {pending[:128]!r}")
         if sent != len(commands):
             raise AssertionError("Guest exited before accepting every command")
-        return status, events(output.decode("utf-8", errors="replace"))
+        return status, rows, bytes(console_output), bytes(adapter_output)
     finally:
-        if process.poll() is None:
+        if process is not None and process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-        process.stdin.close()
-        process.stdout.close()
+        if process is not None:
+            process.stdout.close()
+        console_host.close()
+        console_guest.close()
+        adapter_host.close()
+        adapter_guest.close()
         if RESULTS:
             directory = Path(RESULTS)
             directory.mkdir(parents=True, exist_ok=True)
-            (directory / f"guest-{mode}.log").write_bytes(output)
+            (directory / f"guest-{mode}.log").write_bytes(console_output)
+            (directory / f"guest-{mode}-protocol.log").write_bytes(adapter_output)
+            (directory / f"guest-{mode}-qemu.log").write_bytes(qemu_output)
 
 
 class KernelResultChecks(unittest.TestCase):
@@ -127,9 +174,17 @@ class KernelHostTests(KernelResultChecks):
 
 @unittest.skipUnless(QEMU and KERNEL and INITRAMFS, "Set CPU2TENSOR_QEMU_SYSTEM, KERNEL and INITRAMFS fixture paths")
 class KernelGuestTests(KernelResultChecks):
+    def check_uart_isolation(self, console: bytes, adapter: bytes) -> None:
+        self.assertIn(b"Linux version", console)
+        self.assertNotIn(b"C2T ", console)
+        lines = [line.strip() for line in adapter.splitlines() if line.strip()]
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith(b"C2T ") for line in lines))
+
     def test_observation_guest_runs_both_cpus(self) -> None:
-        status, rows = run_guest("observe")
+        status, rows, console, adapter = run_guest("observe")
         self.assertEqual(status, 0)
+        self.check_uart_isolation(console, adapter)
         self.check_results(rows)
         parallel = [row for row in rows if row.get("action") == "parallel"]
         self.assertEqual(len(parallel), 1)
@@ -138,8 +193,9 @@ class KernelGuestTests(KernelResultChecks):
 
     def test_interactive_parallel_wraparound_and_rejected_size(self) -> None:
         commands = ("parallel 17 4096", "parallel 4294967295 17", "parallel 1 0", "getpid", "quit")
-        status, rows = run_guest("interactive", commands)
+        status, rows, console, adapter = run_guest("interactive", commands)
         self.assertEqual(status, 0)
+        self.check_uart_isolation(console, adapter)
         self.check_results(rows)
         self.assertEqual([row["step"] for row in rows if row["event"] == "ready"], [0, 1, 2, 2, 3])
         self.assertEqual(len([row for row in rows if row["event"] == "error"]), 1)

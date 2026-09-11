@@ -31,6 +31,7 @@ cmake -S "$root/native" -B "$work/native" -G Ninja \
     -DCPU2TENSOR_BUILD_WORKER=ON \
     -DCPU2TENSOR_QEMU_INCLUDE_DIR=/opt/qemu/include
 cmake --build "$work/native" --parallel 2
+ctest --test-dir "$work/native" --output-on-failure
 aarch64-linux-gnu-gcc -O2 -static \
     "$root/native/examples/checksum.c" -o "$work/checksum-aarch64"
 python -m pip install --quiet --no-deps --editable "$root" \

@@ -56,6 +56,44 @@ output could stall that fixture. The harness now stores both diagnostic streams
 independently of trace consumption. Full boot and the larger rich workload were
 rerun successfully. No throughput claim is inferred from their durations.
 
+## Dedicated protocol transport follow-up
+
+Checked 2026-09-11 on `trail-x86`, Linux x86-64, after a long action campaign
+showed a kernel printk inserted inside a C2T JSON record on the shared ttyS0.
+The example guest now uses ttyS0 only for diagnostics and ttyS1 only for its
+bounded protocol. The worker provisions and drains both devices for
+`--kernel-protocol on` observation captures and for `--kernel-adapter on`
+interaction. Observation protocol records are validated without entering the
+`Pool` tensor stream.
+
+A fresh Release build passed 6/6 native tests. The deterministic transport test
+covers both worker modes, malformed observation data, the preserved printk
+suffix case, action delivery on ttyS1, bounded framing diagnostics and child
+reaping. The ordinary container gates passed 159 Python tests with 85 configured
+skips, 96% Python coverage, 96.1% native coverage, and three local QEMU system
+tests.
+
+The rebuilt two-UART guest completed one block-only observation run through
+`Pool`: 23,089,629 blocks from sources 0 and 1, a validated successful guest
+completion, and a reaped QEMU child. The same artifacts completed a `KernelEnv`
+reset, `getpid` and `quit`, yielding 996,454 and 1,926,174 blocks before the two
+boundaries; its child was also reaped. A separate managed observation exceeded
+its one-second absolute budget with the named deadline diagnostic and reaped its
+child. No worker, QEMU process or listener remained after the checks.
+
+Evidence is under
+`~/.cache/cpu2tensor/issue-5-integration-20260911-140513/` on `trail-x86`.
+SHA-256 values are
+`914f2a84de83037e92f5a2d7385fc44723047e2f97d939b5e8ea8be40f4b571e`
+for `kernel_init`,
+`0acb71c0a41f007b4b94b50a750574a255b72d78ed7ee5cda4237f7acab41a96`
+for the worker,
+`10aa6b741267b95b60b3fc31ecc1045fb29ad220d9e06b5a043c1af00fc1d5db`
+for the plugin, and
+`c435812de2a939daf9e190ce9262f6186ca8eef265db5688cff30af915f5018a`
+for the initramfs. These are correctness and lifecycle checks, not throughput
+measurements.
+
 ## Deliberate limits
 
 The current rich path emits many small single-signal frames and constructs tensors
