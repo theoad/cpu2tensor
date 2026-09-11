@@ -57,4 +57,12 @@ if [[ -n "${CPU2TENSOR_COVERAGE_DIR:-}" ]]; then
         --filter "$root/native/include/cpu2tensor/" \
         --exclude-unreachable-branches \
         --xml "$CPU2TENSOR_COVERAGE_DIR/native.xml" --xml-pretty
+    readonly python_covered="$(sed -n 's/.*lines-covered="\([0-9]*\)".*/\1/p' "$CPU2TENSOR_COVERAGE_DIR/python.xml" | head -1)"
+    readonly python_valid="$(sed -n 's/.*lines-valid="\([0-9]*\)".*/\1/p' "$CPU2TENSOR_COVERAGE_DIR/python.xml" | head -1)"
+    readonly native_covered="$(sed -n 's/.*lines-covered="\([0-9]*\)".*/\1/p' "$CPU2TENSOR_COVERAGE_DIR/native.xml" | head -1)"
+    readonly native_valid="$(sed -n 's/.*lines-valid="\([0-9]*\)".*/\1/p' "$CPU2TENSOR_COVERAGE_DIR/native.xml" | head -1)"
+    awk -v covered="$((python_covered + native_covered))" \
+        -v valid="$((python_valid + native_valid))" \
+        'BEGIN { printf "%.1f\n", covered * 100 / valid }' \
+        > "$CPU2TENSOR_COVERAGE_DIR/total.txt"
 fi

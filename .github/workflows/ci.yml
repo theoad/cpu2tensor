@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
@@ -19,6 +18,8 @@ jobs:
     name: Unit tests and selected system tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      coverage: ${{ steps.coverage.outputs.value }}
     steps:
       - name: Check out the tested commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -49,16 +50,9 @@ jobs:
             cpu2tensor-ci:local \
             ./ci/run-unit-tests.sh
 
-      - name: Publish coverage
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
-        with:
-          use_oidc: true
-          fail_ci_if_error: true
-          disable_search: true
-          files: ${{ runner.temp }}/cpu2tensor-coverage/python.xml,${{ runner.temp }}/cpu2tensor-coverage/native.xml
-          slug: ${{ github.repository }}
-          version: v10.4.0
+      - name: Read combined coverage
+        id: coverage
+        run: echo "value=$(cat "$RUNNER_TEMP/cpu2tensor-coverage/total.txt")" >> "$GITHUB_OUTPUT"
 
       - name: Decide whether system tests are required
         id: system
@@ -73,3 +67,41 @@ jobs:
           --volume "$PWD:/workspace"
           cpu2tensor-ci:local
           ./ci/run-system-tests.sh
+
+  badge:
+    name: Update coverage badge
+    needs: test
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the badge branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ci-badges
+
+      - name: Write the latest successful coverage
+        env:
+          COVERAGE: ${{ needs.test.outputs.coverage }}
+        run: |
+          [[ "$COVERAGE" =~ ^[0-9]+\.[0-9]$ ]]
+          cat > coverage.svg <<EOF
+          <svg xmlns="http://www.w3.org/2000/svg" width="120" height="20" role="img" aria-label="coverage: ${COVERAGE}%">
+            <title>coverage: ${COVERAGE}%</title>
+            <linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient>
+            <clipPath id="r"><rect width="120" height="20" rx="3"/></clipPath>
+            <g clip-path="url(#r)"><rect width="70" height="20" fill="#555"/><rect x="70" width="50" height="20" fill="#4c1"/><rect width="120" height="20" fill="url(#s)"/></g>
+            <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
+              <text x="35" y="15" fill="#010101" fill-opacity=".3">coverage</text><text x="35" y="14">coverage</text>
+              <text x="95" y="15" fill="#010101" fill-opacity=".3">${COVERAGE}%</text><text x="95" y="14">${COVERAGE}%</text>
+            </g>
+          </svg>
+          EOF
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add coverage.svg
+          if ! git diff --cached --quiet; then
+            git commit -m "Update coverage badge to ${COVERAGE}%"
+            git push
+          fi
