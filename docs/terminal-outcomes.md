@@ -61,3 +61,9 @@ It makes one nonblocking 32-byte attempt after the absolute budget expires. A fu
 or broken socket can therefore lose or truncate the diagnostic, preserving the
 run and cleanup bound. The client then reports the transport evidence it actually
 received rather than guessing the missing reason.
+
+The direct process worker and the managed full-system `--kernel-protocol` path use
+the same version 3 report. The managed path tracks the Hello and observation data
+that it has actually forwarded, and caps client and QMP writes by the remaining
+absolute budget. A learner that stops reading therefore cannot turn
+`--max-run-ms` into the longer transport inactivity timeout.

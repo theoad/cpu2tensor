@@ -34,6 +34,11 @@ backpressure. Python names the deadline only after validating the complete repor
 Operating-system scheduling and child reaping add latency; this is an absolute
 worker budget, not a hard real-time scheduling guarantee.
 
+The managed full-system path applies the same bound to trace forwarding and QMP
+writes. Its terminal report records whether plugin negotiation and observation
+data reached the client before expiry. This keeps deadline diagnosis identical
+for ordinary process targets and kernel guests.
+
 `--timeout-ms` remains the existing operation timeout. It can fail an inactive
 operation before the total budget expires. The pipeline benchmark's
 `--max-seconds` is a separate soft learner consumption budget checked between
