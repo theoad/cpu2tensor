@@ -16,7 +16,8 @@ exercises real QEMU plugin loading rather than fixture frames:
   CPU learner step;
 - two stdin action boundaries with the target paused between actions.
 
-The jobs build `ci/Dockerfile` and run the repository inside that image. It pins
+The jobs build `ci/Dockerfile` and run the repository inside that image. The
+workflow actions and Ubuntu base image are immutable revisions. The image pins
 the Python test stack and QEMU 11.0.3, verifies the QEMU source archive checksum,
 and builds only the two Linux user-mode emulators needed by the tests. GitHub's
 Docker layer cache avoids rebuilding those dependencies for ordinary commits.
