@@ -1,10 +1,10 @@
 # Concurrent context-only decode investigation
 
-Issue 7 is not ready to close. A bounded 1/4/16 replay reproduced the shared
+Issue 7 is ready to close. A bounded 1/4/16 replay reproduced the shared
 interpreter ceiling, and a targeted per-frame GIL-release candidate made threaded
-scaling worse on the x86 performance host. That implementation was removed. A
-new bounded multi-frame candidate passes local exactness and latency checks. It
-still needs the same real x86 matrix before making a scaling claim.
+scaling worse on the x86 performance host. That implementation was removed. The
+bounded multi-frame implementation now passes exactness and latency checks and
+improves the repeated real x86 matrix at 1, 4 and 16 workers.
 
 ## Measured boundary
 
@@ -141,6 +141,41 @@ remaining client-side serialization rather than a native-decode scaling result.
 Focused tests also run independent 1/4/16 public Pools, preserve every source
 position and retained tensor, expose a truncated endpoint while peers complete,
 return accepted rows before a later validation error, and hold a successor at 31
-header bytes while requiring the ready group immediately. The live x86 trace
-matrix must still show better 4/16 threaded throughput without a material
-one-worker regression before issue 7 closes.
+header bytes while requiring the ready group immediately.
+
+## Final real x86 result
+
+The final matrix ran on 2026-09-11 on the same `trail-x86` / `iseeyou` host:
+Intel Core i7-10510U, four cores/eight logical CPUs, Linux
+`7.0.0-30-generic`, Python 3.12.3 and the `powersave` governor. The host load was
+1.03/0.68/0.76 before timing. The source revision was
+`43d491023d3ab63a82d55bbc0f650052f293bafa`; its release decoder SHA-256 was
+`fcc4ccb255370f69de7b563ca34abbee86d98f97c015b4f189d63f65e4939aed`.
+
+The matrix reused the fixed live two-vCPU capture described above, with SHA-256
+`10077444d58da7a6e8cf1114f2845ac8e76c5ce47b2b0a38d85fb1ad759a4de2`.
+Legacy and 32-frame decode both produced exact row SHA-256
+`012d4f2d064c5280bebc3c303c2ea2e0a7d477bea82b346ff0c9a7c2705daa4c`.
+The 785 wire publications became 54 decoded publications. Both modes rejected a
+missing Complete and the same injected per-source sequence error.
+
+Each cell decoded the complete 198,208-row trace 100 times per worker for five
+repetitions. Executor creation and process startup are included. CPU/wall is the
+median sum of worker thread CPU seconds divided by wall time; it excludes process
+startup CPU outside the measured worker function.
+
+| Isolation | Workers | Legacy rows/s | 32-frame rows/s | Change | Group CPU/wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| threads | 1 | 118.10 million | 181.49 million | +53.7% | 0.99× |
+| threads | 4 | 93.29 million | 246.52 million | +164.3% | 2.05× |
+| threads | 16 | 83.79 million | 191.98 million | +129.1% | 1.81× |
+| processes | 1 | 80.17 million | 109.27 million | +36.3% | 0.63× |
+| processes | 4 | 170.32 million | 301.86 million | +77.2% | 2.23× |
+| processes | 16 | 202.43 million | 294.16 million | +45.3% | 4.54× |
+
+The five grouped threaded samples were 181.06–189.25, 240.23–269.03 and
+188.82–194.59 million rows/s at 1, 4 and 16 workers. The single-worker result is
+an improvement rather than a regression. The host audit found no QEMU,
+cpu2tensor worker, replay process or Python listener after the run. Raw JSON,
+the semantic audit and environment record remain under
+`/home/user/.cache/cpu2tensor/issue-7-final-43d4910/results/`.
