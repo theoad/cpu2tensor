@@ -16,6 +16,10 @@ The guest binary supplies three distinct functions or basic blocks:
 Pass their addresses from the exact guest binary to the worker:
 
 ```sh
+export WINDOW_BEGIN="$(nm "$C2T_BUILD/kernel_init" | awk '$3 == "cpu2tensor_action_begin" {print "0x" $1}')"
+export WINDOW_END="$(nm "$C2T_BUILD/kernel_init" | awk '$3 == "cpu2tensor_action_end" {print "0x" $1}')"
+export WINDOW_ABORT="$(nm "$C2T_BUILD/kernel_init" | awk '$3 == "cpu2tensor_action_abort" {print "0x" $1}')"
+
 cpu2tensor-worker \
   --qemu "$QEMU_SYSTEM" --plugin "$C2T_PLUGIN" \
   --system on --kernel-adapter on \
@@ -35,6 +39,13 @@ window metadata. Every delivered action requires exactly one window before the
 next request or successful exit. Missing, duplicate, or unexpected windows fail
 the stream. An action request while a window is still open is a capture error.
 Process exit can instead close an open window with status `incomplete`.
+
+The bundled kernel guest calls these markers for every delivered command. Command
+reading and parsing happen before begin. Result formatting, adapter UART writes,
+and the next `ready` event happen after end or abort. Its bounded
+`compute ITERATIONS PADDING` action is a test oracle: leading zeroes can change
+command length, and `PADDING` changes result length, without changing the enclosed
+body for the same numeric `ITERATIONS` value.
 
 One admission token governs the reducer and all raw callbacks belonging to a
 block. It is linearized before or after the end marker: a block admitted before
@@ -115,7 +126,24 @@ That build compiled all 34 targets, including the worker and plugin, and passed
 all three CTest targets. The local Python 3.10 fixture run passed 165 tests with
 71 environment-dependent tests skipped; CPU and available MPS paths ran.
 
-This slice has compile and fixture evidence only. It has not run these markers in
-a real QEMU guest and makes no performance claim. Fresh paused-world register
-snapshots, replay selection, distributed policy updates, and snapshot migration
-remain separate work.
+The matching guest was then run through `KernelEnv` on Linux x86-64 `trail-x86`
+with QEMU 11.0.3, TCG multi-thread mode, two vCPUs, Linux 6.9.0-dirty, and the
+three marker addresses read from that exact static binary. `compute 257 0` and
+`compute 0000000257 64` had different command and result sizes but returned the
+same nonempty reduced rows inside the exact `cpu2tensor_compute` ELF symbol range.
+`compute 521 0` changed their counts. The full windows retain concurrent timer,
+idle-vCPU, and kernel execution, which can vary independently of transport; the
+test does not hide those natural races or claim they are causally part of the
+compute function. An
+invalid compute command returned an explicit `aborted` window, and `quit` returned
+an ended empty window before successful guest completion. The worker reaped QEMU;
+no task worker or QEMU process remained.
+
+The checked static guest SHA-256 is
+`3a1e08dcc2070f1a7ac4e91902fc911ce0bf17dc01dc0812bd7f7f7a9761d916`;
+worker `4bc50f16a44307958397570bb832e3222cfb3f50045f793874e218a87b6b9973`;
+plugin `dc192396a71a886d2afd885125dc531d58af52760ec4b0b895560e6e013655f0`;
+and initramfs `0f0656582706097b85383b7de447b489d6d48dd78a3b072957ef22368b319562`.
+These identify correctness evidence, not a performance measurement. Fresh
+paused-world register snapshots, replay selection, distributed policy updates,
+and snapshot migration remain separate work.

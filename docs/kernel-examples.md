@@ -4,7 +4,7 @@ The two kernel examples use a small C17 guest target at
 [`native/examples/kernel_init.c`](../native/examples/kernel_init.c). Rich x86
 system capture, synchronized action boundaries, observation-only pretraining,
 and a Gym client now run end to end. The workload accepts only named getpid,
-memory, pipe, and parallel-memory commands.
+memory, pipe, parallel-memory, and bounded compute commands.
 
 Use [kernel pretraining](kernel-pretraining.md) for observation-only workers or
 [Kernel Gym](kernel-gym.md) for streamed reset/step and client-defined rewards.
@@ -200,9 +200,13 @@ after each `ready` event:
 | `memory SEED BYTES` | Allocate, fill, read, and release 1–65536 anonymous bytes |
 | `pipe SEED BYTES` | Write and verify a 1–256 byte pipe roundtrip |
 | `parallel SEED BYTES` | Pin two processes to distinct CPUs and verify independent memory loops |
+| `compute ITERATIONS PADDING` | Run a bounded CPU loop and add 0–64 result-padding bytes outside its action window |
 | `quit` | Emit completion and request guest poweroff |
 
-`SEED` is a decimal unsigned 32-bit integer. The command length is bounded to
+`SEED` is a decimal unsigned 32-bit integer. `ITERATIONS` is 1–65536; `PADDING`
+is 0–64. The compute command exists as a deterministic action-window oracle.
+Equivalent decimal spellings execute the same body while changing command size,
+and padding changes only result transport. The command length is bounded to
 127 bytes including its newline. These actions have fixed implementations: the
 interface accepts no arbitrary syscall number, memory address, pathname, or guest
 code. An action may execute several ordinary syscalls. No shell is started.

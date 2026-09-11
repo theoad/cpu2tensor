@@ -33,6 +33,11 @@ class RemoteKernelTests(unittest.TestCase):
         self.action_end = int(re.search(r'^([0-9a-f]+) T cpu2tensor_action_end$', symbols, re.M)[1], 16)
         self.action_abort = int(re.search(r'^([0-9a-f]+) T cpu2tensor_action_abort$', symbols, re.M)[1], 16)
         self.parallel = int(re.search(r'^([0-9a-f]+) T cpu2tensor_parallel_memory$', symbols, re.M)[1], 16)
+        sized_symbols = self.ssh(['nm', '-S', '-n', self.init]).decode()
+        compute = re.search(r'^([0-9a-f]+) ([0-9a-f]+) T cpu2tensor_compute$',
+                            sized_symbols, re.M)
+        self.compute = int(compute[1], 16)
+        self.compute_end = self.compute + int(compute[2], 16)
 
     def ssh(self, args):
         return subprocess.check_output(['ssh', '-o', 'BatchMode=yes', self.host, shlex.join(args)], timeout=20)
@@ -211,32 +216,52 @@ class RemoteKernelTests(unittest.TestCase):
         endpoint = self.start(action_windows=True, timeout=120000)
         commands = (b'compute 257 0\n', b'compute 0000000257 64\n',
                     b'compute 521 0\n')
-        observed = []
+        body_transitions = []
+        window_row_counts = []
         report_sizes = []
         with KernelEnv(endpoint, timeout=120) as env:
             self.drain(env.reset())
+            child = self.children()[0]
             for command in commands:
                 batches = list(env.step(command))
-                observed.append(tuple(sorted(
+                window_rows = tuple(sorted(
                     (batch.source, int(source), int(destination), int(count))
                     for batch in batches if batch.transitions is not None
                     for source, destination, count in zip(
                         batch.transitions.from_addresses,
                         batch.transitions.destinations,
                         batch.transitions.counts, strict=True)
-                )))
+                ))
+                window_row_counts.append(len(window_rows))
+                body_transitions.append(tuple(
+                    row for row in window_rows
+                    if self.compute <= row[1] < self.compute_end and
+                    self.compute <= row[2] < self.compute_end
+                ))
                 report_sizes.append(len(str(env.result)))
                 summary = next(batch.transition_window for batch in batches
                                if batch.transition_window is not None)
                 self.assertTrue(summary.complete)
+            rejected = list(env.step(b'compute 0 0\n'))
+            aborted = next(batch.transition_window for batch in rejected
+                           if batch.transition_window is not None)
+            self.assertEqual(aborted.status, 'aborted')
+            self.assertFalse(aborted.complete)
+            self.assertEqual(env.event['event'], 'ready')
+            self.assertIsNone(env.result)
             self.drain(env.step(b'quit\n'))
             self.assertEqual(env.exit_code, 0)
         self.assertNotEqual(len(commands[0]), len(commands[1]))
         self.assertNotEqual(report_sizes[0], report_sizes[1])
-        self.assertEqual(observed[0], observed[1])
-        self.assertNotEqual(observed[1], observed[2])
-        self.assertTrue(observed[0])
+        self.assertEqual(body_transitions[0], body_transitions[1])
+        self.assertNotEqual(body_transitions[1], body_transitions[2])
+        self.assertTrue(body_transitions[0])
         self.assertIn('"ok":true', self.finish())
+        self.gone(child)
+        print(f'Action windows on {self.host}: commands {[len(value) for value in commands]}, '
+              f'reports {report_sizes}, window_rows={window_row_counts}, '
+              f'body_transitions={[sum(row[3] for row in value) for value in body_transitions]}, '
+              'abort=aborted')
 
     def test_paused_and_midstream_reset_reap_old_guests(self):
         endpoint = self.start(episodes=3)
