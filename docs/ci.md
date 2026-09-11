@@ -1,9 +1,10 @@
 # Continuous integration
 
-GitHub Actions runs every unit test for pushes and pull requests. The unit job
-enforces at least 95% line coverage independently for the Python package and the
-native core. A 55-second process deadline leaves five seconds for runner cleanup,
-so the reported unit suite remains below one minute.
+GitHub Actions runs every unit test for pull-request commits and pushes to
+`main`. This gives each proposed or integrated commit one authoritative run. The
+unit job enforces at least 95% line coverage independently for the Python package
+and the native core. A 55-second process deadline leaves five seconds for runner
+cleanup, so the reported unit suite remains below one minute.
 
 System tests run when the tested commit has more than one parent on a `push`, or
 when its title contains the exact marker `[TESTME]`. Pull requests use their head
