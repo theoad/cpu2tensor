@@ -50,16 +50,20 @@ def decode(frames: tuple[bytes, ...]):
     return tuple(_native.decode(stream, frame) for frame in frames)
 
 
-def run_worker(frames: tuple[bytes, ...], expected, iterations: int):
+def run_worker(frames: tuple[bytes, ...], expected, iterations: int, check_every: bool):
     started = time.thread_time()
+    result = None
     for _ in range(iterations):
-        if decode(frames) != expected:
+        result = decode(frames)
+        if check_every and result != expected:
             raise AssertionError("Decoded rows differ from the canonical trace")
+    if result != expected:
+        raise AssertionError("Final decoded rows differ from the canonical trace")
     return time.thread_time() - started
 
 
 def measure(kind: str, workers: int, repetitions: int, iterations: int,
-            module: str, frames: tuple[bytes, ...], expected, rows: int):
+            module: str, frames: tuple[bytes, ...], expected, rows: int, check_every: bool):
     executor_type = ThreadPoolExecutor if kind == "threads" else ProcessPoolExecutor
     options = {"max_workers": workers, "initializer": load_native, "initargs": (module,)}
     if kind == "processes":
@@ -68,7 +72,7 @@ def measure(kind: str, workers: int, repetitions: int, iterations: int,
     for _ in range(repetitions):
         started = time.perf_counter()
         with executor_type(**options) as executor:
-            futures = [executor.submit(run_worker, frames, expected, iterations)
+            futures = [executor.submit(run_worker, frames, expected, iterations, check_every)
                        for _ in range(workers)]
             cpu_seconds = sum(future.result() for future in futures)
         wall_seconds = time.perf_counter() - started
@@ -104,6 +108,8 @@ def main() -> None:
                         default=("threads", "processes"))
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--check-last", action="store_true",
+                        help="Compare only each worker's final replay for bottleneck isolation")
     arguments = parser.parse_args()
     if any(worker < 1 for worker in arguments.workers):
         parser.error("Worker counts must be positive")
@@ -122,7 +128,7 @@ def main() -> None:
     rows = sum(HEADER.unpack(frame[:HEADER.size])[4] for frame in frames)
     results = [
         measure(mode, workers, arguments.repetitions, arguments.iterations,
-                module, frames, expected, rows)
+                module, frames, expected, rows, not arguments.check_last)
         for workers in arguments.workers
         for mode in arguments.modes
     ]
@@ -139,6 +145,7 @@ def main() -> None:
         "rows_per_iteration": rows,
         "iterations_per_worker": arguments.iterations,
         "repetitions": arguments.repetitions,
+        "payload_check": "last" if arguments.check_last else "every replay",
         "results": results,
     }, indent=2))
 
