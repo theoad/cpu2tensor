@@ -91,6 +91,14 @@ mixed batching, interactive control, and variable hotplug source counts. Those
 signals would violate this whole-observation bound. Use ordinary capture when a
 model needs them.
 
+QEMU can invoke a registered plugin atexit callback after C++ destructors for the
+plugin shared object. The reducer therefore uses explicitly constructed
+process-lifetime storage: normal execution callbacks stop first, the QEMU atexit
+callback reads and publishes the fixed tables, and the operating system reclaims
+them when QEMU exits. A compile-time check keeps every other source object read by
+that callback trivially destructible. Ordinary kernel control also retains the
+previous always-live idle reducer behavior when reduction is disabled.
+
 ## Local evidence
 
 The native stress fixture processes one million blocks on each of two sources.
@@ -101,9 +109,7 @@ also compare a 100,000-block raw sequence with public tensor counts, cap ten
 context changes at four retained rows, reject raw/malformed frames, withhold a
 summary on truncation, and combine independent workers through `Pool`.
 
-This is deterministic functional and structural-bound evidence. A real x86 TCG
-kernel run must still measure callback cost, peak QEMU/worker/learner RSS, emitted
-wire bytes, and disk bytes on the named performance host.
+This is deterministic functional and structural-bound evidence.
 
 For a local structural check on the macOS Apple Silicon coordinator, the native
 fixture processed those two million blocks with a 1,064,960-byte reported peak
@@ -124,6 +130,41 @@ du -sk "$root/empty"
 ```
 
 `find` printed no files and `du` reported zero KiB. This is not an x86 throughput
-result and is not compared with another ISA. The skipped real-kernel test
-`RemoteKernelTests.test_bounded_observation_reduction` is the acceptance harness
-for the named x86 host.
+result and is not compared with another ISA.
+
+## x86 kernel acceptance
+
+Candidate `74b5c581c19c2b499c0e0d150e9f4af51e38f0b8` passed the real-kernel
+acceptance on the named `iseeyou` x86-64 host. The guest was x86-64 Linux
+6.9.0-dirty under `tcg,thread=multi`, with two vCPUs, 256 MiB RAM, the patched
+operator QEMU 11.0.3 build, a 4,096-row capacity per vCPU, and the maximum benign
+guest workload of 65,536 bytes. The coordinator measured from remote worker
+launch through guest shutdown and complete client consumption:
+
+| Result | Measurement |
+| --- | ---: |
+| Wall time | 8.176 s |
+| Processed blocks | 1,117,787 |
+| Processed transitions | 1,117,785 |
+| Tensor column bytes | 196,896 |
+| Worker/client wire bytes | 198,928 |
+| Sampled peak worker plus QEMU process-tree RSS | 203,264 KiB |
+| Package-created capture files | 0 files, 0 bytes |
+
+RSS was sampled every 50 ms and summed across the measurement wrapper, worker,
+and QEMU descendants. Wire bytes were calculated from every validated frame's
+payload and its 32-byte header, including Hello, summaries, source ends, and
+Complete. The isolated remote working directory remained empty; its ext4
+directory metadata occupied 4 KiB, while contained file bytes were zero.
+
+vCPU 0 processed 848,327 blocks and vCPU 1 processed 269,460. Each retained the
+configured 4,096 distinct transition rows; their explicit occurrence overflow
+counts were 218,288 and 21,295. They retained one and three positioned context
+changes respectively, with no context overflow. The exact remote test passed in
+8.77 seconds. A separate ordinary KernelEnv reset/reaping test passed in 19.20
+seconds with no reducer, covering the shared process-lifetime object's idle path.
+
+An unrelated unleased process was found on the host before acceptance. All
+timing and RSS collected before the clean 2026-09-11T12:25Z audit were discarded.
+The recorded run followed clean preflights, and the final audit found no worker,
+QEMU, or debugger process before the host reservation was released.
