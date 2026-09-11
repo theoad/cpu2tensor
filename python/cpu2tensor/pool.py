@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
+import select
 import socket
 import struct
 import threading
@@ -28,6 +29,7 @@ from cpu2tensor.terminal import (
 
 
 _HEADER_BYTES = 32
+_CONTEXT_GROUP_FRAMES = 32
 _BLOCKS = 2
 _COMPLETE = 4
 _ERROR = 5
@@ -48,6 +50,10 @@ _TERMINAL_START_OBSERVED = 1 << 3
 _TERMINAL_STOP_CONFIGURED = 1 << 4
 _TERMINAL_STOP_OBSERVED = 1 << 5
 _WINDOW_FEATURE = 1 << 14
+_MEMORY_FEATURE = 1 << 8
+_REGISTERS_FEATURE = 1 << 9
+_CONTEXT_FEATURE = 1 << 16
+_MIXED_FEATURE = 1 << 18
 _STOP_FEATURE = 1 << 19
 _DATA_KINDS = {
     _BLOCKS, _REGISTERS, _MEMORY, _ADDRESS_CONTEXT, _EXECUTABLE_LAYOUT,
@@ -88,12 +94,15 @@ class Pool:
     uses the operating system resolver, which Python cannot interrupt or bound
     with this socket timeout; close may wait for an in-progress DNS lookup.
 
-    ``batch_bytes=0`` preserves worker frame boundaries. A positive value groups
-    CPU columns per source before upload, adding latency and CPU concatenation
-    copies. Pending decoded columns are limited to twice this target plus one
-    incoming frame; merged outputs, sequence/padding columns and Python objects
-    need additional memory. Source ends flush immediately. Retaining a device
-    column retains its whole shared batch upload. Incomplete traces still raise.
+    ``batch_bytes=0`` normally preserves worker frame boundaries. Context-only
+    mixed capture opportunistically combines at most 32 complete buffered frames
+    per source before making tensors. A positive value groups CPU columns further
+    before upload, adding latency and CPU concatenation copies. Pending decoded
+    columns are limited to twice this target plus one bounded native group of at
+    most 32 frames; merged outputs, sequence/padding columns and Python objects
+    need additional memory.
+    Source ends flush immediately. Retaining a device column retains its whole
+    shared batch upload. Incomplete traces still raise.
     """
 
     def __init__(
@@ -254,6 +263,26 @@ class Pool:
             raise last_error
         raise OSError("Worker address resolved to no stream sockets")
 
+    def _receive_frame(self, connection: socket.socket) -> bytearray:
+        header = self._receive(connection, _HEADER_BYTES, classify_end=True)
+        payload_bytes = _native.payload_size(header)
+        return header + self._receive(
+            connection, payload_bytes, classify_end=True, frame_started=True,
+        )
+
+    @staticmethod
+    def _complete_frame_is_ready(connection: socket.socket) -> bool:
+        # MSG_PEEK leaves the next frame in the socket. A readable socket may
+        # hold only one byte, so inspect both the header and its complete bounded
+        # payload before read-ahead. The caller remains the socket's only reader.
+        if not select.select((connection,), (), (), 0)[0]:
+            return False
+        header = connection.recv(_HEADER_BYTES, socket.MSG_PEEK)
+        if len(header) < _HEADER_BYTES:
+            return False
+        frame_bytes = _HEADER_BYTES + _native.payload_size(header)
+        return len(connection.recv(frame_bytes, socket.MSG_PEEK)) == frame_bytes
+
     def _read(self) -> Iterator[Batch]:
         hello_received = False
         data_received = False
@@ -268,70 +297,97 @@ class Pool:
             stream = _native.new_stream()
             names: dict[int, Mapping[int, str]] = {}
             collator = BatchCollator(self._batch_bytes) if self._batch_bytes else None
+            context_grouping = False
+            pending_frame: bytearray | None = None
             while True:
-                header = self._receive(connection, _HEADER_BYTES, classify_end=True)
-                payload_bytes = _native.payload_size(header)
-                frame = header + self._receive(
-                    connection, payload_bytes, classify_end=True, frame_started=True,
-                )
-                kind, source, count, sequence, detail, payload = _native.decode(stream, frame)
-                if kind == 1:
-                    hello_received = True
-                    start_configured = bool(detail & _WINDOW_FEATURE)
-                    stop_configured = bool(detail & _STOP_FEATURE)
-                elif kind in _DATA_KINDS:
-                    data_received = True
-                if kind == 1 and detail & 2048:
-                    raise ValueError("Use StdioEnv for an interactive worker")
-                if kind == 1 and detail & (1 << 13):
-                    raise ValueError("Use KernelEnv for an interactive system worker")
-                if kind == _REGISTER_SCHEMA:
-                    # Schema updates are cold-path work. Retained batches see an
-                    # immutable snapshot, not a dictionary changed by later reads.
-                    update = cast(dict[int, str], payload)
-                    names[source] = MappingProxyType({**names.get(source, {}), **update})
-                elif kind in (_BLOCKS, _REGISTERS, _MEMORY, _ADDRESS_CONTEXT,
-                              _EXECUTABLE_LAYOUT, _MIXED, _BLOCK_TRANSITIONS,
-                              _TRANSITION_WINDOW):
-                    batch = self._batch(kind, source, count, sequence, payload, names.get(source))
-                    if collator is None:
-                        yield batch
-                    else:
-                        for ready in collator.add(batch):
+                frame = pending_frame if pending_frame is not None else self._receive_frame(connection)
+                pending_frame = None
+                deferred_error: BaseException | None = None
+                validation_error: str | None = None
+                frame_kind = struct.unpack_from("<H", frame, 6)[0]
+                if context_grouping and frame_kind == _MIXED:
+                    frames = [frame]
+                    while len(frames) < _CONTEXT_GROUP_FRAMES:
+                        try:
+                            if not self._complete_frame_is_ready(connection):
+                                break
+                            following = self._receive_frame(connection)
+                        except (OSError, RuntimeError, ValueError, _CleanEnd) as error:
+                            deferred_error = error
+                            break
+                        if struct.unpack_from("<H", following, 6)[0] != _MIXED:
+                            pending_frame = following
+                            break
+                        frames.append(following)
+                    decoded, validation_error = _native.decode_context_frames(stream, frames)
+                else:
+                    decoded = [_native.decode(stream, frame)]
+
+                for kind, source, count, sequence, detail, payload in decoded:
+                    if kind == 1:
+                        hello_received = True
+                        start_configured = bool(detail & _WINDOW_FEATURE)
+                        stop_configured = bool(detail & _STOP_FEATURE)
+                        context_grouping = bool(detail & _CONTEXT_FEATURE and
+                                                detail & _MIXED_FEATURE and
+                                                not detail & (_MEMORY_FEATURE | _REGISTERS_FEATURE))
+                    elif kind in _DATA_KINDS:
+                        data_received = True
+                    if kind == 1 and detail & 2048:
+                        raise ValueError("Use StdioEnv for an interactive worker")
+                    if kind == 1 and detail & (1 << 13):
+                        raise ValueError("Use KernelEnv for an interactive system worker")
+                    if kind == _REGISTER_SCHEMA:
+                        # Schema updates are cold-path work. Retained batches see an
+                        # immutable snapshot, not a dictionary changed by later reads.
+                        update = cast(dict[int, str], payload)
+                        names[source] = MappingProxyType({**names.get(source, {}), **update})
+                    elif kind in (_BLOCKS, _REGISTERS, _MEMORY, _ADDRESS_CONTEXT,
+                                  _EXECUTABLE_LAYOUT, _MIXED, _BLOCK_TRANSITIONS,
+                                  _TRANSITION_WINDOW):
+                        batch = self._batch(kind, source, count, sequence, payload, names.get(source))
+                        if collator is None:
+                            yield batch
+                        else:
+                            for ready in collator.add(batch):
+                                yield to_device(ready, self._device)
+                                del ready
+                        del batch
+                    elif kind == 3 and collator is not None:
+                        for ready in collator.end_source(source):
                             yield to_device(ready, self._device)
                             del ready
-                    del batch
-                elif kind == 3 and collator is not None:
-                    for ready in collator.end_source(source):
-                        yield to_device(ready, self._device)
-                        del ready
-                elif kind == _COMPLETE:
-                    if collator is not None:
-                        for ready in collator.finish():
-                            yield to_device(ready, self._device)
-                            del ready
-                    self._outcome = self._make_outcome(
-                        TerminalReason.COMPLETE if detail == 0 else TerminalReason.TARGET_EXIT,
-                        hello_received, data_received,
-                        start=self._completed_boundary(start_configured),
-                        stop=self._completed_boundary(stop_configured),
-                        complete=True,
-                    )
-                    if detail != 0:
-                        raise TraceTerminalError(f"Target exited with code {detail}", self._outcome)
-                    return
-                elif kind == _ERROR:
-                    self._outcome = self._make_outcome(
-                        _FAILURE_REASONS[detail], hello_received, data_received,
-                    )
-                    raise TraceTerminalError(
-                        f"Incomplete trace: {_FAILURES[detail]}", self._outcome,
-                    )
-                elif kind == _TERMINAL_REPORT:
-                    self._raise_reported_terminal(
-                        connection, detail, hello_received, data_received,
-                        start_configured, stop_configured,
-                    )
+                    elif kind == _COMPLETE:
+                        if collator is not None:
+                            for ready in collator.finish():
+                                yield to_device(ready, self._device)
+                                del ready
+                        self._outcome = self._make_outcome(
+                            TerminalReason.COMPLETE if detail == 0 else TerminalReason.TARGET_EXIT,
+                            hello_received, data_received,
+                            start=self._completed_boundary(start_configured),
+                            stop=self._completed_boundary(stop_configured),
+                            complete=True,
+                        )
+                        if detail != 0:
+                            raise TraceTerminalError(f"Target exited with code {detail}", self._outcome)
+                        return
+                    elif kind == _ERROR:
+                        self._outcome = self._make_outcome(
+                            _FAILURE_REASONS[detail], hello_received, data_received,
+                        )
+                        raise TraceTerminalError(
+                            f"Incomplete trace: {_FAILURES[detail]}", self._outcome,
+                        )
+                    elif kind == _TERMINAL_REPORT:
+                        self._raise_reported_terminal(
+                            connection, detail, hello_received, data_received,
+                            start_configured, stop_configured,
+                        )
+                if validation_error is not None:
+                    raise ValueError(validation_error)
+                if deferred_error is not None:
+                    raise deferred_error
         except _CleanEnd as error:
             reason = (TerminalReason.TRUNCATED_STREAM if error.truncated
                       else TerminalReason.UNKNOWN_DISCONNECTION)

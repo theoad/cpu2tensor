@@ -59,3 +59,6 @@ def decode(
     bytearray | dict[int, str] | RegisterColumns | MemoryColumns |
     ContextColumns | MixedColumns | TransitionColumns,
 ]: ...
+def decode_context_frames(
+    stream: Any, frames: list[bytes | bytearray | memoryview]
+) -> tuple[list[tuple[int, int, int, int, int, MixedColumns]], str | None]: ...

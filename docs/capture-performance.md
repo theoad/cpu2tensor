@@ -106,16 +106,20 @@ multiple learner devices remain deferred.
 ## Bounded tensor collation
 
 `batch_bytes=65536` groups decoded CPU frames before the device upload. The
-default is zero, which preserves worker frame boundaries. Each worker groups
-rows by vCPU; it never merges different sources. Original per-table sequences
-survive collation. Layout metadata is forwarded immediately; SourceEnd and
-successful completion flush pending tails. This is for observation-only Pool
-consumption, not an additional action boundary.
+default is zero. It preserves worker frame boundaries except for context-only
+mixed capture, where native decode opportunistically combines up to 32 complete
+buffered frames into one publication per source. It does not wait for a partial
+frame. Each worker groups rows by vCPU; it never merges different sources.
+Original per-table sequences survive both forms of collation. Layout metadata is
+forwarded immediately; SourceEnd and successful completion flush pending tails.
+This is for observation-only Pool consumption, not an additional action boundary.
 
 The target accepts up to 4 MiB. Pending input columns per worker are bounded by
-twice the target plus one incoming frame, with independent limits of 256 frames
-per source and 512 pending frames per worker. Concatenation, generated sequences,
-register-row padding, output buffers and Python object overhead are additional.
+twice the target plus one incoming decoded item. Context-only decode can replace
+that item with a group of at most 32 wire frames. Collation has independent limits
+of 256 frames per source and 512 pending frames per worker. Concatenation,
+generated sequences, register-row padding, output buffers and Python object
+overhead are additional.
 The endpoint reader's ready and in-progress batches are additional too. These
 limits bound buffering without claiming that `batch_bytes` is a process-memory
 cap. A quiet source may wait for its next event, another source's budget pressure,

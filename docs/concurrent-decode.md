@@ -1,18 +1,18 @@
 # Concurrent context-only decode investigation
 
-Issue 7 is not ready to close. A bounded 1/4/16 replay reproduces the shared
-interpreter ceiling, and a targeted GIL-release candidate made threaded scaling
-worse on the x86 performance host. That implementation was removed. The replay
-and custody checks remain so the next design can be evaluated against the same
-data.
+Issue 7 is not ready to close. A bounded 1/4/16 replay reproduced the shared
+interpreter ceiling, and a targeted per-frame GIL-release candidate made threaded
+scaling worse on the x86 performance host. That implementation was removed. A
+new bounded multi-frame candidate passes local exactness and latency checks. It
+still needs the same real x86 matrix before making a scaling claim.
 
 ## Measured boundary
 
-`Pool._read` receives one frame and calls `_native.decode`. The native call
-validates its connection-local `Stream`, allocates Python byte arrays and
-dictionaries, converts little-endian rows, and returns one Python object graph per
-wire frame. `Pool._batch` then creates tensor views and batch objects. These steps
-repeat even when a positive `batch_bytes` later combines their tensors.
+The baseline `Pool._read` received one frame and called `_native.decode`. The
+native call validated its connection-local `Stream`, allocated Python byte arrays
+and dictionaries, converted little-endian rows, and returned one Python object
+graph per wire frame. `Pool._batch` then created tensor views and batch objects.
+These steps repeated even when a positive `batch_bytes` later combined tensors.
 
 The rejected candidate allocated owned output buffers under the GIL, then released
 the GIL once per mixed block/context frame while `Stream::accept` validated source
@@ -26,6 +26,23 @@ Header parsing, Python allocation, dictionary/tuple publication,
 remained serialized. A larger GIL-free region therefore needs to span several
 wire frames and publish fewer Python objects; adding more short release regions
 is not a supported optimization.
+
+## Bounded multi-frame candidate
+
+For a Hello that enables mixed AddressContext while leaving register and memory
+signals disabled, `Pool` now reads ahead only while a complete next frame is
+already buffered. It peeks at the full 32-byte header and its validated bounded
+payload before consuming it. A partial successor therefore cannot delay a ready
+batch. SourceEnd, Complete, errors and all other control frames are barriers.
+
+At most 32 mixed frames, 131,072 wire bytes, enter one native call. Native
+validation spans the group with one GIL release. The decoder then publishes one
+owned block/context column set per source, with explicit original sequence values.
+Different sources are never merged and retain no promised total order. Invalid
+frame validation returns every earlier accepted group before the client raises;
+disconnects discovered during read-ahead are deferred the same way. Legacy and
+rich profiles continue through the one-frame decoder. The public `Pool.read()`
+API is unchanged and synchronous.
 
 ## Reproduction
 
@@ -41,7 +58,8 @@ decoder plus a recorded wire trace:
 ```sh
 python3 python/tests/replay_native_decode.py \
   --module /path/to/_native.so --capture /path/to/context-only.trace \
-  --revision REVISION --workers 1 4 16 --iterations 100 --repetitions 5
+  --revision REVISION --workers 1 4 16 --iterations 100 --repetitions 5 \
+  --group-frames 32
 ```
 
 It creates a new Stream per trace replay. Native validation rejects missing or
@@ -99,13 +117,30 @@ four processes reached 93.8 million, so per-replay equality was not the primary
 ceiling. The remaining per-frame Python call and object-publication boundary is
 the measured bottleneck.
 
-## Required next implementation
+## Local candidate evidence
 
-The next candidate should validate and collate multiple complete frames per
-connection in native code, then publish one owned column set per source-sized
-group. It can reuse the existing positive `batch_bytes` contract while moving the
-collation boundary before Python tensor creation. It must keep input buffering
-bounded, preserve exact mixed event positions, flush on source end, reject partial
-or invalid frames, and let independent endpoint readers block without dropping
-data. The same live trace matrix must improve 4/16 threaded throughput without a
-material one-worker regression before issue 7 closes.
+The amd64 CI image ran under emulation on the Apple Silicon development Mac. Its
+deterministic trace contained 132 wire frames and 32,768 exact rows. Grouped and
+legacy decode produced the same per-row SHA-256,
+`b05a5cceccae3f40fb2c94f4cc17ca806165975d346b80292f82d2ee85974b1e`.
+Each cell used 50 decodes per worker and three repetitions with final-payload
+checking. This is implementation evidence, not an x86 performance result.
+
+| Threads | Legacy rows/s | 32-frame group rows/s |
+| ---: | ---: | ---: |
+| 1 | 100.75 million | 162.10 million |
+| 4 | 112.91 million | 112.27 million |
+| 16 | 113.60 million | 141.00 million |
+
+The public TCP `Pool` replay used 256 frames per source and three repetitions in
+the same emulated image. Its median forward-progress rates were 8.70, 3.19 and
+1.83 million exact rows/s at 1, 4 and 16 Pools. This includes loopback transport,
+Python batch objects, `torch.frombuffer` and digest consumption, so it identifies
+remaining client-side serialization rather than a native-decode scaling result.
+
+Focused tests also run independent 1/4/16 public Pools, preserve every source
+position and retained tensor, expose a truncated endpoint while peers complete,
+return accepted rows before a later validation error, and hold a successor at 31
+header bytes while requiring the ready group immediately. The live x86 trace
+matrix must still show better 4/16 threaded throughput without a material
+one-worker regression before issue 7 closes.

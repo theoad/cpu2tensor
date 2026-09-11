@@ -45,9 +45,28 @@ def read_frames(path: Path) -> tuple[bytes, ...]:
     return tuple(frames)
 
 
-def decode(frames: tuple[bytes, ...]):
+def decode(frames: tuple[bytes, ...], group_frames: int = 1):
     stream = _native.new_stream()
-    return tuple(_native.decode(stream, frame) for frame in frames)
+    decoded = []
+    offset = 0
+    while offset < len(frames):
+        _, _, kind, _, _, _, _ = HEADER.unpack(frames[offset][:HEADER.size])
+        if group_frames > 1 and kind == 14:
+            end = offset + 1
+            while end < min(len(frames), offset + group_frames):
+                _, _, following, _, _, _, _ = HEADER.unpack(frames[end][:HEADER.size])
+                if following != 14:
+                    break
+                end += 1
+            ready, error = _native.decode_context_frames(stream, frames[offset:end])
+            decoded.extend(ready)
+            if error is not None:
+                raise ValueError(error)
+            offset = end
+        else:
+            decoded.append(_native.decode(stream, frames[offset]))
+            offset += 1
+    return tuple(decoded)
 
 
 def trace_summary(decoded) -> dict:
@@ -98,11 +117,54 @@ def trace_summary(decoded) -> dict:
     return {"complete": True, "sources": sources}
 
 
-def run_worker(frames: tuple[bytes, ...], expected, iterations: int, check_every: bool):
+def context_trace_digest(decoded) -> str:
+    """Hash every context-only row after restoring each source's sequence order."""
+    rows = {}
+    for kind, source, _, sequence, _, payload in decoded:
+        if kind == 14:
+            if "blocks" in payload:
+                addresses = struct.iter_unpack("<Q", payload["blocks"])
+                sequences = struct.iter_unpack("<Q", payload["block_sequences"])
+                rows.setdefault(source, []).extend(
+                    (position[0], 2, address[0])
+                    for position, address in zip(sequences, addresses, strict=True)
+                )
+            if "context" in payload:
+                context = payload["context"]
+                columns = [struct.iter_unpack("<Q", context[name]) for name in (
+                    "pc", "cr0", "cr3", "cr4", "efer", "cs_base", "mode", "known",
+                )]
+                sequences = struct.iter_unpack("<Q", context["sequences"])
+                rows.setdefault(source, []).extend(
+                    (position[0], 12, *(value[0] for value in values))
+                    for position, values in zip(sequences, zip(*columns, strict=True), strict=True)
+                )
+        elif kind == 2:
+            rows.setdefault(source, []).extend(
+                (sequence + offset, 2, address[0])
+                for offset, address in enumerate(struct.iter_unpack("<Q", payload))
+            )
+        elif kind == 12:
+            columns = [struct.iter_unpack("<Q", payload[name]) for name in (
+                "pc", "cr0", "cr3", "cr4", "efer", "cs_base", "mode", "known",
+            )]
+            rows.setdefault(source, []).extend(
+                (sequence + offset, 12, *(value[0] for value in values))
+                for offset, values in enumerate(zip(*columns, strict=True))
+            )
+    digest = hashlib.sha256()
+    for source in sorted(rows):
+        for row in sorted(rows[source]):
+            digest.update(struct.pack(f"<{len(row) + 1}Q", source, *row))
+    return digest.hexdigest()
+
+
+def run_worker(frames: tuple[bytes, ...], expected, iterations: int, check_every: bool,
+               group_frames: int):
     started = time.thread_time()
     result = None
     for _ in range(iterations):
-        result = decode(frames)
+        result = decode(frames, group_frames)
         if check_every and result != expected:
             raise AssertionError("Decoded rows differ from the canonical trace")
     if result != expected:
@@ -111,7 +173,8 @@ def run_worker(frames: tuple[bytes, ...], expected, iterations: int, check_every
 
 
 def measure(kind: str, workers: int, repetitions: int, iterations: int,
-            module: str, frames: tuple[bytes, ...], expected, rows: int, check_every: bool):
+            module: str, frames: tuple[bytes, ...], expected, rows: int, check_every: bool,
+            group_frames: int):
     executor_type = ThreadPoolExecutor if kind == "threads" else ProcessPoolExecutor
     options = {"max_workers": workers, "initializer": load_native, "initargs": (module,)}
     if kind == "processes":
@@ -120,7 +183,9 @@ def measure(kind: str, workers: int, repetitions: int, iterations: int,
     for _ in range(repetitions):
         started = time.perf_counter()
         with executor_type(**options) as executor:
-            futures = [executor.submit(run_worker, frames, expected, iterations, check_every)
+            futures = [executor.submit(
+                run_worker, frames, expected, iterations, check_every, group_frames,
+            )
                        for _ in range(workers)]
             cpu_seconds = sum(future.result() for future in futures)
         wall_seconds = time.perf_counter() - started
@@ -156,6 +221,8 @@ def main() -> None:
                         default=("threads", "processes"))
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--group-frames", type=int, choices=range(1, 33), default=1,
+                        metavar="1..32", help="Collate this many context-only mixed frames")
     parser.add_argument("--check-last", action="store_true",
                         help="Compare only each worker's final replay for bottleneck isolation")
     arguments = parser.parse_args()
@@ -167,7 +234,11 @@ def main() -> None:
     module = str(arguments.module.resolve())
     load_native(module)
     frames = read_frames(arguments.capture)
-    expected = decode(frames)
+    legacy = decode(frames)
+    expected = decode(frames, arguments.group_frames)
+    if (trace_summary(expected) != trace_summary(legacy) or
+            context_trace_digest(expected) != context_trace_digest(legacy)):
+        raise AssertionError("Grouped decode changed exact context-only rows")
     summary = trace_summary(expected)
     # Stream validation establishes continuous per-source sequences and complete
     # termination. Equality checks every returned header and owned column byte.
@@ -177,7 +248,8 @@ def main() -> None:
     rows = sum(HEADER.unpack(frame[:HEADER.size])[4] for frame in frames)
     results = [
         measure(mode, workers, arguments.repetitions, arguments.iterations,
-                module, frames, expected, rows, not arguments.check_last)
+                module, frames, expected, rows, not arguments.check_last,
+                arguments.group_frames)
         for workers in arguments.workers
         for mode in arguments.modes
     ]
@@ -191,8 +263,10 @@ def main() -> None:
         "capture_sha256": file_hash(arguments.capture),
         "capture_bytes": arguments.capture.stat().st_size,
         "frames_per_iteration": len(frames),
+        "native_group_frames": arguments.group_frames,
         "rows_per_iteration": rows,
         "trace_summary": summary,
+        "exact_row_sha256": context_trace_digest(expected),
         "iterations_per_worker": arguments.iterations,
         "repetitions": arguments.repetitions,
         "payload_check": "last" if arguments.check_last else "every replay",

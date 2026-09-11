@@ -104,7 +104,9 @@ evidence but was not part of that timing comparison.
 The [concurrent decode investigation](concurrent-decode.md) reproduces the
 shared-interpreter ceiling at 1/4/16 readers. Releasing the GIL once per mixed
 frame made the larger threaded replay slower, so that candidate was removed.
-Native multi-frame collation remains required before claiming concurrent scaling.
+A bounded multi-frame candidate now reduces native publications and passes local
+exactness tests. A repeated real x86 matrix remains required before claiming
+concurrent scaling.
 
 ## Compatible development build
 

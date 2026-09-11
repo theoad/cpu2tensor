@@ -8,6 +8,7 @@
 namespace {
 using namespace cpu2tensor;
 constexpr const char* stream_name = "cpu2tensor.Stream";
+constexpr size_t max_context_group_frames = 32;
 void delete_stream(PyObject* capsule) { delete static_cast<Stream*>(PyCapsule_GetPointer(capsule, stream_name)); }
 PyObject* new_stream(PyObject*, PyObject*) {
     auto* stream = new (std::nothrow) Stream;
@@ -231,6 +232,240 @@ PyObject* decode_mixed(const Header& h, const uint8_t* bytes, bool memory_values
     return result;
 }
 
+struct ContextCounts final {
+    uint32_t blocks = 0;
+    uint32_t contexts = 0;
+};
+
+Result<ContextCounts> count_context_rows(const Header& h, const uint8_t* bytes) {
+    ContextCounts counts;
+    size_t offset = 0;
+    uint32_t events = 0;
+    while (offset < h.detail) {
+        if (h.detail - offset < 8)
+            return Result<ContextCounts>::failure("Truncated mixed run header");
+        const auto kind = static_cast<Kind>(load_u16(bytes + offset));
+        const uint32_t rows = load_u16(bytes + offset + 2);
+        const uint32_t size = load_u32(bytes + offset + 4);
+        offset += 8;
+        const size_t row_bytes = kind == Kind::blocks ? sizeof(uint64_t) : context_bytes;
+        if ((kind != Kind::blocks && kind != Kind::address_context) || rows == 0 ||
+            rows > h.count - events || size != rows * row_bytes || size > h.detail - offset)
+            return Result<ContextCounts>::failure("Context-only group contains another signal");
+        if (kind == Kind::blocks) counts.blocks += rows;
+        else counts.contexts += rows;
+        events += rows;
+        offset += size;
+    }
+    if (events != h.count)
+        return Result<ContextCounts>::failure("Mixed event count does not match its runs");
+    return Result<ContextCounts>::success(counts);
+}
+
+struct ContextGroup final {
+    uint32_t source = 0;
+    uint64_t first_sequence = 0;
+    uint32_t blocks = 0;
+    uint32_t contexts = 0;
+};
+
+struct ContextColumns final {
+    char* blocks = nullptr;
+    char* block_sequences = nullptr;
+    char* context[8]{};
+    char* context_sequences = nullptr;
+};
+
+PyObject* allocate_context_columns(const ContextGroup& group, ContextColumns* columns) {
+    constexpr const char* context_names[] = {
+        "pc", "cr0", "cr3", "cr4", "efer", "cs_base", "mode", "known"
+    };
+    PyObject* result = PyDict_New();
+    if (result == nullptr) return nullptr;
+    if (group.blocks != 0) {
+        const auto blocks = add_buffer(result, "blocks", group.blocks * sizeof(uint64_t));
+        const auto sequences = add_buffer(
+            result, "block_sequences", group.blocks * sizeof(uint64_t));
+        if (!blocks.ok() || !sequences.ok()) { Py_DECREF(result); return nullptr; }
+        columns->blocks = blocks.value();
+        columns->block_sequences = sequences.value();
+    }
+    if (group.contexts == 0) return result;
+    PyObject* context = PyDict_New();
+    if (context == nullptr) { Py_DECREF(result); return nullptr; }
+    for (unsigned index = 0; index < 8; ++index) {
+        const auto added = add_buffer(
+            context, context_names[index], group.contexts * sizeof(uint64_t));
+        if (!added.ok()) { Py_DECREF(context); Py_DECREF(result); return nullptr; }
+        columns->context[index] = added.value();
+    }
+    const auto sequences = add_buffer(
+        context, "sequences", group.contexts * sizeof(uint64_t));
+    if (!sequences.ok() || PyDict_SetItemString(result, "context", context) != 0) {
+        Py_DECREF(context); Py_DECREF(result); return nullptr;
+    }
+    columns->context_sequences = sequences.value();
+    Py_DECREF(context);
+    return result;
+}
+
+void fill_context_columns(
+    const Header& h, const uint8_t* bytes, ContextColumns* columns,
+    uint32_t* block_row, uint32_t* context_row
+) {
+    size_t offset = 0;
+    uint32_t event_offset = 0;
+    while (offset < h.detail) {
+        const auto kind = static_cast<Kind>(load_u16(bytes + offset));
+        const uint32_t rows = load_u16(bytes + offset + 2);
+        offset += 8;
+        if (kind == Kind::blocks) {
+            for (uint32_t row = 0; row < rows; ++row) {
+                native_integer(columns->blocks, *block_row, load_u64(bytes + offset + row * 8));
+                native_integer(columns->block_sequences, *block_row, h.sequence + event_offset + row);
+                ++*block_row;
+            }
+            offset += rows * sizeof(uint64_t);
+        } else {
+            for (uint32_t row = 0; row < rows; ++row) {
+                for (unsigned column = 0; column < 8; ++column)
+                    native_integer(columns->context[column], *context_row,
+                        load_u64(bytes + offset + row * context_bytes + column * 8));
+                native_integer(columns->context_sequences, *context_row,
+                    h.sequence + event_offset + row);
+                ++*context_row;
+            }
+            offset += rows * context_bytes;
+        }
+        event_offset += rows;
+    }
+}
+
+PyObject* context_group_result(PyObject* frames, const char* error) {
+    PyObject* result = PyTuple_New(2);
+    PyObject* message = error == nullptr ? Py_None : PyUnicode_FromString(error);
+    if (message == Py_None) Py_INCREF(message);
+    if (result == nullptr || message == nullptr) {
+        Py_XDECREF(result);
+        Py_XDECREF(message);
+        Py_DECREF(frames);
+        return nullptr;
+    }
+    PyTuple_SET_ITEM(result, 0, frames);
+    PyTuple_SET_ITEM(result, 1, message);
+    return result;
+}
+
+// Context-only capture is common and its wire frames are deliberately small.
+// Validate several frames with one GIL release, then publish one owned column
+// set per source. Cross-source order is unspecified; each source's sequence is
+// still exact. The caller places control frames at group boundaries.
+PyObject* decode_context_frames(PyObject*, PyObject* arguments) {
+    PyObject* capsule = nullptr;
+    PyObject* argument = nullptr;
+    if (!PyArg_ParseTuple(arguments, "OO", &capsule, &argument)) return nullptr;
+    auto* stream = static_cast<Stream*>(PyCapsule_GetPointer(capsule, stream_name));
+    if (stream == nullptr) return nullptr;
+    PyObject* sequence = PySequence_Fast(argument, "frames must be a sequence");
+    if (sequence == nullptr) return nullptr;
+    const auto frame_count = PySequence_Fast_GET_SIZE(sequence);
+    if (frame_count < 1 || frame_count > static_cast<Py_ssize_t>(max_context_group_frames)) {
+        Py_DECREF(sequence);
+        PyErr_SetString(PyExc_ValueError, "Context group must contain between 1 and 32 frames");
+        return nullptr;
+    }
+
+    Py_buffer views[max_context_group_frames]{};
+    Header headers[max_context_group_frames]{};
+    Py_ssize_t acquired = 0;
+    const char* error = nullptr;
+    Py_ssize_t valid_headers = 0;
+    for (Py_ssize_t index = 0; index < frame_count; ++index) {
+        PyObject* item = PySequence_Fast_GET_ITEM(sequence, index);
+        if (PyObject_GetBuffer(item, &views[index], PyBUF_SIMPLE) != 0) break;
+        ++acquired;
+        const auto* bytes = static_cast<const uint8_t*>(views[index].buf);
+        const auto header = decode_header(
+            bytes, views[index].len >= static_cast<Py_ssize_t>(header_bytes) ? header_bytes : 0);
+        if (!header.ok()) { error = header.error(); break; }
+        headers[index] = header.value();
+        const auto size = payload_size(headers[index]);
+        if (views[index].len != static_cast<Py_ssize_t>(header_bytes + size)) {
+            error = "Trace frame length does not match its header";
+            break;
+        }
+        if (headers[index].kind != Kind::mixed) {
+            error = "Context group contains a non-mixed frame";
+            break;
+        }
+        ++valid_headers;
+    }
+    if (PyErr_Occurred()) {
+        for (Py_ssize_t index = 0; index < acquired; ++index) PyBuffer_Release(&views[index]);
+        Py_DECREF(sequence);
+        return nullptr;
+    }
+
+    Py_ssize_t accepted = 0;
+    const char* validation_error = nullptr;
+    Py_BEGIN_ALLOW_THREADS
+    for (; accepted < valid_headers; ++accepted) {
+        const auto* bytes = static_cast<const uint8_t*>(views[accepted].buf);
+        const auto result = stream->accept(headers[accepted], bytes + header_bytes);
+        if (!result.ok()) { validation_error = result.error(); break; }
+    }
+    Py_END_ALLOW_THREADS
+    if (validation_error != nullptr) error = validation_error;
+
+    ContextGroup groups[max_context_group_frames]{};
+    size_t group_count = 0;
+    for (Py_ssize_t index = 0; index < accepted; ++index) {
+        const auto* bytes = static_cast<const uint8_t*>(views[index].buf);
+        const auto counts = count_context_rows(headers[index], bytes + header_bytes);
+        if (!counts.ok()) { error = counts.error(); accepted = index; break; }
+        size_t group = 0;
+        while (group < group_count && groups[group].source != headers[index].source) ++group;
+        if (group == group_count) {
+            groups[group] = {headers[index].source, headers[index].sequence, 0, 0};
+            ++group_count;
+        }
+        groups[group].blocks += counts.value().blocks;
+        groups[group].contexts += counts.value().contexts;
+    }
+
+    PyObject* outputs = PyList_New(0);
+    if (outputs == nullptr) error = "Cannot allocate decoded frame list";
+    for (size_t group = 0; outputs != nullptr && group < group_count; ++group) {
+        ContextColumns columns;
+        PyObject* payload = allocate_context_columns(groups[group], &columns);
+        if (payload == nullptr) { Py_DECREF(outputs); outputs = nullptr; break; }
+        uint32_t block_row = 0;
+        uint32_t context_row = 0;
+        Py_BEGIN_ALLOW_THREADS
+        for (Py_ssize_t index = 0; index < accepted; ++index) {
+            if (headers[index].source != groups[group].source) continue;
+            const auto* bytes = static_cast<const uint8_t*>(views[index].buf);
+            fill_context_columns(headers[index], bytes + header_bytes, &columns,
+                                 &block_row, &context_row);
+        }
+        Py_END_ALLOW_THREADS
+        PyObject* decoded = Py_BuildValue("(IIIKKN)", static_cast<unsigned>(Kind::mixed),
+            groups[group].source, groups[group].blocks + groups[group].contexts,
+            static_cast<unsigned long long>(groups[group].first_sequence), 0ull, payload);
+        if (decoded == nullptr || PyList_Append(outputs, decoded) != 0) {
+            Py_XDECREF(decoded);
+            Py_DECREF(outputs);
+            outputs = nullptr;
+            break;
+        }
+        Py_DECREF(decoded);
+    }
+    for (Py_ssize_t index = 0; index < acquired; ++index) PyBuffer_Release(&views[index]);
+    Py_DECREF(sequence);
+    if (outputs == nullptr) return nullptr;
+    return context_group_result(outputs, error);
+}
+
 PyObject* decode(PyObject*, PyObject* arguments) {
     PyObject* capsule = nullptr;
     Py_buffer view{};
@@ -276,6 +511,8 @@ PyMethodDef methods[] = {
     {"new_stream", new_stream, METH_NOARGS, "Create validation state for one connection."},
     {"payload_size", header_size, METH_O, "Check a header and return its bounded payload size."},
     {"decode", decode, METH_VARARGS, "Validate a frame and return owned tensor columns."},
+    {"decode_context_frames", decode_context_frames, METH_VARARGS,
+     "Validate and collate a bounded context-only frame group."},
     {nullptr, nullptr, 0, nullptr}
 };
 PyModuleDef module = {PyModuleDef_HEAD_INIT, "_native", "Native trace validation.", -1,
