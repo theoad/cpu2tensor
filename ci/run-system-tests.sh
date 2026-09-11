@@ -28,6 +28,7 @@ export OMP_NUM_THREADS=1
 cmake -S "$root/native" -B "$work/native" -G Ninja \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DBUILD_TESTING=ON \
+    -DCPU2TENSOR_BUILD_KERNEL_EXAMPLE=ON \
     -DCPU2TENSOR_BUILD_WORKER=ON \
     -DCPU2TENSOR_QEMU_INCLUDE_DIR=/opt/qemu/include
 cmake --build "$work/native" --parallel 2

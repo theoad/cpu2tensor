@@ -11,6 +11,8 @@
 - [Instrumentation](instrumentation.md): current register/memory contract and limits.
 - [Repeated action windows](action-windows.md): guest boundaries and fixed
   per-vCPU transition counts.
+- [Custom kernel actions](custom-kernel-actions.md): client-owned syscall sequences
+  through the synchronous kernel protocol.
 - [Instrumentation probe](instrumentation-probe.md): reviewed AlphaFlow and QEMU evidence.
 - [Instrumentation results](instrumentation-results.md): current validation evidence.
 - [Capture efficiency](capture-efficiency.md): hot-path audit, ring/collector reference,

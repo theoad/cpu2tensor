@@ -4,6 +4,8 @@ Action windows let a kernel guest name the execution that belongs to one client
 action. The first implementation also provides a fixed-size native reducer for
 adjacent basic-block transitions. It keeps the synchronous `KernelEnv` API and
 does not add trajectory IDs, replay policy, or Python work on each block.
+The [custom kernel action example](custom-kernel-actions.md) applies this contract
+to two client-owned syscall-sequence variants in one episode.
 
 ## Guest boundary contract
 

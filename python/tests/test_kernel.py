@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from cpu2tensor.batch import Batch
+from cpu2tensor.examples.custom_kernel_actions import open_action, run as run_custom_actions
 from cpu2tensor.examples.learn_kernel import COMMANDS, SourceBlockFeatures, run, verify_result
 from cpu2tensor.kernel import KernelEnv
 from test_consumer import frame, worker
@@ -117,6 +118,42 @@ class KernelTests(unittest.TestCase):
         self.assertNotEqual(report_sizes[0], report_sizes[1])
         self.assertEqual(observed[0], observed[1])
         self.assertNotEqual(observed[1], observed[2])
+
+    def test_client_supplied_actions_use_complete_block_only_windows(self) -> None:
+        repetitions = 4
+
+        def serve(connection: socket.socket) -> None:
+            connection.sendall(frame(1, detail=2 | FEATURES | WINDOWS) + ready(0))
+            for step, variant in enumerate(("plain", "cloexec")):
+                self.assertEqual(read_action(connection), open_action(variant, repetitions))
+                result = {
+                    "event": "result", "step": step, "action": "open_sequence",
+                    "variant": variant, "repetitions": repetitions,
+                    "syscalls": repetitions * 3,
+                    "open_flags": 0 if variant == "plain" else 0x80000,
+                }
+                connection.sendall(
+                    frame(2, source=0, sequence=step * 2,
+                          addresses=(0x1000 + step, 0x2000 + step))
+                    + transition_frame(0, step + 1,
+                                       ((0x1000 + step, 0x2000 + step, 1),))
+                    + window_frame(step + 1, 1, sources=1, capacity=8,
+                                   distinct=1, observed=1)
+                    + event(result) + ready(step + 1)
+                )
+            self.assertEqual(read_action(connection), b"quit\n")
+            connection.sendall(window_frame(3, 1, sources=1, capacity=8,
+                                            distinct=0, observed=0)
+                               + frame(3, source=0, sequence=4)
+                               + event({"event": "complete", "steps": 2, "ok": True})
+                               + frame(4))
+
+        with interactive_worker(serve) as endpoint:
+            summaries = run_custom_actions(endpoint, repetitions)
+        self.assertEqual(summaries, [
+            {"variant": "plain", "repetitions": 4, "blocks": 2, "transitions": 1},
+            {"variant": "cloexec", "repetitions": 4, "blocks": 2, "transitions": 1},
+        ])
 
     @unittest.skipUnless(torch.backends.mps.is_available(), "MPS unavailable")
     def test_window_summary_empty_tensor_uses_configured_device(self) -> None:

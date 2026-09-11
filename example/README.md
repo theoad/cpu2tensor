@@ -3,6 +3,8 @@
 Start with [trace digits](trace_digits/README.md), then [stdin interaction](stdio_gym/README.md).
 [Kernel pretraining](kernel_pretraining/README.md) and [kernel actions](kernel_gym/README.md)
 show real full-system learning and paused-world actions.
+[Custom kernel actions](kernel_custom_actions/README.md) show how a client supplies
+a bounded syscall-sequence mutation grammar without changing `KernelEnv`.
 [Capture overhead](benchmark-capture/README.md) measures a signal selection against
 vanilla QEMU. [Tensor pipeline](benchmark-pipeline/README.md) measures full column
 upload and bounded rich-model updates across supplied endpoints.
