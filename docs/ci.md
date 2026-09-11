@@ -25,6 +25,12 @@ Docker layer cache avoids rebuilding those dependencies for ordinary commits.
 The image is development infrastructure; the package still does not install or
 ship QEMU.
 
+The README shows the latest `main` workflow result and combined Python/native
+line coverage. Same-repository runs upload their two Cobertura reports to
+Codecov with GitHub OIDC, so the public project needs no stored upload token.
+Forked pull requests still enforce both local 95% gates but do not receive an
+identity token or publish reports.
+
 Run the same checks locally from the repository root:
 
 ```sh

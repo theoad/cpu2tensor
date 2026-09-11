@@ -31,6 +31,7 @@ testpaths = ["python/tests"]
 [tool.coverage.run]
 source = ["cpu2tensor"]
 omit = ["*/cpu2tensor/examples/*"]
+relative_files = true
 
 [tool.coverage.report]
 fail_under = 95

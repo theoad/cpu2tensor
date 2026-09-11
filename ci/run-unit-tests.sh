@@ -41,9 +41,20 @@ python -m coverage erase
 python -m coverage run --source=cpu2tensor \
     -m pytest python/tests --quiet
 python -m coverage report --show-missing --fail-under=95
+if [[ -n "${CPU2TENSOR_COVERAGE_DIR:-}" ]]; then
+    mkdir -p "$CPU2TENSOR_COVERAGE_DIR"
+    python -m coverage xml -o "$CPU2TENSOR_COVERAGE_DIR/python.xml"
+fi
 
 gcovr --root "$root" "$work/native" "$work/python-build" \
     --filter "$root/native/core/" \
     --filter "$root/native/include/cpu2tensor/" \
     --exclude-unreachable-branches \
     --print-summary --fail-under-line 95
+if [[ -n "${CPU2TENSOR_COVERAGE_DIR:-}" ]]; then
+    gcovr --root "$root" "$work/native" "$work/python-build" \
+        --filter "$root/native/core/" \
+        --filter "$root/native/include/cpu2tensor/" \
+        --exclude-unreachable-branches \
+        --xml "$CPU2TENSOR_COVERAGE_DIR/native.xml" --xml-pretty
+fi

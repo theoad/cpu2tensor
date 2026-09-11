@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
@@ -39,11 +40,25 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Run unit tests with coverage
-        run: >-
-          docker run --rm
-          --volume "$PWD:/workspace"
-          cpu2tensor-ci:local
-          ./ci/run-unit-tests.sh
+        run: |
+          mkdir -p "$RUNNER_TEMP/cpu2tensor-coverage"
+          docker run --rm \
+            --env CPU2TENSOR_COVERAGE_DIR=/coverage \
+            --volume "$PWD:/workspace" \
+            --volume "$RUNNER_TEMP/cpu2tensor-coverage:/coverage" \
+            cpu2tensor-ci:local \
+            ./ci/run-unit-tests.sh
+
+      - name: Publish coverage
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          use_oidc: true
+          fail_ci_if_error: true
+          disable_search: true
+          files: ${{ runner.temp }}/cpu2tensor-coverage/python.xml,${{ runner.temp }}/cpu2tensor-coverage/native.xml
+          slug: ${{ github.repository }}
+          version: v10.4.0
 
       - name: Decide whether system tests are required
         id: system
