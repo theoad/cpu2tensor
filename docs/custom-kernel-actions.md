@@ -128,8 +128,8 @@ The host check exercises the guest grammar and oracle but cannot prove QEMU's
 stopped-world boundary. The generic action-window implementation has separate
 native and socket-fixture coverage. The pinned CI image passed 172 unit tests
 with 86 environment-dependent skips, 96% Python line coverage, and 96.3% native
-line coverage in 28 seconds. Its system gate passed all six native and six
-Python checks in 27 seconds.
+line coverage in 28 seconds. Its system gate passed seven native and six Python
+checks in 28 seconds, including fail-closed protocol emission coverage.
 
 On 2026-09-11, commit `104975c06cfd9bd7055f51622643fee170e06e14`
 was built and run on `trail-x86`: Linux x86-64, QEMU 11.0.3 TCG multi-thread

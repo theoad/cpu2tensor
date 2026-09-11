@@ -26,15 +26,20 @@ enum command_read_result {
 
 static int event_channel = STDOUT_FILENO;
 static int command_channel = STDIN_FILENO;
+static bool event_channel_failed = false;
 
 static bool emit_event(const char *format, ...)
 {
+    if (event_channel_failed) {
+        return false;
+    }
     char bytes[max_event_bytes];
     va_list arguments;
     va_start(arguments, format);
     const int formatted = vsnprintf(bytes, sizeof(bytes), format, arguments);
     va_end(arguments);
     if (formatted <= 0 || (size_t)formatted >= sizeof(bytes)) {
+        event_channel_failed = true;
         return false;
     }
     const size_t size = (size_t)formatted;
@@ -42,7 +47,13 @@ static bool emit_event(const char *format, ...)
     do {
         written = write(event_channel, bytes, size);
     } while (written < 0 && errno == EINTR);
-    return written == (ssize_t)size;
+    if (written != (ssize_t)size) {
+        // Appending after a short write would turn two valid events into one
+        // corrupt protocol line. A failed channel stays failed.
+        event_channel_failed = true;
+        return false;
+    }
+    return true;
 }
 
 static bool open_event_channel(void)
@@ -135,21 +146,21 @@ static bool parse_repetitions(const char *text, uint32_t *value)
     return true;
 }
 
-static void error_event(uint64_t step, const char *message)
+static bool error_event(uint64_t step, const char *message)
 {
-    (void)emit_event("C2T {\"event\":\"error\",\"step\":%" PRIu64
-                     ",\"message\":\"%s\"}\n", step, message);
+    return emit_event("C2T {\"event\":\"error\",\"step\":%" PRIu64
+                      ",\"message\":\"%s\"}\n", step, message);
 }
 
-static void ready_event(uint64_t step)
+static bool ready_event(uint64_t step)
 {
-    (void)emit_event("C2T {\"event\":\"ready\",\"step\":%" PRIu64 "}\n", step);
+    return emit_event("C2T {\"event\":\"ready\",\"step\":%" PRIu64 "}\n", step);
 }
 
-static void complete_event(uint64_t steps, bool ok)
+static bool complete_event(uint64_t steps, bool ok)
 {
-    (void)emit_event("C2T {\"event\":\"complete\",\"steps\":%" PRIu64
-                     ",\"ok\":%s}\n", steps, ok ? "true" : "false");
+    return emit_event("C2T {\"event\":\"complete\",\"steps\":%" PRIu64
+                      ",\"ok\":%s}\n", steps, ok ? "true" : "false");
 }
 
 static bool open_sequence(int flags, uint32_t repetitions)
@@ -187,7 +198,7 @@ static bool run_action(uint64_t step, const char *variant, uint32_t repetitions)
     const bool ok = open_sequence(flags, repetitions);
     if (!ok) {
         cpu2tensor_action_abort();
-        error_event(step, "open-read-close sequence failed");
+        (void)error_event(step, "open-read-close sequence failed");
         return false;
     }
     cpu2tensor_action_end();
@@ -203,17 +214,21 @@ static bool interact(void)
     uint64_t step = 0;
     char line[max_command_bytes];
     for (;;) {
-        ready_event(step);
+        if (!ready_event(step)) {
+            return false;
+        }
         const enum command_read_result read_result = read_command(line, sizeof(line));
         if (read_result == command_read_closed) {
-            error_event(step, "guest command input closed");
-            complete_event(step, false);
+            (void)error_event(step, "guest command input closed");
+            (void)complete_event(step, false);
             return false;
         }
         if (read_result == command_read_too_long) {
             cpu2tensor_action_begin();
             cpu2tensor_action_abort();
-            error_event(step, "command must fit one short line");
+            if (!error_event(step, "command must fit one short line")) {
+                return false;
+            }
             continue;
         }
         char *position = NULL;
@@ -224,8 +239,7 @@ static bool interact(void)
         if (action != NULL && strcmp(action, "quit") == 0 && variant == NULL) {
             cpu2tensor_action_begin();
             cpu2tensor_action_end();
-            complete_event(step, true);
-            return true;
+            return complete_event(step, true);
         }
         uint32_t repetitions = 0;
         if (action == NULL || strcmp(action, "open") != 0 || extra != NULL ||
@@ -233,11 +247,13 @@ static bool interact(void)
             (strcmp(variant, "plain") != 0 && strcmp(variant, "cloexec") != 0)) {
             cpu2tensor_action_begin();
             cpu2tensor_action_abort();
-            error_event(step, "expected open plain|cloexec REPETITIONS, or quit");
+            if (!error_event(step, "expected open plain|cloexec REPETITIONS, or quit")) {
+                return false;
+            }
             continue;
         }
         if (!run_action(step, variant, repetitions)) {
-            complete_event(step, false);
+            (void)complete_event(step, false);
             return false;
         }
         ++step;
@@ -274,8 +290,8 @@ int main(int argc, char **argv)
         poweroff();
     }
     if (!host_check && !mount_proc()) {
-        error_event(0, "cannot mount procfs");
-        complete_event(0, false);
+        (void)error_event(0, "cannot mount procfs");
+        (void)complete_event(0, false);
         poweroff();
     }
     if (!emit_event("C2T {\"event\":\"start\",\"mode\":\"interactive\","
