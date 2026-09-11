@@ -29,12 +29,15 @@ class RemoteKernelTests(unittest.TestCase):
         self.init = os.environ.get('CPU2TENSOR_KERNEL_INIT', f'{self.build}/kernel_init')
         symbols = self.ssh(['nm', '-n', self.init]).decode()
         self.begin = int(re.search(r'^([0-9a-f]+) T cpu2tensor_capture_begin$', symbols, re.M)[1], 16)
+        self.action_begin = int(re.search(r'^([0-9a-f]+) T cpu2tensor_action_begin$', symbols, re.M)[1], 16)
+        self.action_end = int(re.search(r'^([0-9a-f]+) T cpu2tensor_action_end$', symbols, re.M)[1], 16)
+        self.action_abort = int(re.search(r'^([0-9a-f]+) T cpu2tensor_action_abort$', symbols, re.M)[1], 16)
         self.parallel = int(re.search(r'^([0-9a-f]+) T cpu2tensor_parallel_memory$', symbols, re.M)[1], 16)
 
     def ssh(self, args):
         return subprocess.check_output(['ssh', '-o', 'BatchMode=yes', self.host, shlex.join(args)], timeout=20)
 
-    def start(self, *, interactive=True, episodes=1, rich=False, timeout=30000, start=None, full_boot=False, cpus='2', stop=None, batching='legacy', publication='pipe', workload_bytes=None, max_run_ms=None, context='auto'):
+    def start(self, *, interactive=True, episodes=1, rich=False, timeout=30000, start=None, full_boot=False, cpus='2', stop=None, batching='legacy', publication='pipe', workload_bytes=None, max_run_ms=None, context='auto', action_windows=False):
         port = int(self.ssh(['python3', '-c', 'import socket; s=socket.socket(); s.bind(("0.0.0.0",0)); print(s.getsockname()[1])']))
         args = [f'{self.build}/cpu2tensor-worker', '--qemu', self.qemu, '--plugin', f'{self.build}/libcpu2tensor_plugin.so',
                 '--system', 'on', '--host', self.address, '--port', str(port), '--episodes', str(episodes),
@@ -49,6 +52,12 @@ class RemoteKernelTests(unittest.TestCase):
             args += ['--stop-pc', hex(stop)]
         if interactive:
             args += ['--kernel-adapter', 'on']
+            if action_windows:
+                args += ['--window-start-pc', hex(self.action_begin),
+                         '--window-end-pc', hex(self.action_end),
+                         '--window-abort-pc', hex(self.action_abort),
+                         '--reducer', 'block-transitions',
+                         '--transition-capacity', '4096']
         else:
             # This example guest always reports its finite workload over ttyS1.
             # The managed observation protocol validates those records without
@@ -196,6 +205,37 @@ class RemoteKernelTests(unittest.TestCase):
                 self.assertTrue(torch.isfinite(weight.grad).all())
             self.drain(env.step(b'quit\n'))
             self.assertEqual(env.exit_code, 0)
+        self.assertIn('"ok":true', self.finish())
+
+    def test_action_windows_ignore_transport_size_and_distinguish_bodies(self):
+        endpoint = self.start(action_windows=True, timeout=120000)
+        commands = (b'compute 257 0\n', b'compute 0000000257 64\n',
+                    b'compute 521 0\n')
+        observed = []
+        report_sizes = []
+        with KernelEnv(endpoint, timeout=120) as env:
+            self.drain(env.reset())
+            for command in commands:
+                batches = list(env.step(command))
+                observed.append(tuple(sorted(
+                    (batch.source, int(source), int(destination), int(count))
+                    for batch in batches if batch.transitions is not None
+                    for source, destination, count in zip(
+                        batch.transitions.from_addresses,
+                        batch.transitions.destinations,
+                        batch.transitions.counts, strict=True)
+                )))
+                report_sizes.append(len(str(env.result)))
+                summary = next(batch.transition_window for batch in batches
+                               if batch.transition_window is not None)
+                self.assertTrue(summary.complete)
+            self.drain(env.step(b'quit\n'))
+            self.assertEqual(env.exit_code, 0)
+        self.assertNotEqual(len(commands[0]), len(commands[1]))
+        self.assertNotEqual(report_sizes[0], report_sizes[1])
+        self.assertEqual(observed[0], observed[1])
+        self.assertNotEqual(observed[1], observed[2])
+        self.assertTrue(observed[0])
         self.assertIn('"ok":true', self.finish())
 
     def test_paused_and_midstream_reset_reap_old_guests(self):

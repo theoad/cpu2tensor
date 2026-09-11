@@ -26,6 +26,7 @@ enum {
     max_memory_bytes = 65536,
     max_pipe_bytes = 256,
     max_command_bytes = 128,
+    max_report_padding_bytes = 64,
     max_kernel_command_bytes = 4096,
     max_event_bytes = 1024,
     default_memory_bytes = 4096,
@@ -47,6 +48,23 @@ struct options {
 // The worker may use this stable guest PC for explicit postboot capture.
 // It changes no guest state and introduces no instrumentation transport ABI.
 __attribute__((noinline)) void cpu2tensor_capture_begin(void)
+{
+    __asm__ volatile("" ::: "memory");
+}
+
+// These function addresses are the guest-to-plugin action boundary contract.
+// They perform no transport and deliberately remain separate basic blocks.
+__attribute__((noinline)) void cpu2tensor_action_begin(void)
+{
+    __asm__ volatile("" ::: "memory");
+}
+
+__attribute__((noinline)) void cpu2tensor_action_end(void)
+{
+    __asm__ volatile("" ::: "memory");
+}
+
+__attribute__((noinline)) void cpu2tensor_action_abort(void)
 {
     __asm__ volatile("" ::: "memory");
 }
@@ -180,17 +198,68 @@ static uint8_t next_byte(uint32_t *state)
     return (uint8_t)(*state >> 24);
 }
 
-static bool memory_action(uint64_t step, uint32_t seed, uint32_t count)
+// This bounded action is an oracle for the action-window contract. Equivalent
+// numeric commands execute the same body even when their text and reports have
+// different sizes. A different iteration count changes the enclosed trace.
+__attribute__((noinline)) uint64_t cpu2tensor_compute(uint32_t iterations)
 {
+    volatile uint64_t value = UINT64_C(0x9e3779b97f4a7c15);
+    for (uint32_t index = 0; index < iterations; ++index) {
+        value ^= value << 7;
+        value ^= value >> 9;
+        value += index;
+    }
+    return value;
+}
+
+static bool compute_result(uint64_t step, uint32_t iterations, uint32_t padding,
+                           uint64_t value)
+{
+    char report_padding[max_report_padding_bytes + 1];
+    memset(report_padding, 'x', padding);
+    report_padding[padding] = 0;
+    return emit_event("C2T {\"event\":\"result\",\"step\":%" PRIu64
+                      ",\"action\":\"compute\",\"iterations\":%" PRIu32
+                      ",\"value\":%" PRIu64 ",\"padding\":\"%s\"}\n",
+                      step, iterations, value, report_padding);
+}
+
+static void begin_action(bool windowed)
+{
+    if (windowed) {
+        cpu2tensor_action_begin();
+    }
+}
+
+static void end_action(bool windowed, bool ok)
+{
+    if (!windowed) {
+        return;
+    }
+    if (ok) {
+        cpu2tensor_action_end();
+    } else {
+        cpu2tensor_action_abort();
+    }
+}
+
+static bool action_error(uint64_t step, bool windowed, const char *message)
+{
+    end_action(windowed, false);
+    (void)error_event(step, message);
+    return false;
+}
+
+static bool memory_action(uint64_t step, uint32_t seed, uint32_t count, bool windowed)
+{
+    begin_action(windowed);
     if (count == 0 || count > max_memory_bytes) {
-        error_event(step, "guest memory size is outside the allowed range");
-        return false;
+        return action_error(step, windowed, "guest memory size is outside the allowed range");
     }
     void *mapping = mmap(NULL, count, PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (mapping == MAP_FAILED) {
-        error_event(step, "cannot allocate guest memory");
-        return false;
+        return action_error(step, windowed, "cannot allocate guest memory");
     }
     // Keep actual loads and stores visible to instrumentation at any build level.
     volatile uint8_t *bytes = mapping;
@@ -203,25 +272,24 @@ static bool memory_action(uint64_t step, uint32_t seed, uint32_t count)
         checksum += bytes[index];
     }
     if (munmap(mapping, count) != 0) {
-        error_event(step, "cannot release guest memory");
-        return false;
+        return action_error(step, windowed, "cannot release guest memory");
     }
+    end_action(windowed, true);
     return emit_event("C2T {\"event\":\"result\",\"step\":%" PRIu64
                       ",\"action\":\"memory\",\"seed\":%" PRIu32
                       ",\"bytes\":%" PRIu32 ",\"checksum\":%" PRIu64 "}\n",
                       step, seed, count, checksum);
 }
 
-static bool pipe_action(uint64_t step, uint32_t seed, uint32_t count)
+static bool pipe_action(uint64_t step, uint32_t seed, uint32_t count, bool windowed)
 {
+    begin_action(windowed);
     if (count == 0 || count > max_pipe_bytes) {
-        error_event(step, "guest pipe size is outside the allowed range");
-        return false;
+        return action_error(step, windowed, "guest pipe size is outside the allowed range");
     }
     int descriptors[2];
     if (pipe(descriptors) != 0) {
-        error_event(step, "cannot create guest pipe");
-        return false;
+        return action_error(step, windowed, "cannot create guest pipe");
     }
     uint8_t sent[max_pipe_bytes];
     uint8_t received[max_pipe_bytes];
@@ -237,8 +305,7 @@ static bool pipe_action(uint64_t step, uint32_t seed, uint32_t count)
     close(descriptors[1]);
     if (written != (ssize_t)count) {
         close(descriptors[0]);
-        error_event(step, "cannot write complete guest pipe message");
-        return false;
+        return action_error(step, windowed, "cannot write complete guest pipe message");
     }
     size_t total = 0;
     uint64_t checksum = 0;
@@ -249,13 +316,11 @@ static bool pipe_action(uint64_t step, uint32_t seed, uint32_t count)
         }
         if (size <= 0 || (size_t)size > count - total) {
             close(descriptors[0]);
-            error_event(step, "cannot read complete guest pipe message");
-            return false;
+            return action_error(step, windowed, "cannot read complete guest pipe message");
         }
         if (memcmp(sent + total, received, (size_t)size) != 0) {
             close(descriptors[0]);
-            error_event(step, "guest pipe message changed");
-            return false;
+            return action_error(step, windowed, "guest pipe message changed");
         }
         for (size_t index = 0; index < (size_t)size; ++index) {
             checksum += received[index];
@@ -263,6 +328,7 @@ static bool pipe_action(uint64_t step, uint32_t seed, uint32_t count)
         total += (size_t)size;
     }
     close(descriptors[0]);
+    end_action(windowed, true);
     return emit_event("C2T {\"event\":\"result\",\"step\":%" PRIu64
                       ",\"action\":\"pipe\",\"seed\":%" PRIu32
                       ",\"bytes\":%" PRIu32 ",\"checksum\":%" PRIu64 "}\n",
@@ -362,13 +428,13 @@ static bool read_parallel_result(int descriptor, struct parallel_result *result,
     return true;
 }
 
-static bool parallel_action(uint64_t step, uint32_t seed, uint32_t count)
+static bool parallel_action(uint64_t step, uint32_t seed, uint32_t count, bool windowed)
 {
+    begin_action(windowed);
     cpu_set_t original;
     if (count == 0 || count > max_memory_bytes ||
         sched_getaffinity(0, sizeof(original), &original) != 0) {
-        error_event(step, "cannot configure bounded parallel work");
-        return false;
+        return action_error(step, windowed, "cannot configure bounded parallel work");
     }
     int cpus[2] = { -1, -1 };
     for (int cpu = 0, found = 0; cpu < CPU_SETSIZE && found < 2; ++cpu) {
@@ -377,21 +443,18 @@ static bool parallel_action(uint64_t step, uint32_t seed, uint32_t count)
         }
     }
     if (cpus[1] < 0) {
-        error_event(step, "parallel work needs two available CPUs");
-        return false;
+        return action_error(step, windowed, "parallel work needs two available CPUs");
     }
     struct start_gate *gate = mmap(NULL, sizeof(*gate), PROT_READ | PROT_WRITE,
                                    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (gate == MAP_FAILED) {
-        error_event(step, "cannot create parallel start gate");
-        return false;
+        return action_error(step, windowed, "cannot create parallel start gate");
     }
     atomic_init(&gate->ready[0], gate_waiting);
     atomic_init(&gate->ready[1], gate_waiting);
     if (!atomic_is_lock_free(&gate->ready[0])) {
         munmap(gate, sizeof(*gate));
-        error_event(step, "parallel start flags must be lock free");
-        return false;
+        return action_error(step, windowed, "parallel start flags must be lock free");
     }
     volatile uint8_t *bytes = mmap(NULL, count, PROT_READ | PROT_WRITE,
                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -478,9 +541,9 @@ cleanup:
         error = "cannot restore parallel workload resources";
     }
     if (!ok) {
-        error_event(step, error);
-        return false;
+        return action_error(step, windowed, error);
     }
+    end_action(windowed, true);
     return emit_event("C2T {\"event\":\"result\",\"step\":%" PRIu64
                       ",\"action\":\"parallel\",\"seed\":%" PRIu32
                       ",\"bytes\":%" PRIu32 ",\"cpu0\":%d,\"cpu1\":%d"
@@ -489,11 +552,14 @@ cleanup:
                       parent_result.checksum, child_result.checksum);
 }
 
-static bool getpid_action(uint64_t step)
+static bool getpid_action(uint64_t step, bool windowed)
 {
+    begin_action(windowed);
+    const pid_t value = getpid();
+    end_action(windowed, true);
     return emit_event("C2T {\"event\":\"result\",\"step\":%" PRIu64
                       ",\"action\":\"getpid\",\"value\":%jd}\n",
-                      step, (intmax_t)getpid());
+                      step, (intmax_t)value);
 }
 
 static bool complete_event(uint64_t steps, bool ok)
@@ -504,18 +570,18 @@ static bool complete_event(uint64_t steps, bool ok)
 
 static bool observe(const struct options *options)
 {
-    if (!getpid_action(0)) {
+    if (!getpid_action(0, false)) {
         return false;
     }
-    if (!memory_action(1, options->seed, options->bytes)) {
+    if (!memory_action(1, options->seed, options->bytes, false)) {
         (void)complete_event(1, false);
         return false;
     }
-    if (!pipe_action(2, options->seed, max_pipe_bytes)) {
+    if (!pipe_action(2, options->seed, max_pipe_bytes, false)) {
         (void)complete_event(2, false);
         return false;
     }
-    if (!parallel_action(3, options->seed, options->bytes)) {
+    if (!parallel_action(3, options->seed, options->bytes, false)) {
         (void)complete_event(3, false);
         return false;
     }
@@ -537,6 +603,8 @@ static bool interact(void)
             return false;
         }
         if (received == command_read_too_long) {
+            begin_action(true);
+            end_action(true, false);
             if (!error_event(step, "command must fit one short line")) {
                 return false;
             }
@@ -548,10 +616,12 @@ static bool interact(void)
         char *second = strtok_r(NULL, " \t\r\n", &position);
         char *extra = strtok_r(NULL, " \t\r\n", &position);
         if (action != NULL && strcmp(action, "quit") == 0 && first == NULL) {
+            begin_action(true);
+            end_action(true, true);
             return complete_event(step, true);
         }
         if (action != NULL && strcmp(action, "getpid") == 0 && first == NULL) {
-            if (!getpid_action(step)) {
+            if (!getpid_action(step, true)) {
                 (void)complete_event(step, false);
                 return false;
             }
@@ -561,20 +631,34 @@ static bool interact(void)
         const bool memory = action != NULL && strcmp(action, "memory") == 0;
         const bool pipe = action != NULL && strcmp(action, "pipe") == 0;
         const bool parallel = action != NULL && strcmp(action, "parallel") == 0;
+        const bool compute = action != NULL && strcmp(action, "compute") == 0;
         uint32_t seed = 0;
         uint32_t count = 0;
-        const uint32_t limit = memory || parallel ? max_memory_bytes : max_pipe_bytes;
-        if ((!memory && !pipe && !parallel) || extra != NULL ||
-            !parse_number(first, UINT32_MAX, &seed) ||
-            !parse_number(second, limit, &count) || count == 0) {
-            if (!error_event(step, "expected getpid, memory/pipe/parallel SEED BYTES, or quit")) {
+        const uint32_t first_limit = compute ? max_memory_bytes : UINT32_MAX;
+        const uint32_t limit = memory || parallel ? max_memory_bytes :
+                               compute ? max_report_padding_bytes : max_pipe_bytes;
+        if ((!memory && !pipe && !parallel && !compute) || extra != NULL ||
+            !parse_number(first, first_limit, &seed) ||
+            !parse_number(second, limit, &count) || (!compute && count == 0) ||
+            (compute && seed == 0)) {
+            begin_action(true);
+            end_action(true, false);
+            if (!error_event(step, "expected getpid, memory/pipe/parallel SEED BYTES, compute ITERATIONS PADDING, or quit")) {
                 return false;
             }
             continue;
         }
-        const bool ok = memory ? memory_action(step, seed, count) :
-                        parallel ? parallel_action(step, seed, count) :
-                        pipe_action(step, seed, count);
+        bool ok;
+        if (compute) {
+            begin_action(true);
+            const uint64_t value = cpu2tensor_compute(seed);
+            end_action(true, true);
+            ok = compute_result(step, seed, count, value);
+        } else {
+            ok = memory ? memory_action(step, seed, count, true) :
+                 parallel ? parallel_action(step, seed, count, true) :
+                 pipe_action(step, seed, count, true);
+        }
         if (!ok) {
             (void)complete_event(step, false);
             return false;

@@ -114,6 +114,7 @@ uint64_t window_abort_pc = 0;
 bool reduce_transitions = false;
 uint32_t transition_capacity = 4096;
 TransitionWindow transition_window;
+bool action_window_expected = false;
 bool mixed_batches = false;
 bool ring_publication = false;
 pthread_t collector_thread{};
@@ -791,12 +792,12 @@ void source_idle(qemu_plugin_id_t, unsigned int index)
     if (source.state == State::active) flush(index, source);
 }
 
-void publish_transition_window()
+bool publish_transition_window()
 {
     const auto closed = transition_window.close();
     if (!closed.ok()) fail(Failure::capture, closed.error());
     const auto summary = closed.value();
-    if (summary.status == WindowStatus::none) return;
+    if (summary.status == WindowStatus::none) return false;
     constexpr uint32_t rows_per_frame =
         static_cast<uint32_t>(max_payload_bytes / transition_count_bytes);
     uint8_t frame[max_frame_bytes];
@@ -830,6 +831,7 @@ void publish_transition_window()
     store_u64(output + 32, summary.overflow);
     if (!publish(frame, header_bytes + transition_window_bytes).ok())
         fail(Failure::transport, "cpu2tensor: cannot publish transition window\n");
+    return true;
 }
 
 void* control(void*)
@@ -863,9 +865,16 @@ void* control(void*)
         if (transition_window.open())
             fail(Failure::capture,
                  "cpu2tensor: guest requested an action before ending or aborting its window\n");
-        publish_transition_window();
-        if (!closing.load(std::memory_order_acquire))
+        const bool published_window = publish_transition_window();
+        if (has_window_start_pc && published_window != action_window_expected)
+            fail(Failure::capture, action_window_expected ?
+                 "cpu2tensor: guest requested its next action without a completed window\n" :
+                 "cpu2tensor: guest completed an action window before receiving an action\n");
+        action_window_expected = false;
+        if (!closing.load(std::memory_order_acquire)) {
             send_header({Kind::kernel_request, 0, 0, 0, 127});
+            if (has_window_start_pc) action_window_expected = true;
+        }
     }
     return nullptr;
 }
@@ -892,7 +901,12 @@ void finish(qemu_plugin_id_t, void*)
                 if (ring_publication) wait_for_frames(sources[index]);
             }
         }
-        publish_transition_window();
+        const bool published_window = publish_transition_window();
+        if (published_window != action_window_expected)
+            fail(Failure::capture, action_window_expected ?
+                 "cpu2tensor: guest exited without a completed action window\n" :
+                 "cpu2tensor: guest exited with an unexpected action window\n");
+        action_window_expected = false;
     }
     for (unsigned int index = 0; index < max_sources; ++index) {
         const ColdLock lock(sources[index]);

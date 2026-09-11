@@ -88,10 +88,24 @@ static void check_format_failures_do_not_write(void)
     assert(write_calls == 0);
 }
 
+static void check_compute_report_is_outside_the_action_body(void)
+{
+    reset(write_complete);
+    const uint64_t first = cpu2tensor_compute(257);
+    const uint64_t second = cpu2tensor_compute(257);
+    const uint64_t different = cpu2tensor_compute(521);
+    assert(first == second);
+    assert(first != different);
+    assert(compute_result(3, 257, 5, first));
+    static const char padding[] = "\"padding\":\"xxxxx\"";
+    assert(memmem(captured, captured_size, padding, sizeof(padding) - 1) != NULL);
+}
+
 int main(void)
 {
     check_complete_write();
     check_eintr_retry();
     check_partial_write_latches_failure();
     check_format_failures_do_not_write();
+    check_compute_report_is_outside_the_action_body();
 }
