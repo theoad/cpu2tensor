@@ -12,6 +12,17 @@ and cache-control bits lets one address space migrate between vCPUs. Both the ra
 gate value and compared root are present in the final metadata. They identify a
 relation within one run; neither value is a PID or a stable identity across boots.
 
+The filter deliberately has no process or syscall attribution semantics. Linux
+may use a distinct, paired kernel page-table root while Kernel Page Table
+Isolation (KPTI) handles a syscall or interrupt. That root is `foreign` because
+cpu2tensor has no generic evidence that it belongs to the process whose user root
+was latched. With the default `drop` policy, those kernel-side transactions are
+therefore omitted. The current relation guarantees capture under the exact
+normalized root only; it does not guarantee complete syscall activity for a
+process. A workload or benchmark must state its KPTI configuration and keep its
+acceptance values under the nominated root unless it separately validates a
+kernel-root relation.
+
 ```text
 cpu2tensor-worker \
   --qemu /operator/qemu-system-x86_64 \
@@ -45,8 +56,10 @@ Filtered memory callbacks use the CR3 cached at their owning block entry. x86
 paging-control writes terminate translated execution before a later memory
 instruction, so the next callback follows a new block entry and refreshed cache.
 This avoids a register read on every memory transaction. Events before the latch
-are explicitly `unknown`; the plugin does not guess their relation. Unfiltered
-capture retains its stronger per-memory callback context refresh.
+are explicitly `unknown`. A callback that races the short one-shot latch
+publication is also `unknown` and never waits for the gate vCPU. The plugin does
+not guess either relation. Unfiltered capture retains its stronger per-memory
+callback context refresh.
 
 The last yielded worker-wide batch contains `batch.context_filter`:
 
