@@ -50,6 +50,54 @@ def decode(frames: tuple[bytes, ...]):
     return tuple(_native.decode(stream, frame) for frame in frames)
 
 
+def trace_summary(decoded) -> dict:
+    sources = {}
+    ended = {}
+    complete = False
+    for kind, source, count, sequence, detail, payload in decoded:
+        if kind == 14:
+            state = sources.setdefault(source, {"sequences": [], "blocks": 0,
+                                                "contexts": 0, "address_sum": 0})
+            if "blocks" in payload:
+                addresses = [value[0] for value in struct.iter_unpack("<Q", payload["blocks"])]
+                sequences = [value[0] for value in struct.iter_unpack(
+                    "<Q", payload["block_sequences"]
+                )]
+                if len(addresses) != len(sequences):
+                    raise AssertionError("Block values and sequences have different row counts")
+                state["sequences"].extend(sequences)
+                state["blocks"] += len(addresses)
+                state["address_sum"] += sum(addresses)
+            if "context" in payload:
+                sequences = [value[0] for value in struct.iter_unpack(
+                    "<Q", payload["context"]["sequences"]
+                )]
+                state["sequences"].extend(sequences)
+                state["contexts"] += len(sequences)
+        elif kind in (2, 12):
+            state = sources.setdefault(source, {"sequences": [], "blocks": 0,
+                                                "contexts": 0, "address_sum": 0})
+            state["sequences"].extend(range(sequence, sequence + count))
+            state["blocks" if kind == 2 else "contexts"] += count
+            if kind == 2:
+                state["address_sum"] += sum(
+                    value[0] for value in struct.iter_unpack("<Q", payload)
+                )
+        elif kind == 3:
+            ended[source] = sequence
+        elif kind == 4:
+            complete = detail == 0
+    for source, state in sources.items():
+        tail = ended.get(source)
+        if tail is None or sorted(state["sequences"]) != list(range(tail)):
+            raise AssertionError(f"Source {source} rows are missing, repeated or unsealed")
+        del state["sequences"]
+        state["end_sequence"] = tail
+    if not complete or set(sources) != set(ended):
+        raise AssertionError("Trace does not complete every source")
+    return {"complete": True, "sources": sources}
+
+
 def run_worker(frames: tuple[bytes, ...], expected, iterations: int, check_every: bool):
     started = time.thread_time()
     result = None
@@ -120,6 +168,7 @@ def main() -> None:
     load_native(module)
     frames = read_frames(arguments.capture)
     expected = decode(frames)
+    summary = trace_summary(expected)
     # Stream validation establishes continuous per-source sequences and complete
     # termination. Equality checks every returned header and owned column byte.
     _, _, final_kind, _, _, _, final_detail = HEADER.unpack(frames[-1][:HEADER.size])
@@ -143,6 +192,7 @@ def main() -> None:
         "capture_bytes": arguments.capture.stat().st_size,
         "frames_per_iteration": len(frames),
         "rows_per_iteration": rows,
+        "trace_summary": summary,
         "iterations_per_worker": arguments.iterations,
         "repetitions": arguments.repetitions,
         "payload_check": "last" if arguments.check_last else "every replay",
