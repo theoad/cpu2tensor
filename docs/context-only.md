@@ -101,6 +101,12 @@ matched-event compression ratio. Context and blocks-only elapsed ranges overlap;
 no zero-cost or speedup claim is made. The public-reader fallback has correctness
 evidence but was not part of that timing comparison.
 
+Independent Pools can perform mixed block/context validation and native column
+filling concurrently within one Python process. The synchronous client and
+per-source rules are unchanged. See the [concurrent decode boundary and replay](concurrent-decode.md)
+for the exact GIL-held regions, 1/4/16 fixture results and remaining real-kernel
+performance check.
+
 ## Compatible development build
 
 On `trail-x86`, source and build are isolated under

@@ -8,6 +8,18 @@
 namespace {
 using namespace cpu2tensor;
 constexpr const char* stream_name = "cpu2tensor.Stream";
+
+class AllowThreads final {
+public:
+    AllowThreads() : _state(PyEval_SaveThread()) {}
+    ~AllowThreads() { PyEval_RestoreThread(_state); }
+    AllowThreads(const AllowThreads&) = delete;
+    AllowThreads& operator=(const AllowThreads&) = delete;
+
+private:
+    PyThreadState* _state;
+};
+
 void delete_stream(PyObject* capsule) { delete static_cast<Stream*>(PyCapsule_GetPointer(capsule, stream_name)); }
 PyObject* new_stream(PyObject*, PyObject*) {
     auto* stream = new (std::nothrow) Stream;
@@ -151,6 +163,118 @@ PyObject* decode_transitions(const Header& h, const uint8_t* bytes) {
     return result;
 }
 
+struct ContextMixedCounts final {
+    uint32_t blocks = 0;
+    uint32_t contexts = 0;
+};
+
+bool context_mixed_counts(const Header& h, const uint8_t* bytes, ContextMixedCounts& counts) {
+    size_t offset = 0;
+    uint32_t events = 0;
+    while (offset < h.detail) {
+        if (h.detail - offset < 8) return false;
+        const auto kind = static_cast<Kind>(load_u16(bytes + offset));
+        const uint32_t rows = load_u16(bytes + offset + 2);
+        const uint32_t size = load_u32(bytes + offset + 4);
+        offset += 8;
+        if ((kind != Kind::blocks && kind != Kind::address_context) || rows == 0 ||
+            rows > h.count - events || size > h.detail - offset ||
+            (kind == Kind::blocks && size != rows * sizeof(uint64_t)) ||
+            (kind == Kind::address_context && size != rows * context_bytes)) return false;
+        uint32_t& count = kind == Kind::blocks ? counts.blocks : counts.contexts;
+        if (rows > max_addresses - count) return false;
+        count += rows;
+        events += rows;
+        offset += size;
+    }
+    return events == h.count;
+}
+
+PyObject* decode_context_mixed(Stream& stream, const Header& h, const uint8_t* bytes,
+                               const ContextMixedCounts& counts) {
+    PyObject* result = PyDict_New();
+    if (result == nullptr) return nullptr;
+    char* blocks = nullptr;
+    char* block_sequences = nullptr;
+    if (counts.blocks != 0) {
+        const auto added_blocks = add_buffer(result, "blocks", counts.blocks * sizeof(uint64_t));
+        const auto added_sequences = add_buffer(result, "block_sequences",
+                                                 counts.blocks * sizeof(uint64_t));
+        if (!added_blocks.ok() || !added_sequences.ok()) { Py_DECREF(result); return nullptr; }
+        blocks = added_blocks.value();
+        block_sequences = added_sequences.value();
+    }
+
+    char* context_columns[8]{};
+    char* context_sequences = nullptr;
+    constexpr const char* context_names[] = {
+        "pc", "cr0", "cr3", "cr4", "efer", "cs_base", "mode", "known"
+    };
+    if (counts.contexts != 0) {
+        PyObject* context = PyDict_New();
+        if (context == nullptr) { Py_DECREF(result); return nullptr; }
+        for (unsigned column = 0; column < 8; ++column) {
+            const auto added = add_buffer(context, context_names[column],
+                                          counts.contexts * sizeof(uint64_t));
+            if (!added.ok()) { Py_DECREF(context); Py_DECREF(result); return nullptr; }
+            context_columns[column] = added.value();
+        }
+        const auto added_sequences = add_buffer(context, "sequences",
+                                                 counts.contexts * sizeof(uint64_t));
+        if (!added_sequences.ok() || PyDict_SetItemString(result, "context", context) != 0) {
+            Py_DECREF(context); Py_DECREF(result); return nullptr;
+        }
+        context_sequences = added_sequences.value();
+        Py_DECREF(context);
+    }
+
+    Result<Done> accepted = Result<Done>::failure("Mixed frame was not validated");
+    {
+        // All Python objects remain private and strongly referenced here. The
+        // borrowed input is pinned by Py_buffer until this function returns.
+        AllowThreads allow_threads;
+        accepted = stream.accept(h, bytes);
+        if (accepted.ok()) {
+            size_t offset = 0;
+            uint32_t event_offset = 0;
+            uint32_t block_row = 0;
+            uint32_t context_row = 0;
+            while (offset < h.detail) {
+                const auto kind = static_cast<Kind>(load_u16(bytes + offset));
+                const uint32_t rows = load_u16(bytes + offset + 2);
+                const uint32_t size = load_u32(bytes + offset + 4);
+                offset += 8;
+                if (kind == Kind::blocks) {
+                    for (uint32_t row = 0; row < rows; ++row) {
+                        native_integer(blocks, block_row, load_u64(bytes + offset + row * 8));
+                        native_integer(block_sequences, block_row,
+                                       h.sequence + event_offset + row);
+                        ++block_row;
+                    }
+                } else {
+                    for (uint32_t row = 0; row < rows; ++row) {
+                        const uint8_t* item = bytes + offset + row * context_bytes;
+                        for (unsigned column = 0; column < 8; ++column)
+                            native_integer(context_columns[column], context_row,
+                                           load_u64(item + column * 8));
+                        native_integer(context_sequences, context_row,
+                                       h.sequence + event_offset + row);
+                        ++context_row;
+                    }
+                }
+                event_offset += rows;
+                offset += size;
+            }
+        }
+    }
+    if (!accepted.ok()) {
+        Py_DECREF(result);
+        PyErr_SetString(PyExc_ValueError, accepted.error());
+        return nullptr;
+    }
+    return result;
+}
+
 struct MixedTable final {
     size_t size = 0;
     uint32_t count = 0;
@@ -245,26 +369,42 @@ PyObject* decode(PyObject*, PyObject* arguments) {
     if (view.len != static_cast<Py_ssize_t>(header_bytes + size)) {
         PyBuffer_Release(&view); PyErr_SetString(PyExc_ValueError, "Trace frame length does not match its header"); return nullptr;
     }
-    const auto accepted = stream->accept(frame, bytes + header_bytes);
-    if (!accepted.ok()) { PyBuffer_Release(&view); PyErr_SetString(PyExc_ValueError, accepted.error()); return nullptr; }
     PyObject* payload = nullptr;
-    if (frame.kind == Kind::register_schema) payload = decode_schema(frame, bytes + header_bytes);
-    else if (frame.kind == Kind::registers || frame.kind == Kind::memory)
-        payload = decode_signals(frame, bytes + header_bytes, stream->memory_values(), stream->system_memory());
-    else if (frame.kind == Kind::address_context) payload = decode_context(frame, bytes + header_bytes);
-    else if (frame.kind == Kind::block_transitions)
-        payload = decode_transitions(frame, bytes + header_bytes);
-    else if (frame.kind == Kind::mixed)
-        payload = decode_mixed(frame, bytes + header_bytes, stream->memory_values(), stream->system_memory());
-    else {
-        payload = PyByteArray_FromStringAndSize(nullptr, size);
-        if (payload != nullptr && (frame.kind == Kind::guest_event ||
-                                   frame.kind == Kind::transition_window))
-            std::memcpy(PyByteArray_AsString(payload), bytes + header_bytes, size);
-        if (payload != nullptr && (frame.kind == Kind::blocks || frame.kind == Kind::executable_layout)) {
-            char* destination = PyByteArray_AsString(payload);
-            for (size_t row = 0; row < size / sizeof(uint64_t); ++row)
-                native_integer(destination, row, load_u64(bytes + header_bytes + row * sizeof(uint64_t)));
+    ContextMixedCounts context_mixed;
+    const bool direct_context_mixed = frame.kind == Kind::mixed &&
+        context_mixed_counts(frame, bytes + header_bytes, context_mixed);
+    if (direct_context_mixed) {
+        payload = decode_context_mixed(*stream, frame, bytes + header_bytes, context_mixed);
+    } else {
+        const auto accepted = stream->accept(frame, bytes + header_bytes);
+        if (!accepted.ok()) {
+            PyBuffer_Release(&view);
+            PyErr_SetString(PyExc_ValueError, accepted.error());
+            return nullptr;
+        }
+        if (frame.kind == Kind::register_schema) payload = decode_schema(frame, bytes + header_bytes);
+        else if (frame.kind == Kind::registers || frame.kind == Kind::memory)
+            payload = decode_signals(frame, bytes + header_bytes,
+                                     stream->memory_values(), stream->system_memory());
+        else if (frame.kind == Kind::address_context)
+            payload = decode_context(frame, bytes + header_bytes);
+        else if (frame.kind == Kind::block_transitions)
+            payload = decode_transitions(frame, bytes + header_bytes);
+        else if (frame.kind == Kind::mixed)
+            payload = decode_mixed(frame, bytes + header_bytes,
+                                   stream->memory_values(), stream->system_memory());
+        else {
+            payload = PyByteArray_FromStringAndSize(nullptr, size);
+            if (payload != nullptr && (frame.kind == Kind::guest_event ||
+                                       frame.kind == Kind::transition_window))
+                std::memcpy(PyByteArray_AsString(payload), bytes + header_bytes, size);
+            if (payload != nullptr &&
+                (frame.kind == Kind::blocks || frame.kind == Kind::executable_layout)) {
+                char* destination = PyByteArray_AsString(payload);
+                for (size_t row = 0; row < size / sizeof(uint64_t); ++row)
+                    native_integer(destination, row,
+                                   load_u64(bytes + header_bytes + row * sizeof(uint64_t)));
+            }
         }
     }
     PyBuffer_Release(&view);
