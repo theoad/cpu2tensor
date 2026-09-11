@@ -101,6 +101,12 @@ matched-event compression ratio. Context and blocks-only elapsed ranges overlap;
 no zero-cost or speedup claim is made. The public-reader fallback has correctness
 evidence but was not part of that timing comparison.
 
+The [concurrent decode investigation](concurrent-decode.md) reproduces the
+shared-interpreter ceiling at 1/4/16 readers. Releasing the GIL once per mixed
+frame made the larger threaded replay slower, so that candidate was removed.
+Bounded multi-frame decode now reduces native publications and passes exactness,
+incremental-latency and repeated real x86 1/4/16 scaling checks.
+
 ## Compatible development build
 
 On `trail-x86`, source and build are isolated under

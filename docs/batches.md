@@ -56,8 +56,12 @@ not individual events. Independent vCPUs do not acquire a shared per-event lock.
 The pipe and socket are bounded. A slow consumer can block publication and pause
 execution; it must never silently drop entries. This changes timing.
 
-The receiver validates one frame at a time in native code. It returns one owned
-byte buffer per batch, not Python objects per event. Tensors own their storage;
+The receiver normally validates one frame at a time in native code. For the
+context-only mixed profile it can validate up to 32 complete frames together and
+return one owned column set per source. It never waits for a partial successor to
+fill a group. Control frames end the group, including SourceEnd and Complete.
+Other profiles retain their wire-frame ownership and publication behavior.
+Neither path creates Python objects per event. Tensors own their storage;
 retaining a batch cannot expose a later recycled receive buffer. Client retention
 is explicit user-owned memory; the pool does not retain consumed batches.
 
