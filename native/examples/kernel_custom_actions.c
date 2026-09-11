@@ -5,6 +5,7 @@
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,9 +13,94 @@
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <termios.h>
 #include <unistd.h>
 
-enum { max_command_bytes = 96, max_repetitions = 64 };
+enum { max_command_bytes = 96, max_event_bytes = 512, max_repetitions = 64 };
+
+enum command_read_result {
+    command_read_ok,
+    command_read_closed,
+    command_read_too_long,
+};
+
+static int event_channel = STDOUT_FILENO;
+static int command_channel = STDIN_FILENO;
+
+static bool emit_event(const char *format, ...)
+{
+    char bytes[max_event_bytes];
+    va_list arguments;
+    va_start(arguments, format);
+    const int formatted = vsnprintf(bytes, sizeof(bytes), format, arguments);
+    va_end(arguments);
+    if (formatted <= 0 || (size_t)formatted >= sizeof(bytes)) {
+        return false;
+    }
+    const size_t size = (size_t)formatted;
+    ssize_t written;
+    do {
+        written = write(event_channel, bytes, size);
+    } while (written < 0 && errno == EINTR);
+    return written == (ssize_t)size;
+}
+
+static bool open_event_channel(void)
+{
+    const int descriptor = open("/dev/ttyS1", O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    if (descriptor < 0) {
+        return false;
+    }
+    struct termios settings;
+    const int flags = fcntl(descriptor, F_GETFL);
+    if (tcgetattr(descriptor, &settings) != 0 || flags < 0) {
+        close(descriptor);
+        return false;
+    }
+    settings.c_cflag |= CLOCAL | CREAD;
+    settings.c_iflag &= ~INLCR;
+    settings.c_lflag |= ICANON;
+    settings.c_lflag &= ~(ECHO | ECHONL);
+    if (tcsetattr(descriptor, TCSANOW, &settings) != 0 ||
+        fcntl(descriptor, F_SETFL, flags & ~O_NONBLOCK) != 0) {
+        close(descriptor);
+        return false;
+    }
+    event_channel = descriptor;
+    command_channel = descriptor;
+    return true;
+}
+
+static enum command_read_result read_command(char *line, size_t capacity)
+{
+    size_t used = 0;
+    while (used + 1 < capacity) {
+        ssize_t size;
+        do {
+            size = read(command_channel, line + used, 1);
+        } while (size < 0 && errno == EINTR);
+        if (size <= 0) {
+            return command_read_closed;
+        }
+        used += (size_t)size;
+        if (line[used - 1] == '\n') {
+            line[used] = 0;
+            return command_read_ok;
+        }
+    }
+
+    char byte;
+    do {
+        ssize_t size;
+        do {
+            size = read(command_channel, &byte, 1);
+        } while (size < 0 && errno == EINTR);
+        if (size <= 0) {
+            break;
+        }
+    } while (byte != '\n');
+    return command_read_too_long;
+}
 
 // The operator passes these three addresses from this exact ELF to the worker.
 // Different no-op bodies keep the three externally resolved PCs distinct. The
@@ -51,19 +137,19 @@ static bool parse_repetitions(const char *text, uint32_t *value)
 
 static void error_event(uint64_t step, const char *message)
 {
-    printf("C2T {\"event\":\"error\",\"step\":%" PRIu64
-           ",\"message\":\"%s\"}\n", step, message);
+    (void)emit_event("C2T {\"event\":\"error\",\"step\":%" PRIu64
+                     ",\"message\":\"%s\"}\n", step, message);
 }
 
 static void ready_event(uint64_t step)
 {
-    printf("C2T {\"event\":\"ready\",\"step\":%" PRIu64 "}\n", step);
+    (void)emit_event("C2T {\"event\":\"ready\",\"step\":%" PRIu64 "}\n", step);
 }
 
 static void complete_event(uint64_t steps, bool ok)
 {
-    printf("C2T {\"event\":\"complete\",\"steps\":%" PRIu64
-           ",\"ok\":%s}\n", steps, ok ? "true" : "false");
+    (void)emit_event("C2T {\"event\":\"complete\",\"steps\":%" PRIu64
+                     ",\"ok\":%s}\n", steps, ok ? "true" : "false");
 }
 
 static bool open_sequence(int flags, uint32_t repetitions)
@@ -105,12 +191,11 @@ static bool run_action(uint64_t step, const char *variant, uint32_t repetitions)
         return false;
     }
     cpu2tensor_action_end();
-    printf("C2T {\"event\":\"result\",\"step\":%" PRIu64
-           ",\"action\":\"open_sequence\",\"variant\":\"%s\""
-           ",\"repetitions\":%" PRIu32 ",\"syscalls\":%" PRIu32
-           ",\"open_flags\":%d}\n",
-           step, variant, repetitions, repetitions * UINT32_C(3), flags);
-    return true;
+    return emit_event("C2T {\"event\":\"result\",\"step\":%" PRIu64
+                      ",\"action\":\"open_sequence\",\"variant\":\"%s\""
+                      ",\"repetitions\":%" PRIu32 ",\"syscalls\":%" PRIu32
+                      ",\"open_flags\":%d}\n",
+                      step, variant, repetitions, repetitions * UINT32_C(3), flags);
 }
 
 static bool interact(void)
@@ -119,15 +204,13 @@ static bool interact(void)
     char line[max_command_bytes];
     for (;;) {
         ready_event(step);
-        if (fgets(line, sizeof(line), stdin) == NULL) {
+        const enum command_read_result read_result = read_command(line, sizeof(line));
+        if (read_result == command_read_closed) {
             error_event(step, "guest command input closed");
             complete_event(step, false);
             return false;
         }
-        if (strchr(line, '\n') == NULL) {
-            int byte;
-            while ((byte = getchar()) != '\n' && byte != EOF) {
-            }
+        if (read_result == command_read_too_long) {
             cpu2tensor_action_begin();
             cpu2tensor_action_abort();
             error_event(step, "command must fit one short line");
@@ -186,12 +269,22 @@ int main(int argc, char **argv)
         fputs("kernel_custom_actions: run as guest PID 1, or use --check\n", stderr);
         return 1;
     }
+    if (!host_check && !open_event_channel()) {
+        fputs("kernel_custom_actions: cannot open /dev/ttyS1\n", stderr);
+        poweroff();
+    }
     if (!host_check && !mount_proc()) {
         error_event(0, "cannot mount procfs");
         complete_event(0, false);
         poweroff();
     }
-    printf("C2T {\"event\":\"start\",\"adapter\":\"open-sequence-v1\"}\n");
+    if (!emit_event("C2T {\"event\":\"start\",\"mode\":\"interactive\","
+                    "\"adapter\":\"open-sequence-v1\"}\n")) {
+        if (!host_check) {
+            poweroff();
+        }
+        return 1;
+    }
     const bool ok = interact();
     if (!host_check) {
         poweroff();

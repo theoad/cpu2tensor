@@ -30,7 +30,10 @@ They use the existing protocol and add no package API.
 
 A custom guest must follow this ordering:
 
-1. Emit one `C2T {"event":"start",...}` after its serial channel is usable.
+1. Open `/dev/ttyS1` for both protocol events and commands, leaving stdout and
+   stderr on the diagnostic console. Emit one
+   `C2T {"event":"start","mode":"interactive",...}` after that private serial
+   channel is usable.
 2. Emit `ready` with step 0 before reading the first action.
 3. For every received command, enter the globally visible begin marker exactly
    once. Execute only the intended action inside the window. Reach either the end

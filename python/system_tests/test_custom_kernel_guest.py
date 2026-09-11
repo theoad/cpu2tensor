@@ -26,7 +26,9 @@ def test_custom_guest_runs_two_matched_actions_after_one_start() -> None:
     assert process.returncode == 0, process.stdout + process.stderr
     rows = [json.loads(line[4:]) for line in process.stdout.splitlines()
             if line.startswith("C2T ")]
-    assert rows[0] == {"event": "start", "adapter": "open-sequence-v1"}
+    assert rows[0] == {
+        "event": "start", "mode": "interactive", "adapter": "open-sequence-v1",
+    }
     assert [row for row in rows if row["event"] == "ready"] == [
         {"event": "ready", "step": 0},
         {"event": "ready", "step": 1},
@@ -51,3 +53,26 @@ def test_custom_guest_runs_two_matched_actions_after_one_start() -> None:
     }
     assert set(addresses) == set(names)
     assert len(set(addresses.values())) == 3
+
+
+def test_custom_guest_rejects_an_overlong_command_and_reads_the_next_one() -> None:
+    target = BUILD / "kernel_custom_actions"
+    process = subprocess.run(
+        [target, "--check"],
+        input=f"{'x' * 96}\nquit\n",
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert process.returncode == 0, process.stdout + process.stderr
+    rows = [json.loads(line[4:]) for line in process.stdout.splitlines()
+            if line.startswith("C2T ")]
+    assert [row for row in rows if row["event"] == "ready"] == [
+        {"event": "ready", "step": 0},
+        {"event": "ready", "step": 0},
+    ]
+    assert [row for row in rows if row["event"] == "error"] == [{
+        "event": "error", "step": 0,
+        "message": "command must fit one short line",
+    }]
+    assert rows[-1] == {"event": "complete", "steps": 0, "ok": True}
