@@ -78,3 +78,34 @@ early summary.
 renew it: pipe reads, socket sends and lossless backpressure all consume the same
 deadline. A timeout still kills and reaps only that worker's QEMU process and
 reports an incomplete trace.
+
+## Current acceptance status
+
+The portable two-source fixture validates exact kept values, source-local order,
+target migration, background exclusion, and final accounting. The Linux CI build
+also compiles the opt-in full-system fixture. This is contract evidence, not a
+kernel performance result.
+
+On 2026-09-11, two bounded attempts on `trail-x86` used the operator's x86-64
+QEMU 11.0.3 MTTCG build, two vCPUs, Linux `6.9.0-dirty`, and the new fixture.
+Both reached the 120-second absolute deadline before the guest reported its start
+or outcome; both workers and QEMU guests were reaped. Registering a full QEMU
+plugin callback for every boot memory access remains expensive even though the
+callback drops the row immediately. Changing the callback flag to `NO_REGS` is
+the correct declaration for the cached-CR3 path, but QEMU 11 documents memory
+callback flags as unused and this single rerun did not establish a completion or
+speed improvement. The retained issue baseline of 39.24 seconds and 16,689,464
+bytes is a different context-only workload, so it is not a matched comparison.
+
+The tested kernel configuration has
+`CONFIG_MITIGATION_PAGE_TABLE_ISOLATION=y`, and its command line contains no PTI
+override. Its boot log does not independently prove that PTI became active for
+this virtual CPU. The fixture therefore keeps its asserted target values in user
+space and makes no kernel-root attribution claim.
+
+This mode has not yet passed the real two-vCPU acceptance or demonstrated the
+requested size/runtime reduction. A complete optimization needs to avoid the
+pre-latch full memory callback while still instrumenting every target transaction
+after the latch, including target blocks translated earlier. Translation-time
+gating alone would silently lose those reused blocks and is not an acceptable
+substitute.
