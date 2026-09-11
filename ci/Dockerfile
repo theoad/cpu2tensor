@@ -5,7 +5,11 @@ ARG QEMU_VERSION=11.0.3
 ARG QEMU_SHA256=da5fcffc32762820568b828ed430a728864d34d50b6d2f30358597760cbb0523
 ARG TORCH_VERSION=2.7.1
 
-RUN apt-get update \
+RUN sed -i \
+        's|http://archive.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' \
+        /etc/apt/sources.list.d/ubuntu.sources \
+    && echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries \
+    && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
         build-essential ca-certificates cmake curl gcc-aarch64-linux-gnu \
         libc6-dev-arm64-cross libglib2.0-dev libjson-c-dev libpixman-1-dev \

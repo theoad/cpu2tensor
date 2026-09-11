@@ -17,7 +17,7 @@ jobs:
   test:
     name: Unit tests and selected system tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     outputs:
       coverage: ${{ steps.coverage.outputs.value }}
     steps:
