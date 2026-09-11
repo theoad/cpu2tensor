@@ -47,4 +47,4 @@ to revise as experiments produce evidence.
 - [Terminal outcomes](terminal-outcomes.md): typed reasons, endpoint attribution and transport evidence.
 
 - [Context-only blocks](context-only.md): paging attribution without register/memory traces and measured cost.
-- [Concurrent context-only decode](concurrent-decode.md): native GIL boundary and bounded 1/4/16 replay evidence.
+- [Concurrent context-only decode](concurrent-decode.md): reproduced GIL ceiling, rejected candidate and required native batching boundary.
