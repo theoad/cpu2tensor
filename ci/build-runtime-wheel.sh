@@ -42,6 +42,10 @@ if [[ $# -ne 1 ]]; then
     exit 2
 fi
 readonly bundle="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$(uname -s)" != Linux || "$(uname -m)" != x86_64 ]]; then
+    echo "This runtime requires Linux x86-64." >&2
+    exit 2
+fi
 if [[ "$1" != /* || -e "$1" ]]; then
     echo "The virtual-environment path must be absolute and unused." >&2
     exit 2
@@ -115,6 +119,15 @@ manifest = {
         "package_version": package_version,
     },
     "target": {
+        "builder_distribution": {
+            line.split("=", 1)[0]: line.split("=", 1)[1].strip('"')
+            for line in Path("/etc/os-release").read_text().splitlines()
+            if "=" in line and line.split("=", 1)[0] in {"ID", "VERSION_ID"}
+        },
+        "builder_libc": {
+            "name": platform.libc_ver()[0],
+            "version": platform.libc_ver()[1],
+        },
         "operating_system": "Linux",
         "machine": platform.machine(),
         "python_implementation": platform.python_implementation(),

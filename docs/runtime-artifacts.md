@@ -9,8 +9,9 @@ digest-pinned Ubuntu 24.04 image used by CI. It installs only those local wheels
 into a fresh virtual environment and checks a CPU tensor plus the cpu2tensor
 native decoder before publishing the archive. `runtime-manifest.json` records the
 full source commit, builder image identity, build-file hashes, Python identity and
-every wheel hash. `SHA256SUMS` covers the wheel directory, while the adjacent
-archive checksum covers the deterministic tarball.
+builder distribution/libc identity, and every wheel hash. `SHA256SUMS` covers the
+wheel directory, while the adjacent archive checksum covers the deterministic
+tarball.
 
 After downloading both workflow artifacts or release assets:
 
