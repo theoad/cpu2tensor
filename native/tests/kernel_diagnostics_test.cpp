@@ -434,6 +434,8 @@ int main(int argc, char** argv) {
     alarm(30);
     check_recovered_printk_suffix(argv[0]);
     check_observation_protocol(argv[0]);
+    check_failure(argv[0], "plain text on private serial\n",
+                  "reason=missing-event-prefix", false);
     check_failure(argv[0], "C2T {broken}\n", "reason=malformed-json", false);
     check_action_uses_adapter_channel(argv[0]);
     check_failure(argv[0], "C2T {broken}\n", "reason=malformed-json");

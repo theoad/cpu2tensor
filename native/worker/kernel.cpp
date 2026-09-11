@@ -382,6 +382,16 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
         }
         while (const size_t size = serial_lines.line_size()) {
             bool log_complete_line = true;
+            if (size < 4 || std::memcmp(serial_lines.bytes, "C2T ", 4) != 0) {
+                log_guest_failure(stderr, "missing-event-prefix",
+                                  serial_lines.bytes, size);
+                std::fprintf(stderr,
+                             "cpu2tensor: guest-event state hello=%d started=%d "
+                             "requested=%d draining=%d complete=%d pending_qmp=%d\n",
+                             hello, guest_started, requested, draining,
+                             guest_complete, pending);
+                return Result<bool>::failure("Invalid guest protocol line");
+            }
             if (size >= 4 && std::memcmp(serial_lines.bytes, "C2T ", 4) == 0) {
                 const char* bytes = serial_lines.bytes + 4;
                 size_t length = size - 4;
