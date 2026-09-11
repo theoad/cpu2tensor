@@ -40,7 +40,9 @@ static void test_slot_ownership() {
     assert(!ring.pop());
 }
 
-static constexpr uint64_t stress_frames = 1000000;
+// Hundreds of thousands of two-slot wraparounds catch stale publication while
+// leaving enough of the one-minute unit-test budget for the full Python suite.
+static constexpr uint64_t stress_frames = 200000;
 
 static size_t frame_size(uint64_t sequence) {
     return sizeof(sequence) + sequence % (frame_ring_max_bytes - sizeof(sequence) + 1);
