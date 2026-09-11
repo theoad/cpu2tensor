@@ -7,11 +7,14 @@ import threading
 import unittest
 from unittest import mock
 import weakref
+from types import SimpleNamespace
 
 import torch
 
 from cpu2tensor import Batch, ExecutableLayout, Pool
-from cpu2tensor._batching import BatchCollator, MAX_BATCH_BYTES, merge_batches, tensor_bytes
+from cpu2tensor._batching import (
+    BatchCollator, MAX_BATCH_BYTES, merge_batches, optional_column, tensor_bytes,
+)
 from test_address_context import FEATURES, access, context
 from test_consumer import frame, worker
 from test_mixed import run
@@ -37,6 +40,19 @@ def rich_trace():
 
 
 class BatchingTests(unittest.TestCase):
+    def test_invalid_collation_inputs_are_rejected_before_retention(self):
+        for size in (0, MAX_BATCH_BYTES + 1):
+            with self.subTest(size=size), self.assertRaisesRegex(ValueError, "between 1 and 4 MiB"):
+                BatchCollator(size)
+        collator = BatchCollator(64)
+        with self.assertRaisesRegex(ValueError, "source and sequence"):
+            collator.add(Batch(None, None, torch.tensor([1])))
+        with self.assertRaisesRegex(ValueError, "inconsistent optional column"):
+            optional_column(
+                [SimpleNamespace(values=None), SimpleNamespace(values=torch.tensor([1]))],
+                "values",
+            )
+
     def test_budget_flushes_oldest_source_and_handles_one_oversized_frame(self):
         collator = BatchCollator(32)
         for source in range(7):

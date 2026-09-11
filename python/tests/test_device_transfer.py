@@ -67,6 +67,43 @@ class DeviceTransferTests(unittest.TestCase):
         self.assertIs(moved.registers.values, batch.registers.values)
         self.assertFalse(moved.registers.values.is_contiguous())
 
+    def test_packed_upload_control_flow_without_accelerator_hardware(self):
+        """Check packing in CPU memory; this does not validate an accelerator."""
+        uploads = []
+
+        def transfer(tensor, device, *, non_blocking):
+            uploads.append((device.type, non_blocking))
+            return tensor.clone()
+
+        with mock.patch.object(torch.Tensor, "to", transfer), \
+                mock.patch("cpu2tensor._device.torch.mps.synchronize") as synchronize:
+            moved = to_device(rich_batch(), torch.device("mps"))
+        self.assertEqual(uploads, [("mps", False)])
+        synchronize.assert_called_once_with()
+        self.assertEqual(
+            {name: value.tolist() for name, value in columns(moved)},
+            {name: value.tolist() for name, value in columns(rich_batch())},
+        )
+
+    def test_block_upload_control_flow_without_accelerator_hardware(self):
+        batch = Batch(0, 0, torch.tensor([1, 2, 3], dtype=torch.int64))
+        with mock.patch.object(torch.Tensor, "to", return_value=batch.addresses.clone()), \
+                mock.patch("cpu2tensor._device.torch.mps.synchronize") as synchronize:
+            moved = to_device(batch, torch.device("mps"))
+        self.assertTrue(torch.equal(moved.addresses, batch.addresses))
+        synchronize.assert_called_once_with()
+
+    def test_upload_rejects_non_cpu_input_columns(self):
+        block = Batch(0, 0, torch.empty(1, dtype=torch.int64, device="meta"))
+        with self.assertRaisesRegex(ValueError, "requires CPU input"):
+            to_device(block, torch.device("mps"))
+        rich = replace(
+            rich_batch(),
+            block_sequences=torch.empty(4, dtype=torch.int64, device="meta"),
+        )
+        with self.assertRaisesRegex(ValueError, "requires CPU input"):
+            to_device(rich, torch.device("mps"))
+
     def check_all_columns(self, device):
         batch = rich_batch()
         expected = {name: value.clone() for name, value in columns(batch)}

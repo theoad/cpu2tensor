@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests and selected system tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build the pinned test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ci/Dockerfile
+          load: true
+          tags: cpu2tensor-ci:local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run unit tests with coverage
+        run: >-
+          docker run --rm
+          --volume "$PWD:/workspace"
+          cpu2tensor-ci:local
+          ./ci/run-unit-tests.sh
+
+      - name: Decide whether system tests are required
+        id: system
+        env:
+          TESTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: ./ci/should-run-system-tests.sh "$GITHUB_EVENT_NAME" "$TESTED_COMMIT" "$GITHUB_OUTPUT"
+
+      - name: Run real local worker system tests
+        if: steps.system.outputs.run == 'true'
+        run: >-
+          docker run --rm
+          --volume "$PWD:/workspace"
+          cpu2tensor-ci:local
+          ./ci/run-system-tests.sh

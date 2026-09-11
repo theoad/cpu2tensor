@@ -1,0 +1,7 @@
+.git
+.local
+__pycache__
+*.pyc
+*.so
+build
+dist

@@ -1,5 +1,7 @@
 # cpu2tensor
 
+[![CI](https://github.com/theoad/cpu2tensor/actions/workflows/ci.yml/badge.svg)](https://github.com/theoad/cpu2tensor/actions/workflows/ci.yml)
+
 CPU execution traces as tensors and interactive learning environments.
 
 cpu2tensor is a C++20 library with a small Python interface. It streams CPU
