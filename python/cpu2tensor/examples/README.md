@@ -7,6 +7,8 @@ Run the installed modules with `python -m cpu2tensor.examples.learn_trace` or
 
 `pretrain_kernel` is the next-block baseline; `build_initramfs` packages the benign
 kernel guest. See [kernel instructions](../../../docs/kernel-examples.md).
+`custom_kernel_actions` drives the
+[client-owned syscall-sequence guest](../../../docs/custom-kernel-actions.md).
 `collect_layout` and `learn_layout` support the
 [native tensor notebook](../../../docs/tutorials/normalization.ipynb).
 

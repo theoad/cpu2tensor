@@ -88,6 +88,9 @@ with KernelEnv("tcp://127.0.0.1:9400", timeout=120) as env:
     assert env.exit_code == 0 and env.event["ok"] is True
 ```
 
+For a modifiable guest that wraps client-defined, cost-matched syscall sequences
+in repeated trace windows, see [custom kernel actions](custom-kernel-actions.md).
+
 Each reducer drains the iterator as chunks arrive. A reset or step returns its
 last chunk before the worker-certified action request. At that boundary all
 vCPUs are paused and their captured tails have been drained. The guest's serial
