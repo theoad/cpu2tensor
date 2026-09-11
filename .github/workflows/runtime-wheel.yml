@@ -37,6 +37,9 @@ jobs:
 
       - name: Build and verify the offline runtime
         run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --quiet
+          git diff --cached --quiet
           mkdir -p "$RUNNER_TEMP/cpu2tensor-runtime"
           builder_image_id="$(docker image inspect --format '{{.Id}}' cpu2tensor-runtime:local)"
           docker run --rm \

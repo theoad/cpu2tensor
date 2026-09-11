@@ -24,13 +24,6 @@ if [[ "$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_in
     echo "The published runtime must be built with CPython 3.12." >&2
     exit 2
 fi
-if [[ "$(git -c safe.directory="$root" -C "$root" rev-parse HEAD)" != "$source_sha" ]] ||
-   ! git -c safe.directory="$root" -C "$root" diff --quiet ||
-   ! git -c safe.directory="$root" -C "$root" diff --cached --quiet; then
-    echo "The source checkout does not match the requested clean commit." >&2
-    exit 2
-fi
-
 readonly bundle="$work/$bundle_name"
 readonly wheels="$bundle/wheels"
 mkdir -p "$wheels" "$output"
