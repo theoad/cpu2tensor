@@ -39,9 +39,10 @@ The marker starts a post-boot capture window; boot events are deliberately
 excluded. Omit `--start-pc` when the full boot trace is required. The example
 reduces only basic blocks, so this command disables register and memory capture.
 Those signals can remain enabled for clients that use their columns. The worker
-owns QMP and the serial console; do not supply QEMU serial, monitor, or initial
-pause options. An operator can expose this endpoint through an existing tunnel
-or trusted network. The Python example does not configure that connection.
+owns QMP, ttyS0 diagnostics and the private ttyS1 protocol channel; do not supply
+QEMU serial, monitor, or initial pause options. An operator can expose this
+endpoint through an existing tunnel or trusted network. The Python example does
+not configure that connection.
 
 ## Run the learning client
 

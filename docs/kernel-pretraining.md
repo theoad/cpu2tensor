@@ -178,16 +178,20 @@ and worker with matching QEMU headers. In each worker terminal:
 export C2T_START_PC="$(nm "$C2T_BUILD/kernel_init" | awk '$3 == "cpu2tensor_capture_begin" {print "0x" $1}')"
 "$C2T_BUILD/cpu2tensor-worker" \
   --qemu "$QEMU_SYSTEM" --plugin "$C2T_BUILD/libcpu2tensor_plugin.so" \
-  --system on --registers none --memory off --start-pc "$C2T_START_PC" \
+  --system on --kernel-protocol on --registers none --memory off \
+  --start-pc "$C2T_START_PC" \
   --port 9000 --timeout-ms 120000 -- \
-  -accel tcg,thread=multi -smp 2 -m 256M -nographic -monitor none \
+  -accel tcg,thread=multi -smp 2 -m 256M \
   -nic none -no-reboot -kernel "$KERNEL" -initrd "$INITRAMFS" \
   -append 'console=ttyS0 rdinit=/init panic=-1 cpu2tensor.mode=observe cpu2tensor.seed=7'
 ```
 
 Use separate ports on the same host, or the same port on distinct hosts. Supply
-seed 11 for another training run and seed 17 for the held-out run. No interactive
-adapter, action request, reward or policy is involved. `--start-pc` selects an
+seed 11 for another training run and seed 17 for the held-out run.
+`--kernel-protocol on` provisions ttyS0 for diagnostics and a private ttyS1 for
+the guest's bounded C2T records. The worker validates the start, results and
+successful completion but does not send those records to `Pool`. No action
+request, reward or policy is involved. `--start-pc` selects an
 explicit postboot window; omit it to request capture from QEMU startup. Use
 `--registers general --memory on --memory-values on` to collect rich signals for
 a model that consumes them; the next-block model ignores those extra columns.

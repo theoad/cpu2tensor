@@ -138,10 +138,11 @@ deadlines. A full-boot test omits the marker. Rich capture is currently expensiv
 use suitable consumer/worker timeouts and do not interpret these checks as
 throughput measurements.
 
-The kernel adapter additionally owns two bounded 8 KiB line readers for QMP and
-serial diagnostics and one 127-byte action. A separate QMP/drain deadline cannot
-be extended by ongoing trace or console traffic. Cancellation reaps the target
-before another connection is served.
+The kernel protocol path owns two bounded 8 KiB line readers for QMP and ttyS1,
+a separately drained raw ttyS0 diagnostic channel, and at most one 127-byte
+action in interactive mode. A separate QMP/drain deadline cannot be extended by
+ongoing trace or console traffic. Cancellation reaps the target before another
+connection is served.
 
 ## Version 0.5 performance integration evidence
 

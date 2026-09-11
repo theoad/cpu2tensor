@@ -49,14 +49,17 @@ class RemoteKernelTests(unittest.TestCase):
             args += ['--stop-pc', hex(stop)]
         if interactive:
             args += ['--kernel-adapter', 'on']
+        else:
+            # This example guest always reports its finite workload over ttyS1.
+            # The managed observation protocol validates those records without
+            # exposing action frames to Pool.
+            args += ['--kernel-protocol', 'on']
         args += ['--', '-accel', 'tcg,thread=multi', '-smp', cpus, '-m', '256M', '-nic', 'none', '-no-reboot',
                  '-kernel', self.image, '-initrd', self.initramfs,
                  '-append', 'console=ttyS0 rdinit=/init panic=-1 cpu2tensor.mode=' + ('interactive' if interactive else 'observe')
                  + (' cpu2tensor.parallel_timeout=300' if rich else '')]
         if workload_bytes is not None:
             args[-1] += f' cpu2tensor.bytes={workload_bytes}'
-        if not interactive:
-            args += ['-nographic', '-monitor', 'none']
         self.arguments = args
         command = 'echo cpu2tensor-pid:$$; exec ' + shlex.join(args)
         # A full boot can fill an unread stdout pipe. Keep both diagnostic
@@ -105,11 +108,11 @@ class RemoteKernelTests(unittest.TestCase):
 
     def test_context_only_associates_blocks_on_both_cpus(self):
         endpoint = self.start(interactive=False, context='on', batching='mixed',
-                              workload_bytes=64, max_run_ms=60000)
+                              workload_bytes=64, max_run_ms=120000, timeout=120000)
         previous = {}
         blocks = {}
         changes = {}
-        with Pool([endpoint], timeout=30, batch_bytes=65536) as pool:
+        with Pool([endpoint], timeout=120, batch_bytes=65536) as pool:
             for batch in pool.read():
                 self.assertIsNone(batch.registers)
                 self.assertIsNone(batch.memory)

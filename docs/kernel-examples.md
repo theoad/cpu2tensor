@@ -145,6 +145,14 @@ Duplicate or malformed workload options fail explicitly. Other kernel options
 are ignored by the target. In interactive mode each memory or pipe command carries
 its own seed and size; the command-line seed and size configure observation only.
 
+When this guest runs through `cpu2tensor-worker`, select `--kernel-protocol on`
+for observation-only `Pool` captures. Select `--kernel-adapter on` for
+`KernelEnv`; it implies the same two-UART protocol and additionally enables
+paused action boundaries. In both modes the worker owns QMP, display startup and
+both serial devices, so do not pass `-serial`, `-monitor`, `-nographic` or `-S`.
+An invalid record, unsuccessful guest completion or missing completion fails the
+capture, and console diagnostics cannot enter protocol framing.
+
 ## Observation-only pretraining
 
 The [`example/kernel_pretraining/`](../example/kernel_pretraining/README.md)

@@ -48,13 +48,22 @@ static void answer_qmp_command(int qmp) {
     write_all(qmp, response, static_cast<size_t>(size));
 }
 
+static KernelOptions test_options(const char* self, char** arguments,
+                                  bool interactive = true, int maximum_ms = 0) {
+    return {self, "/unused-plugin", "none", "off", "off", "auto",
+            nullptr, nullptr, nullptr, nullptr, nullptr, "none", "on", 4096,
+            "legacy", "pipe", 2000, maximum_ms, interactive, arguments};
+}
+
 // A protocol fixture, not QEMU: negotiate startup, then send one chosen serial
 // record. Remaining alive lets the test verify the worker owns child cleanup.
 static int producer(int argc, char** argv) {
     const char* control_field = std::strstr(argv[2], ",control=");
-    assert(control_field != nullptr);
+    const bool interactive = std::strstr(argv[2], ",kernel=on,") != nullptr;
+    assert(interactive == (control_field != nullptr));
     const int trace = std::atoi(std::strstr(argv[2], ",fd=") + 4);
-    const int control = std::atoi(control_field + std::strlen(",control="));
+    const int control = interactive ?
+        std::atoi(control_field + std::strlen(",control=")) : -1;
     const char* record = argv[argc - 1];
     int console = -1, serial = -1, qmp = -1;
     int console_index = -1, serial_index = -1;
@@ -74,11 +83,26 @@ static int producer(int argc, char** argv) {
     constexpr char diagnostic[] = "C2T {\"event\":\"console-only-diagnostic\"}\n";
     write_all(console, diagnostic, sizeof(diagnostic) - 1);
     uint8_t header[header_bytes];
-    encode_header(header, {Kind::hello, 0, 0, 0, 2 | feature_system | feature_kernel});
+    encode_header(header, {Kind::hello, 0, 0, 0,
+                           2 | feature_system | (interactive ? feature_kernel : 0)});
     write_all(trace, reinterpret_cast<const char*>(header), sizeof(header));
     constexpr char greeting[] = "{\"QMP\":{}}\n";
     write_all(qmp, greeting, sizeof(greeting) - 1);
     answer_qmp_command(qmp);
+    if (std::strcmp(record, "observation") == 0) {
+        assert(!interactive);
+        constexpr char events[] =
+            "C2T {\"event\":\"start\",\"mode\":\"observe\"}\n"
+            "C2T {\"event\":\"result\",\"step\":0,\"action\":\"getpid\",\"value\":1}\n"
+            "C2T {\"event\":\"complete\",\"steps\":1,\"ok\":true}\n";
+        write_all(serial, events, sizeof(events) - 1);
+        encode_header(header, {Kind::complete});
+        write_all(trace, reinterpret_cast<const char*>(header), sizeof(header));
+        shutdown(console, SHUT_WR);
+        shutdown(serial, SHUT_WR);
+        shutdown(qmp, SHUT_WR);
+        return 0;
+    }
     answer_qmp_command(qmp);
     if (std::strcmp(record, "action-routing") == 0) {
         constexpr char events[] =
@@ -104,6 +128,11 @@ static int producer(int argc, char** argv) {
         write_all(serial, result, sizeof(result) - 1);
         for (;;) pause();
     }
+    if (std::strstr(record, "input: ImExPS/2 Generic Explorer Mouse") != nullptr) {
+        constexpr char start[] =
+            "C2T {\"event\":\"start\",\"mode\":\"interactive\"}\n";
+        write_all(serial, start, sizeof(start) - 1);
+    }
     if (std::strcmp(record, "oversize") == 0) {
         char bytes[event_capacity + 16];
         std::memset(bytes, 'x', sizeof(bytes));
@@ -117,7 +146,8 @@ static int producer(int argc, char** argv) {
     for (;;) pause();
 }
 
-static void check_failure(const char* self, const char* record, const char* reason) {
+static void check_failure(const char* self, const char* record, const char* reason,
+                          bool interactive = true) {
     int logs[2];
     assert(pipe(logs) == 0);
     const int listener = socket(AF_INET, SOCK_STREAM, 0);
@@ -136,8 +166,7 @@ static void check_failure(const char* self, const char* record, const char* reas
         assert(dup2(logs[1], STDERR_FILENO) >= 0);
         close(logs[1]);
         char* arguments[] = {const_cast<char*>(record), nullptr};
-        const KernelOptions options{self, "/unused-plugin", "none", "off", "off", "auto", nullptr,
-                                    "legacy", "pipe", 2000, arguments};
+        const KernelOptions options = test_options(self, arguments, interactive);
         const auto result = run_kernel(options, listener);
         if (!result.ok()) std::fprintf(stderr, "worker-error:%s\n", result.error());
         _exit(result.ok() ? 0 : 1);
@@ -201,8 +230,7 @@ static void check_recovered_printk_suffix(const char* self) {
         assert(dup2(logs[1], STDERR_FILENO) >= 0);
         close(logs[1]);
         char* arguments[] = {const_cast<char*>(record), nullptr};
-        const KernelOptions options{self, "/unused-plugin", "none", "off", "off", "auto",
-                                    nullptr, "legacy", "pipe", 2000, arguments};
+        const KernelOptions options = test_options(self, arguments);
         const auto result = run_kernel(options, listener);
         if (!result.ok()) std::fprintf(stderr, "worker-error:%s\n", result.error());
         _exit(result.ok() ? 0 : 1);
@@ -218,6 +246,13 @@ static void check_recovered_printk_suffix(const char* self) {
     auto decoded = decode_header(header_bytes_buffer, sizeof(header_bytes_buffer));
     assert(decoded.ok() && decoded.value().kind == Kind::hello);
     assert(payload_size(decoded.value()) == 0);
+    read_all(client, header_bytes_buffer, sizeof(header_bytes_buffer));
+    decoded = decode_header(header_bytes_buffer, sizeof(header_bytes_buffer));
+    assert(decoded.ok() && decoded.value().kind == Kind::guest_event);
+    char start[128]{};
+    assert(payload_size(decoded.value()) < sizeof(start));
+    read_all(client, start, payload_size(decoded.value()));
+    assert(std::strstr(start, "\"event\":\"start\"") != nullptr);
     read_all(client, header_bytes_buffer, sizeof(header_bytes_buffer));
     decoded = decode_header(header_bytes_buffer, sizeof(header_bytes_buffer));
     assert(decoded.ok() && decoded.value().kind == Kind::guest_event);
@@ -251,6 +286,72 @@ static void check_recovered_printk_suffix(const char* self) {
     assert(kill(child, 0) == -1 && errno == ESRCH);
 }
 
+static void check_observation_protocol(const char* self) {
+    int logs[2];
+    assert(pipe(logs) == 0);
+    const int listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    assert(bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    assert(listen(listener, 1) == 0);
+    socklen_t length = sizeof(address);
+    assert(getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length) == 0);
+    const pid_t worker = fork();
+    assert(worker >= 0);
+    if (worker == 0) {
+        close(logs[0]);
+        assert(dup2(logs[1], STDERR_FILENO) >= 0);
+        close(logs[1]);
+        char* arguments[] = {const_cast<char*>("observation"), nullptr};
+        const KernelOptions options = test_options(self, arguments, false);
+        const auto result = run_kernel(options, listener);
+        if (!result.ok()) std::fprintf(stderr, "worker-error:%s\n", result.error());
+        _exit(result.ok() ? 0 : 1);
+    }
+    close(logs[1]);
+    close(listener);
+    const int client = socket(AF_INET, SOCK_STREAM, 0);
+    assert(client >= 0);
+    assert(connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+
+    uint8_t encoded[header_bytes];
+    read_all(client, encoded, sizeof(encoded));
+    auto decoded = decode_header(encoded, sizeof(encoded));
+    assert(decoded.ok() && decoded.value().kind == Kind::hello);
+    assert(decoded.value().detail & feature_system);
+    assert(!(decoded.value().detail & feature_kernel));
+    read_all(client, encoded, sizeof(encoded));
+    decoded = decode_header(encoded, sizeof(encoded));
+    // Observation protocol records are validated by the worker and stay out of
+    // the tensor stream consumed by Pool.
+    assert(decoded.ok() && decoded.value().kind == Kind::complete);
+    char extra;
+    assert(read(client, &extra, 1) == 0);
+    close(client);
+
+    char output[8192]{};
+    size_t used = 0;
+    ssize_t count;
+    while ((count = read(logs[0], output + used, sizeof(output) - 1 - used)) > 0) {
+        used += static_cast<size_t>(count);
+        assert(used < sizeof(output) - 1);
+    }
+    close(logs[0]);
+    int status;
+    assert(waitpid(worker, &status, 0) == worker);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(std::strstr(output, "C2T {\"event\":\"console-only-diagnostic\"}") != nullptr);
+    assert(std::strstr(output, "C2T {\"event\":\"complete\"") != nullptr);
+    assert(std::strstr(output, "worker-error:") == nullptr);
+    const char* child_line = std::strstr(output, "fixture-child:");
+    assert(child_line != nullptr);
+    const pid_t child = std::atoi(child_line + std::strlen("fixture-child:"));
+    assert(child > 0);
+    assert(kill(child, 0) == -1 && errno == ESRCH);
+}
+
 static void check_action_uses_adapter_channel(const char* self) {
     int logs[2];
     assert(pipe(logs) == 0);
@@ -270,8 +371,7 @@ static void check_action_uses_adapter_channel(const char* self) {
         assert(dup2(logs[1], STDERR_FILENO) >= 0);
         close(logs[1]);
         char* arguments[] = {const_cast<char*>("action-routing"), nullptr};
-        const KernelOptions options{self, "/unused-plugin", "none", "off", "off", "auto",
-                                    nullptr, "legacy", "pipe", 2000, arguments};
+        const KernelOptions options = test_options(self, arguments);
         const auto result = run_kernel(options, listener);
         if (!result.ok()) std::fprintf(stderr, "worker-error:%s\n", result.error());
         _exit(result.ok() ? 0 : 1);
@@ -333,6 +433,8 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "-plugin") == 0) return producer(argc, argv);
     alarm(30);
     check_recovered_printk_suffix(argv[0]);
+    check_observation_protocol(argv[0]);
+    check_failure(argv[0], "C2T {broken}\n", "reason=malformed-json", false);
     check_action_uses_adapter_channel(argv[0]);
     check_failure(argv[0], "C2T {broken}\n", "reason=malformed-json");
     check_failure(argv[0], "C2T {\n", "reason=incomplete-json");

@@ -142,8 +142,8 @@ Result<bool> action(int client, int serial, int timeout) {
 } // namespace
 
 Result<bool> run_kernel(const KernelOptions& options, int listener) {
-    // The worker owns QMP and the serial adapter exclusively. Arbitrary machine
-    // options still belong to the operator, but cannot replace these channels.
+    // The worker owns QMP and both serial channels whenever it validates the
+    // guest protocol. Arbitrary machine options still belong to the operator.
     const char* reserved[] = {"qmp", "monitor", "mon", "serial", "nographic", "daemonize", "S", "incoming", "gdb", "s"};
     for (size_t i = 0; options.arguments[i] != nullptr; ++i) {
         const char* argument = options.arguments[i];
@@ -152,7 +152,7 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
         for (const char* option : reserved)
             if (std::strcmp(argument, option) == 0 ||
                 (std::strncmp(argument, option, std::strlen(option)) == 0 && argument[std::strlen(option)] == '='))
-                return Result<bool>::failure("Kernel adapter owns QMP/serial/startup; remove conflicting QEMU option");
+                return Result<bool>::failure("Kernel protocol owns QMP/serial/startup; remove conflicting QEMU option");
     }
     int accepted;
     do { accepted = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC); } while (accepted < 0 && errno == EINTR);
@@ -186,11 +186,16 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
         !nonblocking(console.value).ok() || !nonblocking(serial.value).ok())
         return Result<bool>::failure("Cannot configure kernel channels");
     char plugin[PATH_MAX + 512];
-    const int length = std::snprintf(plugin, sizeof(plugin), "%s,fd=%d,control=%d,kernel=on,registers=%s,memory=%s,values=%s,context=%s,batching=%s,publication=%s,blocks=%s,reducer=%s,transition_capacity=%d%s%s%s%s%s%s%s%s",
-        options.plugin, trace_write.value, control_read.value, options.registers, options.memory, options.values, options.context,
+    char control_option[64]{};
+    if (options.interactive)
+        std::snprintf(control_option, sizeof(control_option), ",control=%d", control_read.value);
+    const int length = std::snprintf(plugin, sizeof(plugin), "%s,fd=%d%s,kernel=%s,registers=%s,memory=%s,values=%s,context=%s,batching=%s,publication=%s,blocks=%s,reducer=%s,transition_capacity=%d%s%s%s%s%s%s%s%s%s%s",
+        options.plugin, trace_write.value, control_option, options.interactive ? "on" : "off",
+        options.registers, options.memory, options.values, options.context,
         options.batching, options.publication, options.blocks, options.reducer,
         options.transition_capacity,
         options.start_pc == nullptr ? "" : ",start=", options.start_pc == nullptr ? "" : options.start_pc,
+        options.stop_pc == nullptr ? "" : ",stop=", options.stop_pc == nullptr ? "" : options.stop_pc,
         options.window_start_pc == nullptr ? "" : ",window_start=", options.window_start_pc == nullptr ? "" : options.window_start_pc,
         options.window_end_pc == nullptr ? "" : ",window_end=", options.window_end_pc == nullptr ? "" : options.window_end_pc,
         options.window_abort_pc == nullptr ? "" : ",window_abort=", options.window_abort_pc == nullptr ? "" : options.window_abort_pc);
@@ -239,6 +244,8 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
     int child_status = 0, pending = 0, next_id = 1;
     enum class Command { none, capabilities, resume, stop } command = Command::none;
     auto deadline = now_ms() + options.timeout_ms;
+    const auto maximum_deadline = options.maximum_ms == 0 ? int64_t{0} :
+                                  now_ms() + options.maximum_ms;
     int64_t control_deadline = 0;
     for (;;) {
         if (seal && trace_eof && child_done && console_eof && serial_lines.eof) {
@@ -251,7 +258,12 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
             if (!sent.ok() || sent.value()) return sent;
             return Result<bool>::success(false);
         }
-        const auto remaining = deadline - now_ms();
+        const auto current = now_ms();
+        if (maximum_deadline != 0 && current >= maximum_deadline)
+            return Result<bool>::failure("Target exceeded --max-run-ms deadline");
+        auto remaining = deadline - current;
+        if (maximum_deadline != 0 && maximum_deadline - current < remaining)
+            remaining = maximum_deadline - current;
         if (remaining <= 0) return Result<bool>::failure("Kernel run timed out before capture or action boundary");
         if (control_deadline != 0 && now_ms() >= control_deadline)
             return Result<bool>::failure("Kernel QMP command or trace drain timed out");
@@ -281,13 +293,15 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
                 const auto valid = stream.accept(header, frame + header_bytes);
                 if (!valid.ok()) return Result<bool>::failure(valid.error());
                 if (!hello) {
-                    if (header.kind != Kind::hello || !(header.detail & feature_kernel))
-                        return Result<bool>::failure("Kernel plugin did not negotiate the system adapter");
+                    const bool interactive = bool(header.detail & feature_kernel);
+                    if (header.kind != Kind::hello || !(header.detail & feature_system) ||
+                        interactive != options.interactive)
+                        return Result<bool>::failure("Kernel plugin did not negotiate the requested system protocol");
                     hello = true;
                 }
                 if (header.kind == Kind::complete) seal = true;
                 else {
-                    if (header.kind == Kind::kernel_request && !draining)
+                    if (header.kind == Kind::kernel_request && (!options.interactive || !draining))
                         return Result<bool>::failure("Unexpected kernel drain seal");
                     const auto sent = send_bytes(client.value, frame, frame_needed, options.timeout_ms);
                     if (header.kind == Kind::error) return Result<bool>::failure("Kernel capture failed");
@@ -390,29 +404,39 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
                 const char* name = string_value(event.get("event"));
                 if (std::strcmp(name, "start") == 0) {
                     if (guest_started) return fail_event("repeated-start", "Guest reboot or repeated adapter start is unsupported", &event);
+                    const char* mode = string_value(event.get("mode"));
+                    const char* expected = options.interactive ? "interactive" : "observe";
+                    if (mode == nullptr || std::strcmp(mode, expected) != 0)
+                        return fail_event("unexpected-start-mode", "Guest protocol mode does not match the worker", &event);
                     guest_started = true;
                 } else if (std::strcmp(name, "ready") == 0) {
-                    if (!guest_started || requested || guest_complete)
+                    if (!options.interactive || !guest_started || requested || guest_complete)
                         return fail_event("unexpected-ready", "Unexpected guest action request", &event);
                     requested = true;
                 } else if (std::strcmp(name, "complete") == 0) {
-                    if (!json_object_is_type(event.get("ok"), json_type_boolean) || !json_object_get_boolean(event.get("ok")))
+                    if (!guest_started || guest_complete || requested || draining ||
+                        !json_object_is_type(event.get("ok"), json_type_boolean) ||
+                        !json_object_get_boolean(event.get("ok")))
                         return fail_event("unsuccessful-complete", "Guest adapter reported an unsuccessful workload", &event);
                     guest_complete = true;
                 } else if (std::strcmp(name, "result") != 0 && std::strcmp(name, "error") != 0)
                     return fail_event("unknown-event-name", "Unknown guest adapter event", &event);
-                uint8_t event_frame[header_bytes + event_capacity];
-                const Header header{Kind::guest_event, 0, 0, 0, payload.json_size};
-                encode_header(event_frame, header);
-                std::memcpy(event_frame + header_bytes, bytes, payload.json_size);
+                else if (!guest_started || guest_complete)
+                    return fail_event("unexpected-event-order", "Invalid guest event size or ordering", &event);
                 if (payload.suffix == GuestSuffix::kernel_printk) {
                     log_guest_suffix(stderr, bytes + payload.suffix_offset, payload.suffix_size);
                     log_complete_line = false;
                 }
-                const auto sent = send_bytes(client.value, event_frame,
-                                             header_bytes + payload.json_size,
-                                             options.timeout_ms);
-                if (!sent.ok() || sent.value()) return sent;
+                if (options.interactive) {
+                    uint8_t event_frame[header_bytes + event_capacity];
+                    const Header header{Kind::guest_event, 0, 0, 0, payload.json_size};
+                    encode_header(event_frame, header);
+                    std::memcpy(event_frame + header_bytes, bytes, payload.json_size);
+                    const auto sent = send_bytes(client.value, event_frame,
+                                                 header_bytes + payload.json_size,
+                                                 options.timeout_ms);
+                    if (!sent.ok() || sent.value()) return sent;
+                }
             }
             // Boot diagnostics stay in the worker log, never in model tensors.
             if (log_complete_line) std::fwrite(serial_lines.bytes, 1, size, stderr);
@@ -423,7 +447,7 @@ Result<bool> run_kernel(const KernelOptions& options, int listener) {
             log_guest_failure(stderr, "unterminated-serial-line", serial_lines.bytes, serial_lines.used);
             return Result<bool>::failure("Guest serial channel ended inside a line");
         }
-        if (requested && pending == 0 && !draining) {
+        if (options.interactive && requested && pending == 0 && !draining) {
             pending = next_id++;
             command = Command::stop;
             control_deadline = now_ms() + options.timeout_ms;
