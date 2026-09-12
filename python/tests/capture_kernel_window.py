@@ -14,7 +14,7 @@ import time
 import uuid
 
 import torch
-from cpu2tensor import Pool
+from cpu2tensor import Pool, WireFrame
 from cpu2tensor.examples.benchmark_capture import TraceCounter
 
 
@@ -145,14 +145,14 @@ def main():
         starts = 0
         batches = 0
         with (args.output / 'capture.bin').open('wb') as wire:
-            class RecordedPool(Pool):
-                def _receive(self, connection, size):
-                    data = super()._receive(connection, size)
-                    wire.write(data)
-                    counter.feed(data)
-                    return data
+            def record(frame: WireFrame) -> None:
+                wire.write(frame.data)
+                counter.feed(frame.data)
+
             started = time.monotonic()
-            with RecordedPool([endpoint], device=args.device, timeout=180) as pool:
+            with Pool(
+                [endpoint], device=args.device, timeout=180, wire_observer=record,
+            ) as pool:
                 for batch in pool.read():
                     batches += 1
                     rows = [('blocks', batch.addresses, batch.block_sequences)]

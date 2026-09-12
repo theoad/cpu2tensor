@@ -4,6 +4,7 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 import gc
+import io
 import socket
 import struct
 import threading
@@ -13,7 +14,7 @@ import weakref
 
 import torch
 
-from cpu2tensor import Pool
+from cpu2tensor import Pool, TerminalReason, TransportEnd, WireFrame
 
 
 def frame(
@@ -65,6 +66,72 @@ def worker(data: bytes, *, fragment: int = 7, wait_for_close: bool = False) -> I
 
 
 class ConsumerTests(unittest.TestCase):
+    def test_wire_observer_sees_exact_complete_frames_and_metadata(self) -> None:
+        frames = (
+            frame(1, detail=1),
+            frame(2, source=3, sequence=0, addresses=(41, 42)),
+            frame(3, source=3, sequence=2),
+            frame(4),
+        )
+        observed: list[tuple[WireFrame, bytes]] = []
+        borrowed: list[memoryview] = []
+        capture = io.BytesIO()
+
+        def observe(item: WireFrame) -> None:
+            self.assertTrue(item.data.readonly)
+            capture.write(item.data)
+            observed.append((item, bytes(item.data)))
+            borrowed.append(item.data)
+
+        with worker(b"".join(frames), fragment=3) as endpoint, \
+                Pool([endpoint], wire_observer=observe) as pool:
+            batches = list(pool.read())
+
+        self.assertEqual(batches[0].addresses.tolist(), [41, 42])
+        self.assertEqual(capture.getvalue(), b"".join(frames))
+        self.assertEqual([data for _, data in observed], list(frames))
+        self.assertEqual(
+            [(item.worker, item.endpoint, item.version, item.kind, item.source,
+              item.count, item.sequence, item.detail) for item, _ in observed],
+            [
+                (0, endpoint, 2, 1, 0, 0, 0, 1),
+                (0, endpoint, 2, 2, 3, 2, 0, 0),
+                (0, endpoint, 2, 3, 3, 0, 2, 0),
+                (0, endpoint, 2, 4, 0, 0, 0, 0),
+            ],
+        )
+        with self.assertRaises(ValueError):
+            borrowed[0].tobytes()
+
+    def test_wire_observer_does_not_change_clean_end_classification(self) -> None:
+        hello = frame(1, detail=1)
+        block = frame(2, addresses=(1,))
+        cases = (
+            (hello, TerminalReason.UNKNOWN_DISCONNECTION, "before completion"),
+            (hello + block[:7], TerminalReason.TRUNCATED_STREAM, "inside a frame"),
+            (hello + block[:35], TerminalReason.TRUNCATED_STREAM, "inside a frame"),
+        )
+        for data, reason, message in cases:
+            observed = []
+            with self.subTest(length=len(data)), worker(data) as endpoint, Pool(
+                [endpoint], wire_observer=lambda item: observed.append(bytes(item.data)),
+            ) as pool:
+                with self.assertRaisesRegex(RuntimeError, message):
+                    list(pool.read())
+            self.assertEqual(observed, [hello])
+            self.assertEqual(pool.outcomes[0].reason, reason)
+            self.assertEqual(pool.outcomes[0].transport, TransportEnd.CLEAN)
+
+    def test_wire_observer_exception_aborts_the_read(self) -> None:
+        def reject(_frame: WireFrame) -> None:
+            raise LookupError("capture sink failed")
+
+        with worker(frame(1, detail=1)) as endpoint, Pool(
+            [endpoint], wire_observer=reject,
+        ) as pool:
+            with self.assertRaisesRegex(LookupError, "capture sink failed"):
+                list(pool.read())
+
     def test_full_batch_then_final_partial_without_retention(self) -> None:
         data = (frame(1, detail=1) + frame(2, addresses=tuple(range(256)))
                 + frame(2, sequence=256, addresses=(256,)) + frame(3, sequence=257) + frame(4))
@@ -196,6 +263,8 @@ class ConsumerTests(unittest.TestCase):
             Pool(["tcp://host:1"], device="meta")
         with self.assertRaises(ValueError):
             Pool(["tcp://host:1"], timeout=0)
+        with self.assertRaisesRegex(TypeError, "wire_observer"):
+            Pool(["tcp://host:1"], wire_observer=object())
         with mock.patch("cpu2tensor.pool.torch.backends.mps.is_available", return_value=False), \
                 self.assertRaisesRegex(RuntimeError, "MPS is not available"):
             Pool(["tcp://host:1"], device="mps")

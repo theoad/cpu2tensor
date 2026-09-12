@@ -27,9 +27,11 @@ from cpu2tensor.terminal import (
     BoundaryProgress, TerminalOutcome, TerminalReason, TraceConnectionError,
     TraceTerminalError, TraceTimeoutError, TransportEnd,
 )
+from cpu2tensor.wire import WireFrame, WireObserver
 
 
 _HEADER_BYTES = 32
+_HEADER = struct.Struct("<IHHIIQQ")
 _CONTEXT_GROUP_FRAMES = 32
 _BLOCKS = 2
 _COMPLETE = 4
@@ -111,6 +113,13 @@ class Pool:
     need additional memory.
     Source ends flush immediately. Retaining a device column retains its whole
     shared batch upload. Incomplete traces still raise.
+
+    ``wire_observer`` is called synchronously once for each complete wire frame,
+    after framing and before decoding. It receives a read-only borrowed view of
+    the exact header and payload bytes. The view is released when the callback
+    returns; copy it inside the callback if it must outlive that call. Observer
+    exceptions abort the read. A multiworker pool preserves order within each
+    worker, but callbacks may overlap on independent reader threads.
     """
 
     def __init__(
@@ -120,11 +129,15 @@ class Pool:
         device: str = "cpu",
         timeout: float = 30.0,
         batch_bytes: int = 0,
+        wire_observer: WireObserver | None = None,
     ) -> None:
         self._readers = None
         self._endpoints = tuple(endpoints)
         self._outcome: TerminalOutcome | None = None
         self._closed = False
+        if wire_observer is not None and not callable(wire_observer):
+            raise TypeError("wire_observer must be callable or None")
+        self._wire_observer = wire_observer
         if not isinstance(batch_bytes, int) or not 0 <= batch_bytes <= MAX_BATCH_BYTES:
             raise ValueError("batch_bytes must be an integer between 0 and 4 MiB")
         self._batch_bytes = batch_bytes
@@ -134,7 +147,10 @@ class Pool:
             raise ValueError("Pool endpoints must be distinct")
         if len(endpoints) > 1:
             from cpu2tensor._multipool import EndpointReaders
-            self._readers = EndpointReaders(endpoints, device, timeout, batch_bytes=batch_bytes)
+            self._readers = EndpointReaders(
+                endpoints, device, timeout, batch_bytes=batch_bytes,
+                wire_observer=wire_observer,
+            )
             return
         endpoint = urlsplit(endpoints[0])
         if (
@@ -274,9 +290,31 @@ class Pool:
     def _receive_frame(self, connection: socket.socket) -> bytearray:
         header = self._receive(connection, _HEADER_BYTES, classify_end=True)
         payload_bytes = _native.payload_size(header)
-        return header + self._receive(
+        frame = header + self._receive(
             connection, payload_bytes, classify_end=True, frame_started=True,
         )
+        if self._wire_observer is not None:
+            self._observe_wire_frame(frame)
+        return frame
+
+    def _observe_wire_frame(self, data: bytearray) -> None:
+        observer = cast(WireObserver, self._wire_observer)
+        _, version, kind, source, count, sequence, detail = _HEADER.unpack_from(data)
+        view = memoryview(data).toreadonly()
+        try:
+            observer(WireFrame(
+                worker=0,
+                endpoint=self._endpoint,
+                version=version,
+                kind=kind,
+                source=source,
+                count=count,
+                sequence=sequence,
+                detail=detail,
+                data=view,
+            ))
+        finally:
+            view.release()
 
     @staticmethod
     def _complete_frame_is_ready(connection: socket.socket) -> bool:

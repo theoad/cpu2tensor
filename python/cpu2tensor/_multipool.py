@@ -13,12 +13,21 @@ from cpu2tensor.batch import Batch
 from cpu2tensor._device import to_device
 from cpu2tensor.pool import Pool
 from cpu2tensor.terminal import TerminalOutcome, TraceTerminalError
+from cpu2tensor.wire import WireFrame, WireObserver
 
 
 class EndpointReaders:
     """Keep one waiting batch and at most one in-progress batch per worker."""
 
-    def __init__(self, endpoints: Sequence[str], device: str, timeout: float, *, batch_bytes: int = 0) -> None:
+    def __init__(
+        self,
+        endpoints: Sequence[str],
+        device: str,
+        timeout: float,
+        *,
+        batch_bytes: int = 0,
+        wire_observer: WireObserver | None = None,
+    ) -> None:
         # Construct every pool before starting any connection. Invalid endpoint or
         # device settings therefore cannot leave a partly started target group.
         self._endpoints = tuple(endpoints)
@@ -29,8 +38,22 @@ class EndpointReaders:
             raise RuntimeError("MPS is not available in this Python environment")
         if self._device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available in this Python environment")
-        self._pools = [Pool([endpoint], device="cpu", timeout=timeout, batch_bytes=batch_bytes)
-                       for endpoint in self._endpoints]
+        def observer_for(worker: int) -> WireObserver | None:
+            if wire_observer is None:
+                return None
+
+            def observe(frame: WireFrame) -> None:
+                wire_observer(replace(frame, worker=worker))
+
+            return observe
+
+        self._pools = [
+            Pool(
+                [endpoint], device="cpu", timeout=timeout, batch_bytes=batch_bytes,
+                wire_observer=observer_for(worker),
+            )
+            for worker, endpoint in enumerate(self._endpoints)
+        ]
         self._ready = threading.Condition()
         self._batches: list[Batch | None] = [None] * len(self._pools)
         self._finished = [False] * len(self._pools)

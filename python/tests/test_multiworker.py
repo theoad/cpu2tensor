@@ -66,6 +66,26 @@ def worker(serve: Callable[[socket.socket], None]) -> Iterator[str]:
 
 
 class MultiworkerTests(unittest.TestCase):
+    def test_wire_observer_preserves_each_worker_stream_identity_and_order(self) -> None:
+        streams = (trace(10, source=2), trace(20, source=4))
+        observed: list[tuple[int, str, bytes]] = []
+        lock = threading.Lock()
+
+        def observe(frame) -> None:
+            with lock:
+                observed.append((frame.worker, frame.endpoint, bytes(frame.data)))
+
+        with worker(lambda sock: sock.sendall(streams[0])) as first, \
+                worker(lambda sock: sock.sendall(streams[1])) as second, \
+                Pool([first, second], wire_observer=observe) as pool:
+            list(pool.read())
+
+        for worker_index, (endpoint, stream) in enumerate(zip((first, second), streams)):
+            items = [item for item in observed if item[0] == worker_index]
+            self.assertTrue(items)
+            self.assertEqual({item[1] for item in items}, {endpoint})
+            self.assertEqual(b"".join(item[2] for item in items), stream)
+
     def test_endpoint_group_rejects_unsupported_devices_before_connecting(self) -> None:
         endpoints = ["tcp://host:1", "tcp://host:2"]
         with self.assertRaisesRegex(ValueError, "CPU, MPS, and CUDA"):

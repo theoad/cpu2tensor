@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 cmake_minimum_required(VERSION 3.24)
-project(cpu2tensor VERSION 0.5.0 LANGUAGES C CXX)
+project(cpu2tensor VERSION 0.5.1 LANGUAGES C CXX)
 
 option(CPU2TENSOR_BUILD_PYTHON "Build the Python extension" OFF)
 option(CPU2TENSOR_BUILD_KERNEL_EXAMPLE "Build the static Linux guest init example" OFF)
