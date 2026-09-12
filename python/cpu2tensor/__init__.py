@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         BoundaryProgress, TerminalOutcome, TerminalReason, TraceConnectionError,
         TraceTerminalError, TraceTimeoutError, TransportEnd,
     )
+    from cpu2tensor.wire import WireFrame, WireObserver
 
 # Worker-side benchmarks use the native decoder without loading a learner runtime.
 _EXPORTS = {
@@ -31,6 +32,7 @@ _EXPORTS = {
     'TerminalReason': 'terminal', 'TraceConnectionError': 'terminal',
     'TraceTerminalError': 'terminal', 'TraceTimeoutError': 'terminal',
     'TransportEnd': 'terminal',
+    'WireFrame': 'wire', 'WireObserver': 'wire',
 }
 __all__ = list(_EXPORTS)
 

@@ -52,6 +52,7 @@ dropping trace data. See the [complete quickstart](docs/quickstart.md).
 - [Current work and milestones](docs/backlog.md)
 - [Development environments](docs/environments.md)
 - [Reproducible learner runtimes](docs/runtime-artifacts.md)
+- [Exact wire-frame observation](docs/wire-observer.md)
 
 QEMU is supplied by the operator and is never bundled or installed by the package.
 The license is [AGPL-3.0-only](LICENSE).
