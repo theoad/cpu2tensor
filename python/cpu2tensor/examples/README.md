@@ -15,4 +15,8 @@ kernel guest. See [kernel instructions](../../../docs/kernel-examples.md).
 `benchmark_capture` and `benchmark_pipeline` separate instrumentation cost from
 [end-to-end tensor consumption](../../../docs/benchmark-pipeline.md).
 
+`hardware_triage` is the first frozen, undecoded Intel PT anomaly baseline. Its
+[experimental contract](../../../docs/raw-hardware-triage.md) records the sustained
+capture and review-budget gates that are still open.
+
 - [Context-only blocks](../../../docs/context-only.md): compact paging state and vectorized block association.

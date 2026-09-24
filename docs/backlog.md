@@ -18,6 +18,21 @@ capture remain to be checked. The Linux process backend does not yet follow
 new threads. Intel PT packet decoding, Windows ETL tensor decoding, AMD/ARM
 trace-specific hardware, and measured perturbation overhead remain open.
 
+The next accepted slice is [raw hardware trace triage](raw-hardware-triage.md):
+train a small non-autoregressive model once on undecoded kernel-only PT from benign
+benchmarks, freeze it, and measure review-budget ranking and capture-to-score
+throughput. The first code is a tensor-only raw-byte sketch and standardized
+low-rank linear autoencoder. Sustained collection requires a long-lived per-CPU event, continuous
+AUX draining and execution-boundary offsets; finite `PerfCapture` is only the
+signal-validation path. PEBS and extra PMU events remain selective replay signals
+until their perturbation and added discrimination are measured.
+
+[R1](raw-hardware-triage-r1-results.md) reached 2,497 raw reductions/s and a
+111,389/s frozen-scorer component rate on `trail-x86`, while finite perf setup
+reached only 285 executions/s. Its anomaly gate failed: 7/10 familiar validation
+traces and 8/8 hidden benign `mmap` traces were flagged. Next: continuous AUX
+draining plus a broader family-held-out benign corpus; no CVE efficacy claim yet.
+
 ## Completed first iteration: AArch64 observation to MPS
 
 Demo: run an unmodified, benign AArch64 program on prescribed input in `trail-arm`;
