@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <new>
 #include <cpu2tensor/trace.hpp>
 
@@ -24,6 +26,123 @@ PyObject* header_size(PyObject*, PyObject* argument) {
     PyBuffer_Release(&view);
     if (!header.ok()) { PyErr_SetString(PyExc_ValueError, header.error()); return nullptr; }
     return PyLong_FromSize_t(payload_size(header.value()));
+}
+
+uint64_t native_u64(const uint8_t* bytes) {
+    uint64_t value = 0;
+    std::memcpy(&value, bytes, sizeof(value));
+    return value;
+}
+
+PyObject* raw_trace_sketch(PyObject*, PyObject* arguments) {
+    PyObject* trace_object = nullptr;
+    PyObject* offset_object = nullptr;
+    Py_buffer trace{};
+    Py_buffer offsets{};
+    unsigned segments = 0;
+    unsigned pair_bins = 0;
+    if (!PyArg_ParseTuple(
+            arguments, "OOII", &trace_object, &offset_object, &segments, &pair_bins))
+        return nullptr;
+    if (PyObject_GetBuffer(trace_object, &trace, PyBUF_SIMPLE) != 0)
+        return nullptr;
+    if (PyObject_GetBuffer(offset_object, &offsets, PyBUF_SIMPLE) != 0) {
+        PyBuffer_Release(&trace);
+        return nullptr;
+    }
+    const auto release = [&]() {
+        PyBuffer_Release(&offsets);
+        PyBuffer_Release(&trace);
+    };
+    constexpr Py_ssize_t offset_width = sizeof(uint64_t);
+    const bool power_of_two = pair_bins != 0 && (pair_bins & (pair_bins - 1)) == 0;
+    if (segments == 0 || !power_of_two || offsets.len < 2 * offset_width ||
+        offsets.len % offset_width != 0 || trace.len < 0) {
+        release();
+        PyErr_SetString(PyExc_ValueError, "Invalid raw trace sketch buffers or dimensions");
+        return nullptr;
+    }
+    const size_t rows = static_cast<size_t>(offsets.len) / sizeof(uint64_t) - 1;
+    if (segments > (std::numeric_limits<size_t>::max() - pair_bins - 1) / 256) {
+        release();
+        PyErr_SetString(PyExc_OverflowError, "Raw trace sketch dimensions overflow");
+        return nullptr;
+    }
+    const size_t byte_dimensions = static_cast<size_t>(segments) * 256;
+    const size_t dimensions = byte_dimensions + pair_bins + 1;
+    if (rows > static_cast<size_t>(PY_SSIZE_T_MAX) / dimensions / sizeof(float)) {
+        release();
+        PyErr_SetString(PyExc_OverflowError, "Raw trace sketch output is too large");
+        return nullptr;
+    }
+    const auto* offset_bytes = static_cast<const uint8_t*>(offsets.buf);
+    uint64_t previous = native_u64(offset_bytes);
+    if (previous != 0) {
+        release();
+        PyErr_SetString(PyExc_ValueError, "Raw trace offsets must start at zero");
+        return nullptr;
+    }
+    for (size_t row = 0; row < rows; ++row) {
+        const uint64_t next = native_u64(offset_bytes + (row + 1) * sizeof(uint64_t));
+        if (next <= previous || next > static_cast<uint64_t>(trace.len)) {
+            release();
+            PyErr_SetString(PyExc_ValueError, "Raw trace offsets must be ordered and nonempty");
+            return nullptr;
+        }
+        previous = next;
+    }
+    if (previous != static_cast<uint64_t>(trace.len)) {
+        release();
+        PyErr_SetString(PyExc_ValueError, "Raw trace offsets do not cover the byte buffer");
+        return nullptr;
+    }
+
+    PyObject* result = PyByteArray_FromStringAndSize(
+        nullptr, static_cast<Py_ssize_t>(rows * dimensions * sizeof(float)));
+    if (result == nullptr) {
+        release();
+        return nullptr;
+    }
+    auto* output = reinterpret_cast<float*>(PyByteArray_AsString(result));
+    std::memset(output, 0, rows * dimensions * sizeof(float));
+    const auto* bytes = static_cast<const uint8_t*>(trace.buf);
+    // Keep the GIL while reading caller-owned buffers. Both NumPy arrays are
+    // mutable, so releasing it would let another Python thread change either
+    // trace bytes or validated offsets while this loop is using them. A
+    // production pipeline can parallelize reducers across processes without
+    // copying the raw AUX payload merely to make this call thread-safe.
+    for (size_t row = 0; row < rows; ++row) {
+        const size_t start = native_u64(offset_bytes + row * sizeof(uint64_t));
+        const size_t end = native_u64(offset_bytes + (row + 1) * sizeof(uint64_t));
+        const size_t length = end - start;
+        float* features = output + row * dimensions;
+        for (size_t position = 0; position < length; ++position) {
+            const size_t segment = position * segments / length;
+            ++features[segment * 256 + bytes[start + position]];
+            if (position + 1 < length) {
+                const uint32_t pair_key =
+                    (static_cast<uint32_t>(bytes[start + position]) << 8) |
+                    bytes[start + position + 1];
+                const uint32_t pair_hash =
+                    (pair_key ^ (pair_key >> 7) ^ (pair_key >> 3)) & (pair_bins - 1);
+                ++features[byte_dimensions + pair_hash];
+            }
+        }
+        for (size_t segment = 0; segment < segments; ++segment) {
+            float count = 0;
+            for (size_t value = 0; value < 256; ++value)
+                count += features[segment * 256 + value];
+            if (count == 0) count = 1;
+            for (size_t value = 0; value < 256; ++value)
+                features[segment * 256 + value] /= count;
+        }
+        const float pairs = static_cast<float>(length > 1 ? length - 1 : 1);
+        for (size_t index = 0; index < pair_bins; ++index)
+            features[byte_dimensions + index] /= pairs;
+        features[dimensions - 1] = static_cast<float>(std::log1p(length) / 16.0);
+    }
+    release();
+    return result;
 }
 // The dictionary owns each buffer. Only fixed column counts cross the Python API.
 Result<char*> add_buffer(PyObject* columns, const char* name, size_t size) {
@@ -533,6 +652,8 @@ PyMethodDef methods[] = {
     {"decode", decode, METH_VARARGS, "Validate a frame and return owned tensor columns."},
     {"decode_context_frames", decode_context_frames, METH_VARARGS,
      "Validate and collate a bounded context-only frame group."},
+    {"raw_trace_sketch", raw_trace_sketch, METH_VARARGS,
+     "Reduce concatenated undecoded trace bytes to owned float columns."},
     {nullptr, nullptr, 0, nullptr}
 };
 PyModuleDef module = {PyModuleDef_HEAD_INIT, "_native", "Native trace validation.", -1,
