@@ -12,6 +12,10 @@ are checked. Single-vCPU stdin interaction is available with a Gymnasium wrapper
 Rich x86 kernel capture, multiworker pretraining, and kernel Gym actions are
 checked with two active vCPUs. CUDA execution and capture throughput optimization remain open.
 
+An initial [hardware tracing path](docs/hardware-tracing.md) captures Linux perf
+PMU samples and raw Intel PT without QEMU, plus bounded Windows WPR memory-mode
+ETL. The Windows ETL decoder and real hardware validation remain open.
+
 Start with [the examples](example/README.md):
 
 - [Trace digits](example/trace_digits/README.md): generate 300 inputs, capture one

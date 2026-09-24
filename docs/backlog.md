@@ -7,6 +7,17 @@ MPS. Mixed frames, bounded multiworker collation and packed MPS uploads are now
 measured. AWS/CUDA and sustained multi-host scaling remain open.
 Later milestones are outcomes, not schedule promises.
 
+## Current hardware tracing slice
+
+Requested 2026-09-24. [Hardware tracing](hardware-tracing.md) defines the
+sample-versus-trace contract and evidence. Linux perf process and host-kernel
+capture, sampled generic PMU events, Intel precise loads, raw Intel PT AUX, and
+loss checks have real `trail-x86` smoke evidence. Windows WPR memory profiles
+and raw ETL export have unit coverage; WPR syntax CI and physical Windows
+capture remain to be checked. The Linux process backend does not yet follow
+new threads. Intel PT packet decoding, Windows ETL tensor decoding, AMD/ARM
+trace-specific hardware, and measured perturbation overhead remain open.
+
 ## Completed first iteration: AArch64 observation to MPS
 
 Demo: run an unmodified, benign AArch64 program on prescribed input in `trail-arm`;
