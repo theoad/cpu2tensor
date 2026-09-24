@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+name: Windows hardware profile
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/hardware-windows.yml
+      - python/cpu2tensor/windows_hardware.py
+      - python/cpu2tensor/hardware.py
+      - python/tests/test_windows_hardware.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wpr-profile:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Validate custom hardware profiles with WPR
+        shell: pwsh
+        env:
+          PYTHONPATH: python
+        run: |
+          python -c "from pathlib import Path; from cpu2tensor.windows_hardware import WprConfig, _profile; [Path(name + '.wprp').write_text(_profile(WprConfig(signal=name)), encoding='utf-8') for name in ('cycles', 'instructions', 'processor_trace')]"
+          foreach ($name in @('cycles', 'instructions', 'processor_trace')) {
+            wpr -profiles "$name.wprp"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

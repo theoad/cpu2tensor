@@ -18,6 +18,11 @@ if TYPE_CHECKING:
         TraceTerminalError, TraceTimeoutError, TransportEnd,
     )
     from cpu2tensor.wire import WireFrame, WireObserver
+    from cpu2tensor.hardware import (
+        HardwareBatch, HardwareCaptureError, HardwareConfig, HardwareTraceLost,
+        PerfCapture,
+    )
+    from cpu2tensor.windows_hardware import WprBatch, WprCapture, WprConfig
 
 # Worker-side benchmarks use the native decoder without loading a learner runtime.
 _EXPORTS = {
@@ -33,6 +38,10 @@ _EXPORTS = {
     'TraceTerminalError': 'terminal', 'TraceTimeoutError': 'terminal',
     'TransportEnd': 'terminal',
     'WireFrame': 'wire', 'WireObserver': 'wire',
+    'HardwareBatch': 'hardware', 'HardwareCaptureError': 'hardware',
+    'HardwareConfig': 'hardware', 'HardwareTraceLost': 'hardware',
+    'PerfCapture': 'hardware', 'WprBatch': 'windows_hardware',
+    'WprCapture': 'windows_hardware', 'WprConfig': 'windows_hardware',
 }
 __all__ = list(_EXPORTS)
 
