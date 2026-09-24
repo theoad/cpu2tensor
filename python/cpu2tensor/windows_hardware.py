@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 import platform
 import subprocess
@@ -130,7 +131,12 @@ class WprCapture:
             raise RuntimeError("Create a new WprCapture for each run")
         self._directory = tempfile.TemporaryDirectory(prefix="cpu2tensor-wpr-")
         profile = Path(self._directory.name) / "hardware.wprp"
-        profile.write_text(_profile(self.config), encoding="utf-8")
+        # Commit the small control file before tracing starts. WPR itself keeps
+        # event buffers in memory until stop().
+        with profile.open("w", encoding="utf-8") as file:
+            file.write(_profile(self.config))
+            file.flush()
+            os.fsync(file.fileno())
         try:
             _run_wpr("-start", f"{profile}!Cpu2Tensor.Verbose")
         except BaseException:
@@ -154,12 +160,14 @@ class WprCapture:
         return WprBatch(self.config.signal, torch.frombuffer(contents, dtype=torch.uint8))
 
     def close(self) -> None:
-        if self._started:
-            _run_wpr("-cancel")
-            self._started = False
-        if self._directory is not None:
-            self._directory.cleanup()
-            self._directory = None
+        try:
+            if self._started:
+                _run_wpr("-cancel")
+                self._started = False
+        finally:
+            if self._directory is not None:
+                self._directory.cleanup()
+                self._directory = None
 
     def __exit__(self, *_: object) -> None:
         self.close()

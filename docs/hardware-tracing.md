@@ -112,8 +112,10 @@ On 2026-09-24, the `trail-x86` Linux x86-64 host exposed `cpu` and `intel_pt`
 PMUs and an Intel `mem-loads` alias. Real bounded user-process captures
 returned cycle samples, instruction samples, precise memory-load samples, and
 nonempty PT AUX bytes. Host-kernel captures on CPU 0 returned cycle samples,
-instruction samples, and PT bytes; a brief idle CPU-0 memory-load window had
-zero samples. These are backend smoke checks, not throughput or low-taint
+instruction samples, and PT bytes. A CPU-0 syscall workload also returned 382
+kernel memory-load samples, all with exact-IP flags and nonzero addresses;
+the brief idle CPU-0 window before it had zero samples. These are backend smoke
+checks, not throughput or low-taint
 measurements. No AMD, ARM CoreSight, Windows, or guest-kernel PMU path has been
 validated yet. PT decoding and Windows ETL tensor columns are required before
 those streams are useful as direct model inputs.

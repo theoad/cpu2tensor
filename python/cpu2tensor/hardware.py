@@ -269,7 +269,14 @@ class PerfCapture:
             raise RuntimeError("Create a new PerfCapture for each run")
         attr = _attribute(self.config)
         page = mmap.PAGESIZE
-        targets = ((tid, -1) for tid in sorted(int(name) for name in os.listdir(f"/proc/{self.config.pid}/task"))) if self.config.scope == "process" else ((-1, cpu) for cpu in self.config.cpus or ())
+        if self.config.scope == "process":
+            try:
+                tids = sorted(int(name) for name in os.listdir(f"/proc/{self.config.pid}/task"))
+            except OSError as error:
+                raise HardwareCaptureError(f"Cannot enumerate process {self.config.pid} threads") from error
+            targets = ((tid, -1) for tid in tids)
+        else:
+            targets = ((-1, cpu) for cpu in self.config.cpus or ())
         try:
             for tid, cpu in targets:
                 fd = _open_event(attr, tid, cpu)

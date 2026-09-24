@@ -216,6 +216,12 @@ class HardwareTests(unittest.TestCase):
         self.assertTrue(aux.closed)
         with self.assertRaises(RuntimeError):
             capture.__enter__()
+        with mock.patch("cpu2tensor.hardware._attribute", return_value=_PerfAttr()), \
+                mock.patch("cpu2tensor.hardware.os.listdir", side_effect=OSError("gone")):
+            with mock.patch("cpu2tensor.hardware.platform.system", return_value="Linux"):
+                missing = PerfCapture(config)
+            with self.assertRaisesRegex(HardwareCaptureError, "enumerate process 43"):
+                missing.__enter__()
 
     def test_mapping_failure_cleans_up_fd_and_mapping(self) -> None:
         page = mmap.PAGESIZE
