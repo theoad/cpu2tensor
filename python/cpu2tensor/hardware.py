@@ -61,7 +61,7 @@ class HardwareConfig:
     cpus: tuple[int, ...] | None = None
     period: int = 100_000
     data_pages: int = 64
-    aux_pages: int = 64
+    aux_pages: int = 128
 
     def __post_init__(self) -> None:
         if self.scope not in ("process", "kernel"):
@@ -171,11 +171,15 @@ def _attribute(config: HardwareConfig) -> _PerfAttr:
         attr.type = _source_value(root + "/type")
         try:
             pt_format = Path(root + "/format/pt").read_text().strip()
+            branch_format = Path(root + "/format/branch").read_text().strip()
         except OSError as error:
             raise HardwareCaptureError("Intel PT is unavailable") from error
-        if pt_format != "config:0":
-            raise HardwareCaptureError("Unsupported Intel PT enable bit")
-        attr.config = 1
+        if pt_format != "config:0" or branch_format != "config:13":
+            raise HardwareCaptureError("Unsupported Intel PT branch encoding")
+        # Bit 0 opts into explicit control, so branch packets must be enabled
+        # separately with bit 13. Without it, a nonempty AUX buffer can still
+        # contain only context packets and falsely look like a branch trace.
+        attr.config = 1 | (1 << 13)
         attr.sample_type = 0
         attr.sample_period = 0
     return attr

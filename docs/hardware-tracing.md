@@ -50,7 +50,7 @@ the perf AUX records. It does not yet decode branches or instructions to IP
 columns. A PT capture is only considered complete for the bounded bytes that
 fit the ring. An overflow, reported loss, or unexpected record layout raises
 `HardwareTraceLost` or `HardwareCaptureError` instead of returning a plausible
-looking complete batch. Default data and AUX rings use 64 pages each per source;
+looking complete batch. Default data and AUX rings use 64 and 128 pages per source;
 larger windows may need more pages and an operator-adjusted perf memory limit.
 
 For a host-kernel sample:
@@ -111,8 +111,9 @@ and a measured perturbation baseline still need a physical Windows host.
 On 2026-09-24, the `trail-x86` Linux x86-64 host exposed `cpu` and `intel_pt`
 PMUs and an Intel `mem-loads` alias. Real bounded user-process captures
 returned cycle samples, instruction samples, precise memory-load samples, and
-nonempty PT AUX bytes. Host-kernel captures on CPU 0 returned cycle samples,
-instruction samples, and PT bytes. A CPU-0 syscall workload also returned 382
+branch-enabled PT AUX bytes. Host-kernel captures on CPU 0 returned cycle
+samples, instruction samples, and branch-enabled PT bytes. A CPU-0 syscall
+workload also returned 382
 kernel memory-load samples, all with exact-IP flags and nonzero addresses;
 the brief idle CPU-0 window before it had zero samples. These are backend smoke
 checks, not throughput or low-taint
@@ -126,12 +127,19 @@ compiled with `cc -O2`. The target was pinned to CPU 2, the controller to CPU 3.
 Twelve runs per mode were randomized; timing covered release of the target's
 stdin gate through process exit, excluding tensorization after exit. The baseline
 median was 160.679 ms; cycle sampling at a 1,000,000 period was 161.293 ms;
-precise memory loads at a 100,000 period were 160.738 ms; and Intel PT was
-160.857 ms. The cycle runs produced 9,192 samples in total, memory loads 144
-samples, and PT 5,440 bytes. These small differences are specific to this
-predictable loop and short, bounded windows. They do not establish negligible
-overhead for branch-heavy code, high-rate sampling, long PT captures, kernel
-workloads, or timing-sensitive races.
+precise memory loads at a 100,000 period were 160.738 ms. The cycle runs
+produced 9,192 samples in total and memory loads 144 samples.
+
+A separate matched Intel PT check on the same host used 20 million unpredictable
+branches, an 8 MiB AUX ring, and 12 randomized runs per mode. The baseline
+median was 56.870 ms versus 57.406 ms with PT; each traced run produced about
+6.86 MiB of branch-enabled packets. A 256 KiB AUX ring reported loss even for
+one million branches, as required. On the host-kernel path, a 50 ms syscall
+window produced 5.59 MiB of PT packets; a 300 ms window exceeded an 8 MiB AUX
+ring and raised `HardwareTraceLost`. Sustained PT collection will need a
+memory-only draining path. These short-window results do not establish
+negligible overhead for sustained PT streaming, kernel workloads, other CPUs,
+or timing-sensitive races.
 
 The Linux ring layout and loss semantics follow the
 [perf ring buffer documentation](https://docs.kernel.org/userspace-api/perf_ring_buffer.html)

@@ -62,6 +62,8 @@ class HardwareTests(unittest.TestCase):
                 return "event=0xcd,umask=0x1,ldlat=3"
             if name.endswith("/format/pt"):
                 return "config:0"
+            if name.endswith("/format/branch"):
+                return "config:13"
             raise AssertionError(name)
 
         with mock.patch("pathlib.Path.read_text", read_text):
@@ -69,7 +71,7 @@ class HardwareTests(unittest.TestCase):
             pt = _attribute(HardwareConfig("process", pid=7, signal="intel_pt"))
         self.assertEqual((memory.type, memory.config, memory.config1), (11, 0x1CD, 3))
         self.assertEqual((memory.flags >> 15) & 3, 2)
-        self.assertEqual((pt.type, pt.config, pt.sample_type, pt.sample_period), (11, 1, 0, 0))
+        self.assertEqual((pt.type, pt.config, pt.sample_type, pt.sample_period), (11, 8193, 0, 0))
         with mock.patch("pathlib.Path.read_text", return_value="not-an-int"):
             with self.assertRaises(HardwareCaptureError):
                 _source_value("missing")
@@ -83,7 +85,10 @@ class HardwareTests(unittest.TestCase):
         with mock.patch("pathlib.Path.read_text", side_effect=["4", "other"]):
             with self.assertRaises(HardwareCaptureError):
                 _attribute(HardwareConfig("kernel", cpus=(0,), signal="memory_loads"))
-        with mock.patch("pathlib.Path.read_text", side_effect=["11", "config:2"]):
+        with mock.patch("pathlib.Path.read_text", side_effect=["11", "config:2", "config:13"]):
+            with self.assertRaises(HardwareCaptureError):
+                _attribute(HardwareConfig("kernel", cpus=(0,), signal="intel_pt"))
+        with mock.patch("pathlib.Path.read_text", side_effect=["11", "config:0", "config:12"]):
             with self.assertRaises(HardwareCaptureError):
                 _attribute(HardwareConfig("kernel", cpus=(0,), signal="intel_pt"))
         for signal in ("memory_loads", "intel_pt"):
