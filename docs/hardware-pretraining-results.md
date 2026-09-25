@@ -268,7 +268,14 @@ address samples on the requested CPU. The manifest reports admission reasons
 and every rejected attempt; suspicious cases may still receive a separate,
 denser PEBS replay.
 
-## Bare-metal 5.16.10 and Dirty Pipe boundary
+## Discarded AWS 5.16.10 and Dirty Pipe boundary
+
+The AWS run below is retained as a sensor and algorithm experiment only. It is
+not a qualified subject for the physical-host campaign: cloud bare metal has a
+different platform, firmware, interrupt topology, NUMA and device layout from
+the controlled laptop. Replacing its boot kernel could never make its learned
+hardware distribution stand in for that machine. AWS may train on exported
+shards, but it must not originate traces for this campaign.
 
 The first known-CVE hardware validation ran on an AWS `c5.metal` host with an
 instrumented upstream `5.16.10-cpu2tensor-dirtypipe` kernel, boot
@@ -322,10 +329,14 @@ The learned subject and every validation arm must instead use an unmodified,
 cryptographically identified production distribution kernel binary, modules,
 initramfs, command line, microcode, and configuration. Collection may use
 privileged hardware perf facilities, but it must not rebuild, patch, or enable
-debug behavior in that subject. Before admission, audit the shipped config and
-runtime command line for sanitizers, KCOV, lock debugging, slab debugging,
-assertion-heavy modes, and diagnostic-only allocators; if a vendor flavor
-enables them, choose a normal production flavor that does not. Known-CVE
+behavior that the production package does not ship. Audit and record the shipped
+config and runtime command line for sanitizers, KCOV, lock debugging, slab
+debugging, assertion-heavy modes, and diagnostic-only allocators. A capability
+compiled into the signed vendor binary is part of that real subject and must not
+be toggled between training and inference. If the study instead requires that
+no such facility be compiled at all, choose a different off-the-shelf production
+package and restart the subject; do not manufacture a custom "release-like"
+binary. Known-CVE
 validation should use archived vulnerable and fixed production packages from
 the same distribution series and flavor. Each arm must boot, expose the
 expected canary outcome, and produce comparable PT, PEBS, and PMU custody before
@@ -348,6 +359,44 @@ the collector's one-CPU affinity during training. Commit `0aa0100` restores the
 caller's full CPU set on success and failure. Re-running the sealed corpus with
 `--train-only` on CPUs 4--11 completed the same work promptly; this was an
 orchestration defect, not a model improvement.
+
+## Canonical physical-host R2
+
+The first corrected run used the unchanged signed Ubuntu
+`7.0.0-31-generic` package on `trail-x86`, an Intel i7-10510U laptop, boot
+`2ba4b210-4c31-48ce-92d5-4b306e16d26c`, microcode `0x100`. Its subject identity
+also seals the kernel version, BTF, notes, command line, CPU assignment, workload
+build ID, and clean source revision `0ce6c67`. The Ubuntu production config does
+ship UBSAN bounds support, SLUB debug capability, page poisoning support, and
+allocation initialization; the experiment records those real vendor choices and
+does not enable, disable, or rebuild any of them.
+
+All 204 executions were admitted on their first attempt with no loss or PMU
+multiplexing. They produced 342,937,312 raw PT bytes and 3,267 PEBS samples, of
+which one unusable sample was retained in custody but censored from learning.
+Collection sustained 32.60 sealed executions/s and 54.80 MB/s of PT on this
+named host. The fused model trained and scored at 1,386 and 1,272 executions/s
+respectively with four CPU threads. Its manifest, report, and checkpoint hashes
+are `97ddd255200732c5232bad072d57db93fb17e451132b7b5cf851bbe42048c6e3`,
+`8ea63c5f10da5a4ab7aac3274a9b3d59ca9f233f7bcd9a32bb35a093d9a2f11c`,
+and `847bc1dc805d5314d9ae59b20447e2844375344c7130ece7b2ffc2ddb2b05ee3`.
+
+The 42-row pilot calibration is too small for an operational alert-rate claim.
+It yielded 1/42 familiar and 9/36 wholly held-out-family alerts. Controlled
+modality swaps increased mean fused score by 1.90 times for PT, 1.90 for PEBS,
+and 1.73 for PMU; timestamp misalignment increased it by only 1.09 times. A
+real LLM bundle for the maximum calibration row retained the replay input, eight
+exact raw PT windows, four decoded and symbolicated PEBS samples, every PMU
+counter, and faithful residuals. Its SHA-256 is
+`54d031afe4512eca328ccc17ce9e7d8ed6abbe6e0f69790dff2a513f6c3d3ecf`.
+
+That bundle exposed a one-ULP alert flip when a new process used a different
+Torch CPU thread count. Commit `0ce6c67` makes the CPU thread count part of the
+frozen inference contract. The reproduced calibration score and threshold are
+now bit-identical at `0.5289283394813538`, with zero margin and no alert. This
+closes the mechanics and review-evidence PoC on the correct subject; it does not
+yet pass the process-scope sensor-canary, large calibration, rolling retention,
+or known-vulnerability gates required for a 24-hour campaign.
 
 ## Small-model control
 

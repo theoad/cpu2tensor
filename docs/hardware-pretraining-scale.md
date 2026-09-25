@@ -211,12 +211,13 @@ localization was 78/78 for seed 41, and steady capture reached 8,119 complete
 windows/s/core.
 
 The 24-hour campaign remains **NO-GO** until the tri-modal gate passes in three
-randomized sessions on the exact `c5.metal` boot: zero PT/AUX or PEBS loss,
-nonzero equal PEBS and PMU running/enabled times, exact-IP nonzero PEBS
-addresses, stable attribution, and recorded AMI/kernel/microcode/topology/
-capture hashes. Rolling alert retention and accelerator batching must keep up
-with the measured producer, followed by the label-hidden matched known-CVE
-validation. A dedicated anomaly token or attention export is optional and must
-beat faithful residual localization under blinded intervention before admission.
+randomized sessions on the exact physical `trail-x86` subject: zero PT/AUX or
+PEBS loss, nonzero equal PEBS and PMU running/enabled times, exact-IP nonzero
+PEBS addresses, stable attribution, and recorded production-package/kernel,
+boot, microcode, topology, and capture hashes. Rolling alert retention and
+accelerator batching must keep up with the measured producer, followed by the
+label-hidden matched known-CVE validation. A dedicated anomaly token or attention
+export is optional and must beat faithful residual localization under blinded
+intervention before admission.
 
 AWS instance specifications: [P5 instances](https://aws.amazon.com/ec2/instance-types/p5/).

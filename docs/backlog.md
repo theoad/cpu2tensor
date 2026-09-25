@@ -70,20 +70,21 @@ proved nonzero equal perf scheduling times and an end-to-end live feature smoke
 produced finite `[1,1,16,256]` PT, `[1,1,16,24]` PEBS, and `[1,1,1,4]` PMU
 tensors. See [the measured results](hardware-pretraining-results.md).
 
-Current state: the fresh v2 204-execution corpus closes the three local blockers.
-Across four seeds, fused and span-only models alert on 0/36 executions from the
-wholly unseen `dup`, `memfd`, and `pipe` families while retaining strong
-cross-modal swap response. The integrated masked timing objective raises fused
-timestamp-misalignment scores by 1.505--1.552 times, localizes the changed PEBS
-token in 78/78 seed-41 validation executions, and adds only 0.6% to repeated
-batched scoring on the named MPS host. A long-lived loss-checked perf session
-sustains 8,119 complete PT+PEBS+PMU windows/s on one `trail-x86` core for the
-100-getpid benchmark. The LLM bundle retains exact replay input, empirical
-confidence, raw PT windows, timing and feature residuals, decoded PEBS semantics,
-and optional exact-boot symbols. Next: three randomized `c5.metal` sessions,
-rolling retained-alert custody plus accelerator batching, and the label-hidden
-matched known-CVE gate. The 24-hour campaign remains **NO-GO** until those gates
-pass. The prior isolated temporal R1 remains preserved by tag for provenance.
+Current state: the corrected canonical-host R2 corpus retained 204/204 executions
+from the unchanged signed Ubuntu kernel on the physical `trail-x86` laptop, with
+no retry, loss, or PMU multiplexing. It sustained 32.60 fully sealed executions/s
+and 54.80 MB/s of PT; the fused model retained strong PT, PEBS, and PMU swap
+response and scored 1,272 executions/s on four host threads. The LLM bundle
+retains exact replay input, empirical confidence, raw PT windows, timing and
+feature residuals, decoded PEBS semantics, and exact-boot symbols. Its discovery
+of a one-ULP threshold flip caused by a different Torch thread count led to a
+frozen inference-thread contract and a bit-identical cross-process replay.
+Cloud bare metal is no longer a collector candidate because it is a different
+physical subject; AWS may train only on exported immutable shards. Next: three
+randomized sessions on the same physical host, rolling retained-alert custody
+plus accelerator batching, and label-hidden validation on archived production
+kernel packages. The 24-hour campaign remains **NO-GO** until those gates pass.
+The prior isolated temporal R1 remains preserved by tag for provenance.
 
 ## Completed first iteration: AArch64 observation to MPS
 
