@@ -282,12 +282,15 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                 capture_retries=2,
                 timeout=1.0,
             )
+            set_num_threads = mock.Mock()
             with mock.patch.object(experiment.platform, "system", return_value="Linux"), \
                     mock.patch.object(
                         experiment.os, "sched_getaffinity", create=True,
                         return_value={2, 3},
                     ), mock.patch.object(
                         experiment.os, "sched_setaffinity", create=True,
+                    ), mock.patch.object(
+                        experiment.torch, "set_num_threads", new=set_num_threads,
                     ), mock.patch.object(
                         experiment, "make_plan", return_value=((execution,), ("openat",)),
                     ), mock.patch.object(
@@ -308,6 +311,7 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                     ):
                 manifest = experiment.collect(args)
 
+        set_num_threads.assert_called_once_with(1)
         admission = manifest["collection"]["admission"]
         self.assertEqual(admission["total_attempts"], 3)
         self.assertEqual(

@@ -748,6 +748,9 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
     if args.target_cpu not in allowed_cpus or args.controller_cpu not in allowed_cpus:
         raise ValueError("target and controller CPUs must be in the allowed affinity set")
     os.sched_setaffinity(0, {args.controller_cpu})
+    # Torch chose its intra-op pool before the controller was pinned. Leaving a
+    # larger pool on one CPU makes bincount's parallel path contend with itself.
+    torch.set_num_threads(1)
 
     families = tuple(args.families)
     plan, heldout = make_plan(
