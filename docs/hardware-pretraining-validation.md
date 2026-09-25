@@ -79,8 +79,8 @@ epochs.
 
 Split whole sessions, boots, seeds, and workload families. Never distribute
 windows from one execution across training, calibration, and test. Train on benign
-familiar variants only. Use separate sessions to freeze normalization and the
-score threshold at the calibration 99th percentile. The evaluator retains the map
+familiar variants only. The process-scope sensor gate freezes a separately named
+threshold at the calibration 99th percentile. The evaluator retains the map
 from opaque condition IDs to variants until scoring finishes. Unseen benign
 families are test data and never adjust the threshold.
 
@@ -94,6 +94,13 @@ Tonight's process-scope sensor gate is:
   canaries at no more than 1% familiar-benign execution alerts; and
 - checkpoint reload reproduces scores and the label-hidden report.
 
+That 1% sensor threshold is not the operational triage threshold. The initial
+operational target is 1,000 reviews per million executions, the 99.9th
+percentile. Estimate it from at least 100,000 familiar-benign calibration
+executions and verify it on at least 100,000 independent benign executions,
+split by whole sessions and families. Never reuse the small sensor calibration
+to claim an operational review rate.
+
 Report familiar and unseen-family alerts separately as executions per thousand and
 alerts per hour. Also report the worst family, time or executions to first alert,
 PT-only, PEBS-only, PMU-only and fused ablations, and localization against the
@@ -106,8 +113,8 @@ changes. It does not establish that the model detects bugs, distinguishes causes
 or operates at an acceptable prospective false-alert rate.
 
 The separate kernel-only PoC gate uses the exact same boot and hardware but
-`scope=process_kernel`. It must capture all three modalities without loss or PMU
-multiplexing; beat the marginal and PT-only baselines on cross-modal matching;
+`scope=process_kernel`. It must capture all three modalities without loss or
+PEBS/PMU multiplexing; beat the marginal and PT-only baselines on cross-modal matching;
 retain the frozen familiar-family alert budget; and report every held-out syscall
 family rather than averaging them away. No application-scope sample may enter
 kernel-only training, calibration, or evaluation.

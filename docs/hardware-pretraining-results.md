@@ -65,6 +65,18 @@ it gives roughly five times the sample density without a consistent overhead
 penalty in this matrix. These six repeats qualify a choice; they do not establish
 a universal perturbation bound.
 
+The initial matrix inferred PEBS scheduling from source presence. Commit
+`70cbfb5` subsequently pinned the precise event and made perf's own
+`time_enabled` and `time_running` values part of the accepted evidence. A fresh
+three-repeat `mmap` replay on the same exact subject produced six exact-IP,
+nonzero-address samples in every tri-modal execution and equal nonzero scheduling
+times in every case. Its artifact is cached as
+`~/.cache/cpu2tensor/multimodal-poc/pebs-schedule-qualification.json`, SHA-256
+`139308b7b4667548f4a4dc791b93bae7453707a4c36d4c48eaecc3932a15b1ff`.
+The tri-modal median was 1.092 times its matched baseline in these three repeats;
+the wider earlier 4.20--5.30% matrix and this 9.2% short replay are reported
+separately rather than combined into a universal perturbation estimate.
+
 ## Small-model control
 
 The initial masked bidirectional transformer has 171,143 parameters for four

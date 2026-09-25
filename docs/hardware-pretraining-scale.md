@@ -41,9 +41,10 @@ Preferred topology:
    NVIDIA H100 with 80 GiB HBM3, 16 vCPUs, 256 GiB host RAM, and 3.84 TB local
    NVMe for this type. The current account has 16 P-Spot vCPUs, exactly one such
    instance, while P on-demand quota is zero.
-3. A dedicated encrypted, public-blocked, versioned S3 prefix for immutable
-   manifests, sealed shards, checkpoints, and metrics. NVMe is a cache, never the
-   sole copy.
+3. A dedicated S3 bucket with default encryption, public-access blocking,
+   versioning, and Object Lock for immutable manifests, sealed shards,
+   checkpoints, and metrics. Those controls are bucket-level; a prefix in an
+   unrelated bucket is insufficient. NVMe is a cache, never the sole copy.
 
 As observed through the AWS APIs on 2026-09-25, `p5.4xlarge` Spot was about
 $2.60/hour and shared-tenancy Linux `c5.metal` on demand was $4.08/hour in
@@ -51,6 +52,12 @@ $2.60/hour and shared-tenancy Linux `c5.metal` on demand was $4.08/hour in
 at the 26-hour hard stop, before block/object storage and taxes. Prices and Spot
 capacity are not a launch guarantee. Query price, quota, capacity, and storage
 rates again before approval, and require a separately approved campaign ceiling.
+At the observed rates, a 2.5 TiB `gp3` collector volume costs approximately
+$7.40 for 26 hours and retaining 2.2 TiB in S3 Standard for one month costs
+approximately $51.80. Use a provisional $250 campaign ceiling, excluding taxes
+and longer retention, only after explicit approval. Spot placement scored 1/10
+in every offered `us-east-1` P5 Availability Zone during the audit, so replacement
+capacity cannot be assumed.
 The local `trail-x86` collector is preferable only if a 1 GiB
 transfer probe sustains twice the measured producer rate and the host can remain
 powered, thermally stable, and uncontended for 24 hours.
@@ -68,21 +75,32 @@ magnitude of 20 million executions and 0.8--1 TB raw PT before PEBS and metadata
 The launch plan must use measurements from the qualified tri-modal collector,
 not these PT-only estimates, to set disk and S3 bounds.
 
+Provision a 2.5 TiB collector volume with a 2 TiB raw-data hard cap and a 2.2 TiB
+S3 campaign budget. Require sustained verified upload above twice measured
+production and at least 50 MiB/s. Use 128--256 MiB shards. Derived tensors may
+remain reproducible local artifacts rather than duplicating another full corpus.
+
 Use the first two hours as a preregistered capacity ladder rather than committing
 the full day to an arbitrary model:
 
-| Candidate | Purpose |
-| --- | --- |
-| Approximately 1M parameters | PoC continuity and pipeline control |
-| Approximately 30M parameters | First serious representation baseline |
-| Approximately 120M parameters | Large single-H100 candidate |
+| Candidate | Configuration | Actual parameters |
+| --- | --- | ---: |
+| PoC control | $d=128$, 8 heads, FFN 512, local 2, cross-CPU 2 | 867,335 |
+| Serious baseline | $d=512$, 8 heads, FFN 2,048, local 7, cross-CPU 2 | 28,667,655 |
+| Large candidate | $d=768$, 12 heads, FFN 3,072, local 12, cross-CPU 5 | 120,937,991 |
 
-Each candidate receives the same early shards, mask schedule, number of target
-tokens, and allowed validation set. Select the largest model that fits the memory
-and throughput envelope and demonstrates a justified validation or scaling-curve
-gain. Do not select on the blinded final canaries or CVE labels. Continue the
-selected model for the remaining 22 hours with multiple independently sampled
-mask views. Architecture, signal schema, and subject identity freeze after hour 2.
+Each candidate receives the same early shards, mask schedule, effective batch,
+target-token count, optimizer schedule, and allowed validation set. A candidate
+is eligible only after five consecutive finite five-minute windows, peak HBM at
+or below 60 GiB, and a projection that leaves at least 5.5 of the remaining 22
+hours for validation and checkpointing. It must improve the preregistered
+allowed-validation composite by at least 5% over the next smaller model with a
+session-block-bootstrap 95% interval excluding zero, while no modality metric
+regresses more than 2%. Select the largest eligible candidate. If 30M does not
+beat 1M, retain 1M only as the control; if 1M does not beat marginal and PT-only
+baselines, abort. Do not select on blinded final canaries or CVE labels. Continue
+the winner for the remaining time with at most two independently sampled mask
+views. Architecture, signal schema, and subject identity freeze after hour 2.
 
 ## Immutable data path
 
@@ -99,29 +117,32 @@ address material is encrypted and access controlled.
 
 ## Health and adjustment loop
 
-Checks are recurrent and machine-readable:
+Append a versioned JSONL record with `run_id`, subject hash, lineage, UTC time,
+cadence, status, reasons, and the cadence-specific scalars below:
 
 | Interval | Checks |
 | --- | --- |
-| 1 minute | process liveness, disk, RAM, GPU memory, collector/trainer backlog |
-| 5 minutes | capture loss, PEBS density, PMU `time_running/time_enabled`, CPU migration, target oracle |
-| 15 minutes | finite loss, gradient norm, parameter norm, throughput, GPU utilization, NaN/Inf, checkpoint and S3 hash |
-| 30 minutes | allowed validation loss by modality, cross-modal retrieval, modality-swap residual, score distribution drift |
-| 2 hours | scaling curve, familiar and unfamiliar allowed-benign alerts, canary-development set, resource/spend forecast |
+| 1 minute | liveness and boot hash; disk/RAM/HBM; sealed/uploaded/backlog bytes; oldest unverified shard; GPU utilization and data wait; spend/end forecast |
+| 5 minutes | executions/rejections; PT/AUX and PEBS loss; family-normalized PEBS density; PEBS and PMU running ratios; migration; exact target oracle |
+| 15 minutes | step, unique executions/views, replay ratio, per-modality loss, gradient/parameter norm, nonfinite count, tokens/s, checkpoint age/hash/remote verification |
+| 30 minutes | allowed-validation modality losses, retrieval, swap residual, per-family alerts, preregistered input drift |
+| 2 hours | capacity projection, familiar/unfamiliar allowed-benign alerts, development canaries, storage and spend forecasts |
 
 Allowed automatic adjustments are bounded:
 
-- If the GPU is starved while sealed shards exist, increase loader workers,
-  prefetch, or batch size without changing sample selection.
-- On OOM, reduce microbatch and increase gradient accumulation; do not shrink the
-  model after the capacity decision.
+- If the GPU is starved while sealed shards exist, add at most one loader worker
+  per 15 minutes up to eight and double prefetch only up to eight. Do not change
+  sample order.
+- On the first OOM, halve microbatch once and increase accumulation to preserve
+  the effective batch and schedule; do not shrink the model after selection.
 - On NaN/Inf, restore the last clean checkpoint and halve the learning rate once.
   A second occurrence aborts that lineage.
-- If fresh data is temporarily unavailable, reuse sealed shards with new masks;
-  never admit incomplete capture or relax loss checks.
+- If fresh data is temporarily unavailable, reuse training shards with new masks
+  only up to the preregistered two-view maximum; never admit incomplete capture
+  or alter sample order.
 - Spot interruption restores the latest verified S3 checkpoint on a replacement
-  trainer. Collector interruption ends the subject; it does not silently resume
-  after reboot.
+  trainer within 30 minutes or aborts. Collector interruption ends the subject;
+  it does not silently resume after reboot.
 
 Any optimization, mask-rate, or loss-weight adjustment creates a new lineage with
 the reason and prior checkpoint recorded. Final blinded data is never used for an
@@ -129,10 +150,20 @@ adjustment.
 
 ## Abort and completion gates
 
-Abort for unexplained PT/data loss, PMU multiplexing, sustained PEBS dropout,
-invalid or migrating timing lanes, workload-oracle changes, subject reboot, bad
-hashes, unbounded score drift, or two failed numerical recoveries. Resource hard
-stops terminate both instances after 26 hours even if orchestration fails.
+Abort on any admitted PT/PEBS loss or bad AUX flag, PEBS or PMU running ratio
+below one, oracle failure, CPU migration, subject/boot/hash change, corrupt shard
+or checkpoint, less than two hours of forecast disk runway, remote checkpoint
+age over 30 minutes, a second numerical recovery, spend forecast above the
+approved ceiling, or PEBS density below 50% of its qualified family baseline for
+two consecutive windows. Input drift uses preregistered bounds; training-score
+movement alone is not an abort. Resource hard stops terminate both instances
+after 26 hours even if orchestration fails.
+
+Write a local atomic checkpoint every five minutes and a full immutable S3
+checkpoint every 15 minutes, immediately before an adjustment, and on Spot
+interruption notice. Include model, optimizer, scaler, scheduler, RNG states,
+data cursor, ordered manifest hash, subject hash, lineage, and counters. Budget
+roughly 180--200 GB for retained versions of a 120M run.
 
 At completion, freeze and hash the last and best allowed-validation checkpoints,
 model and optimizer configuration, source revision, input manifests, health log,
@@ -141,10 +172,14 @@ conditions. Preserve suspicious raw trajectories before teardown.
 
 ## Recommendation gate
 
-Proceed with the 24-hour campaign only if the six-hour PoC demonstrates all three
-modalities with acceptable perturbation, explicit timing uncertainty, deterministic
-checkpoint reload, useful cross-modal prediction beyond marginal baselines, and a
-frozen threshold that meets the familiar-benign alert budget. Otherwise spend the
-24 hours fixing the measured blocker rather than scaling an unqualified signal.
+Proceed only if the six-hour PoC demonstrates all three modalities with acceptable
+perturbation, explicit timing uncertainty, deterministic checkpoint reload,
+useful cross-modal prediction beyond marginal baselines, and a frozen threshold
+that meets the familiar-benign alert budget. Then repeat the tri-modal gate for
+at least three randomized sessions on the exact `c5.metal` boot: zero PT/AUX or
+PEBS loss, nonzero equal PEBS and PMU running/enabled times, exact-IP nonzero
+PEBS addresses, stable attribution, and recorded AMI/kernel/microcode/topology/
+capture hashes. The current `trail-x86` result does not qualify AWS. Otherwise
+spend the 24 hours fixing the measured blocker rather than scaling it.
 
 AWS instance specifications: [P5 instances](https://aws.amazon.com/ec2/instance-types/p5/).
