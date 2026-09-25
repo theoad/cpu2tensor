@@ -547,6 +547,19 @@ maximum policy frequency from 4.9 to 1.8 GHz. The frequency policy is now
 included in the exact subject identity; prior checkpoints must not be reused
 under the lower-power policy.
 
+The v3 feature pilot under that no-turbo policy completed 3,060/3,060
+first-attempt captures with zero loss and 6,063,839 precise-store samples. Its
+capture rate was 9.36 sealed executions/s on the same i7-10510U host at roughly
+52--53°C; Python feature extraction and per-execution durable custody dominate
+the finite runner. The frozen model's stronger, lawful near-miss sibling used
+`splice` in both arms, but drained the page-cache-backed pipe buffer before the
+neutral write. All 12 effect executions again manifested 20/20 mutations; all
+12 near misses did not. The model still failed separation: AUROC 0.5069,
+8/12 paired effect wins, and zero alerts in either arm. Report content SHA-256:
+`98bba1d842a60783cbb4000925471df354242c5823a6c7960c91e0b63ecd9e95`.
+This is another negative sensitivity result; adding relative-IP/address sketches
+alone does not justify claiming invariant learning.
+
 The full 278-test local suite passed with 75 platform skips before the
 decode-generation change; its focused 31-test suite passed afterward. The
 24-hour campaign remains **NO-GO** pending a better invariant-bearing signal,

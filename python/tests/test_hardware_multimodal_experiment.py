@@ -116,6 +116,32 @@ class _Capture:
 
 
 class KernelMultimodalExperimentTests(unittest.TestCase):
+    def test_large_pt_baseline_uses_bounded_reproducible_low_rank_fit(self) -> None:
+        generator = torch.Generator().manual_seed(7)
+        values = torch.randn((4_097, 16), generator=generator)
+        available = torch.ones_like(values, dtype=torch.bool)
+        with mock.patch.object(
+            experiment.PtPcaBaseline, "_matrix", return_value=(values, available)
+        ):
+            first = experiment.PtPcaBaseline.fit(None, 4)
+            second = experiment.PtPcaBaseline.fit(None, 4)
+        self.assertEqual(first.components.shape, (4, 16))
+        torch.testing.assert_close(first.components, second.components, rtol=0, atol=0)
+
+    def test_loop_diversity_is_stable_and_independent_of_split(self) -> None:
+        execution = experiment.PlannedExecution("mmap-00007", "mmap", 7, "training")
+        other_split = replace(execution, partition="calibration")
+        loops = experiment.planned_loops(
+            execution, seed=41, loop_scale=1, loop_divisors=(1, 2, 4),
+        )
+        self.assertIn(loops, (5_000, 2_500, 1_250))
+        self.assertEqual(
+            loops,
+            experiment.planned_loops(
+                other_split, seed=41, loop_scale=1, loop_divisors=(1, 2, 4),
+            ),
+        )
+
     def test_raw_retention_is_preregistered_and_content_independent(self) -> None:
         first = experiment.retain_raw_execution(
             "dataset", "execution", seed=7, fraction=0.5,

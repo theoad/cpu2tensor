@@ -665,6 +665,26 @@ def multimodal_anomaly_score(
     return multimodal_anomaly_evidence(model, batch).score
 
 
+@torch.no_grad()
+def score_multimodal_in_batches(
+    model: MaskedHardwareModel,
+    batch: HardwareMultimodalBatch,
+    *,
+    batch_size: int = 128,
+) -> torch.Tensor:
+    """Bound inference activation memory without omitting any execution."""
+    if batch_size <= 0:
+        raise ValueError("inference batch size must be positive")
+    scores = []
+    for start in range(0, batch.batch_size, batch_size):
+        indices = torch.arange(
+            start, min(start + batch_size, batch.batch_size),
+            device=batch.pt.device,
+        )
+        scores.append(multimodal_anomaly_score(model, batch.index_select(indices)))
+    return torch.cat(scores)
+
+
 def empirical_tail_probability(
     scores: torch.Tensor,
     calibration_scores: torch.Tensor,
@@ -692,7 +712,7 @@ def calibrate_multimodal_threshold(
 ) -> float:
     if not 0 < reviews_per_million < 1_000_000:
         raise ValueError("reviews per million must be between zero and one million")
-    scores = multimodal_anomaly_score(model, calibration)
+    scores = score_multimodal_in_batches(model, calibration)
     quantile = 1.0 - reviews_per_million / 1_000_000.0
     return float(torch.quantile(scores, quantile, interpolation="higher"))
 

@@ -18,6 +18,7 @@ from cpu2tensor.examples.hardware_multimodal import (
     make_training_masks,
     multimodal_anomaly_evidence,
     multimodal_anomaly_score,
+    score_multimodal_in_batches,
     save_frozen_multimodal_model,
     train_masked_model,
 )
@@ -95,6 +96,18 @@ def _replace(
 
 
 class HardwareMultimodalTests(unittest.TestCase):
+    def test_batched_inference_scores_every_execution_without_large_forward(self) -> None:
+        batch = _fixture(rows=5, cpus=2)
+        model = _model(batch)
+        model.fit_normalization(batch)
+        freeze_multimodal_model(model)
+        expected = multimodal_anomaly_score(model, batch)
+        observed = score_multimodal_in_batches(model, batch, batch_size=2)
+        self.assertEqual(observed.shape, (5,))
+        torch.testing.assert_close(expected, observed, rtol=1e-5, atol=1e-6)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            score_multimodal_in_batches(model, batch, batch_size=0)
+
     def test_anomaly_evidence_retains_score_contributors_and_confidence(self) -> None:
         batch = _fixture(rows=5, cpus=2)
         model = _model(batch)

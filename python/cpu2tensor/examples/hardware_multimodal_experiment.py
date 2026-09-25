@@ -36,6 +36,7 @@ from cpu2tensor.examples.hardware_multimodal import (
     frozen_multimodal_metadata,
     load_frozen_multimodal_model,
     multimodal_anomaly_score,
+    score_multimodal_in_batches,
     save_frozen_multimodal_model,
     train_masked_model,
 )
@@ -338,6 +339,20 @@ def retain_raw_execution(
     return draw < fraction
 
 
+def planned_loops(
+    execution: PlannedExecution, *, seed: int, loop_scale: int,
+    loop_divisors: Sequence[int],
+) -> int:
+    """Vary benchmark intensity without using trace content or split labels."""
+    if not loop_divisors or any(divisor <= 0 for divisor in loop_divisors):
+        raise ValueError("loop divisors must be positive")
+    digest = hashlib.sha256(
+        f"{seed}\0{execution.execution_id}".encode("utf-8")
+    ).digest()
+    choice = int.from_bytes(digest[:8], "big") % len(loop_divisors)
+    return max(1, WORKLOAD_LOOPS[execution.family] * loop_scale // loop_divisors[choice])
+
+
 def prospective_retention_decision(
     score: float,
     threshold: float,
@@ -600,9 +615,21 @@ class PtPcaBaseline:
         scale = torch.where(counts > 0, variance.sqrt().clamp_min(1e-4),
                             torch.ones_like(variance))
         standardized = centered / scale
-        _, _, right = torch.linalg.svd(standardized, full_matrices=False)
-        dimensions = min(latent_dimensions, right.shape[0])
-        return cls(mean, scale, right[:dimensions].contiguous())
+        dimensions = min(latent_dimensions, *standardized.shape)
+        if standardized.shape[0] > 4_096:
+            # Full SVD scales cubically in the 4,096 PT columns and makes a
+            # large benign corpus spend its budget on the control baseline.
+            rank = min(dimensions + 8, *standardized.shape)
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(41)
+                _, _, right = torch.pca_lowrank(
+                    standardized, q=rank, center=False, niter=2
+                )
+            components = right[:, :dimensions].T
+        else:
+            _, _, right = torch.linalg.svd(standardized, full_matrices=False)
+            components = right[:dimensions]
+        return cls(mean, scale, components.contiguous())
 
     def score(self, batch: ModelBatch) -> torch.Tensor:
         values, available = self._matrix(batch)
@@ -961,7 +988,10 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
     censored_tokens = {"pt": 0, "pebs": 0, "pmu": 0}
     kernel_decode_states: dict[str, dict[str, str]] = {}
     for execution in plan:
-        loops = WORKLOAD_LOOPS[execution.family] * args.loop_scale
+        loops = planned_loops(
+            execution, seed=args.seed, loop_scale=args.loop_scale,
+            loop_divisors=getattr(args, "loop_divisors", (1,)),
+        )
         for attempt in range(args.capture_retries + 1):
             total_attempts += 1
             try:
@@ -1115,6 +1145,7 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             "families": list(families),
             "heldout_families": list(heldout),
             "repetitions": args.repetitions,
+            "loop_divisors": list(getattr(args, "loop_divisors", (1,))),
             "training_rows_per_familiar_family": args.training_rows,
             "calibration_rows_per_familiar_family": args.calibration_rows,
         },
@@ -1350,7 +1381,7 @@ def _score_sensitivity(score, clean: ModelBatch, threshold: float) -> dict[str, 
 def _sensitivity(model: MaskedHardwareModel, clean: ModelBatch,
                  threshold: float) -> dict[str, object]:
     return _score_sensitivity(
-        lambda batch: multimodal_anomaly_score(model, batch), clean, threshold
+        lambda batch: score_multimodal_in_batches(model, batch), clean, threshold
     )
 
 
@@ -1531,8 +1562,8 @@ def _train_one(
     restored, restored_threshold = load_frozen_multimodal_model(
         checkpoint, device=args.device,
     )
-    expected = multimodal_anomaly_score(model, calibration)
-    observed = multimodal_anomaly_score(restored, calibration)
+    expected = score_multimodal_in_batches(model, calibration)
+    observed = score_multimodal_in_batches(restored, calibration)
     deterministic = restored_threshold == threshold and torch.equal(expected, observed)
     if not deterministic:
         raise RuntimeError(f"{name} checkpoint reload changed frozen inference")
@@ -1637,8 +1668,8 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
             },
         )
         scoring_started = time.perf_counter()
-        familiar_scores = multimodal_anomaly_score(model, familiar)
-        heldout_scores = multimodal_anomaly_score(model, heldout)
+        familiar_scores = score_multimodal_in_batches(model, familiar)
+        heldout_scores = score_multimodal_in_batches(model, heldout)
         scoring_seconds = time.perf_counter() - scoring_started
         model_report["familiar"] = _score_summary(
             familiar_scores, threshold,
@@ -1658,7 +1689,7 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
             if not entries:
                 continue
             batch = _concatenate([rows[entry["execution_id"]] for entry in entries]).to(device)
-            scores = multimodal_anomaly_score(model, batch)
+            scores = score_multimodal_in_batches(model, batch)
             family_results[family] = {
                 "partition": entries[0]["partition"],
                 **_score_summary(scores, threshold,
@@ -1716,6 +1747,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("loop scale, repetitions, and timeout must be positive")
     if getattr(args, "pebs_period", PEBS_PERIOD) <= 0:
         raise ValueError("precise-memory sampling period must be positive")
+    if not getattr(args, "loop_divisors", (1,)) or any(
+        divisor <= 0 for divisor in getattr(args, "loop_divisors", (1,))
+    ):
+        raise ValueError("loop divisors must be positive")
     if not 0.0 <= float(getattr(args, "retain_raw_fraction", 1.0)) <= 1.0:
         raise ValueError("raw retention fraction must be between zero and one")
     if args.collect_only:
@@ -1758,6 +1793,7 @@ def parser() -> argparse.ArgumentParser:
               "eviction; every alert and the preregistered audit sample are retained"),
     )
     result.add_argument("--loop-scale", type=int, default=1)
+    result.add_argument("--loop-divisors", type=int, nargs="+", default=(1,))
     result.add_argument("--seed", type=int, default=20260925)
     result.add_argument("--repetitions", type=int, default=12)
     result.add_argument("--training-rows", type=int, default=6)
