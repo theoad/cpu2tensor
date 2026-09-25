@@ -509,7 +509,11 @@ def _decode_records(
                 columns[name].append(value if value < 1 << 63 else value - (1 << 64))
         position += size
     if signal == "intel_pt" and aux_position != trace_offset + len(trace):
-        raise HardwareTraceLost("Intel PT bytes have no matching AUX record")
+        raise HardwareTraceLost(
+            "Intel PT bytes have no matching AUX record: "
+            f"covered={aux_position - trace_offset}, bytes={len(trace)}, "
+            f"perf_records={len(data)}"
+        )
     return HardwareBatch(
         source,
         signal,
