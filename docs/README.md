@@ -15,6 +15,8 @@
   subject, capacity ladder, health policy, resource plan, and abort criteria.
 - [Multimodal hardware results](hardware-pretraining-results.md): named-host
   capture, perturbation, PEBS-period, and small-model evidence.
+- [Kernel-only multimodal experiment](kernel-multimodal-experiment.md): sealed
+  corpus collection, MPS training, frozen calibration, and corruption evaluation.
 - [Repeated action windows](action-windows.md): guest boundaries and fixed
   per-vCPU transition counts.
 - [Custom kernel actions](custom-kernel-actions.md): client-owned syscall sequences

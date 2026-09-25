@@ -24,5 +24,9 @@ with `load_frozen_raw_trace_pca` for ordinary frozen inference; scoring never
 updates the fitted model.
 [hardware_multimodal](hardware_multimodal.py) is the fixed-tensor masked PT,
 PEBS, and PMU training and calibration fixture.
+`hardware_multimodal_experiment` collects the gated
+[kernel-only multimodal corpus](../../../docs/kernel-multimodal-experiment.md),
+then trains and evaluates fused whole-modality and span-only frozen models. Its
+collect-only/train-only split supports capture on Linux x86 and training on MPS.
 
 - [Context-only blocks](../../../docs/context-only.md): compact paging state and vectorized block association.
