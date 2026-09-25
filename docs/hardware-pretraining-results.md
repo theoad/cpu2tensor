@@ -167,13 +167,18 @@ it must not manufacture order across CPU lanes.
 
 The 204-run manifest separates 7.896 seconds of accepted workload execution
 from 168.649 seconds of explicit featurization and 14.234 seconds of all other
-capture/custody work. Featurization therefore consumed 88.40% of the 190.78
-second run. The dominant operation is the PT byte histogram: 1.729 GB was
-reduced at only 10.25 MB/s through 16 separate `uint8` to `int64` conversions
-and `torch.bincount` calls per execution. PEBS contained only 16,960 samples and
-cannot explain that wall time. Raw custody wrote 1.731 GB, fsynced each execution,
-then reread it for SHA-256; this belongs in a phase benchmark but is bounded by
-the 14.234-second residual, not the dominant 168.649 seconds.
+capture/custody work. The live timer therefore attributes 88.40% of the 190.78
+second run to the featurizer. It is not yet valid to attribute that cost to the
+histogram itself: replaying the exact featurizer over 40 retained shards on the
+same pinned `trail-x86` CPU processed 254.7 MB at 568 MB/s, and the isolated
+29.9 MB `memfd` histogram reached 637 MB/s there and 1.60 GB/s on `mac.local`.
+Those rates are roughly 55 and 156 times the live run's implied 10.25 MB/s. The
+discrepancy points to a live-buffer/runtime interaction or an over-broad phase
+timer and needs subphase instrumentation before optimization. PEBS contained
+only 16,960 samples and is unlikely to explain 168.649 seconds. Raw custody
+wrote 1.731 GB, fsynced each execution, then reread it for SHA-256; this belongs
+in the same phase benchmark but is bounded by the 14.234-second residual as
+currently timed.
 
 The workload itself also prevents a 1,000-execution/s claim: its mean accepted
 window was 38.7 ms, and even `getpid` averaged 2.44 ms. High-rate operation needs

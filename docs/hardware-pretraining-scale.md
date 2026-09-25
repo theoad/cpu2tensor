@@ -82,7 +82,8 @@ production and at least 50 MiB/s. Use 128--256 MiB shards. Derived tensors may
 remain reproducible local artifacts rather than duplicating another full corpus.
 
 The real 204-execution tri-modal runner produced 8.47 MB of PT per execution and
-spent 88.40% of its wall time in the current Python histogram path. Persisting
+attributed 88.40% of its wall time to live featurization, although exact-shard
+replay is much faster and requires phase-level diagnosis. Persisting
 that volume at the desired eventual aggregate rate is impossible: 100,000
 executions/s would approach 847 GB/s and 73 PB/day. The high-rate design must
 therefore keep long-lived per-core perf sessions, continuously drain and score

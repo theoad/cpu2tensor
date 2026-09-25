@@ -77,7 +77,9 @@ over clean evidence. Whole-modality masking beat span-only on every swap. The
 gate also found two decisive blockers: PEBS timestamp permutation stayed at
 0.996 times clean, and 14/36 unseen benign executions alerted, including every
 held-out `memfd` execution. Finite capture plus Python featurization reached only
-1.069 executions/s; 88.40% of wall time was the current 16-pass PT histogram.
+1.069 executions/s; the live timer places 88.40% inside featurization, while
+offline replay of the same featurizer on the same host reaches 568 MB/s. Phase
+instrumentation must resolve that discrepancy before choosing an optimization.
 The retry-until-PEBS-positive rule also biases short executions and must become
 explicit zero-sample availability under verified affinity. The 24-hour campaign
 remains **NO-GO** until timing learning, benign-family generalization, and the
