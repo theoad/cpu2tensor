@@ -263,6 +263,10 @@ def build_bundle(artifact: Path, execution_id: str, checkpoint: Path,
     if len(entries) != 1:
         raise ValueError("execution id must identify exactly one retained row")
     entry = entries[0]
+    if not entry.get("raw_retained", True):
+        raise ValueError(
+            "raw evidence was not retained by the preregistered pretraining sample"
+        )
     raw_path = artifact / entry["raw_path"]
     raw = torch.load(raw_path, map_location="cpu", weights_only=True)
     if raw.get("schema") not in (RAW_SCHEMA, _LEGACY_RAW_SCHEMA):

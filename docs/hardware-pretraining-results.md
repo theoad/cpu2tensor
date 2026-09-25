@@ -398,6 +398,32 @@ closes the mechanics and review-evidence PoC on the correct subject; it does not
 yet pass the process-scope sensor-canary, large calibration, rolling retention,
 or known-vulnerability gates required for a 24-hour campaign.
 
+A subsequent 3,060-execution R3 on the same boot used 1,260 training, 1,008
+calibration, 252 familiar-validation, and 540 whole-family-held-out executions.
+It admitted every capture on the first attempt with no loss or multiplexing,
+retaining 5,150,136,704 PT bytes and 49,105 PEBS samples; 42 unusable PEBS rows
+were censored from learning but kept in raw custody. The fused model reduced loss
+from 0.393 to 0.066. At the preregistered 1% pilot threshold it flagged 4/252
+familiar and 42/540 held-out executions, while PT, PEBS, PMU, and timestamp
+perturbations raised mean score by 2.66, 2.51, 2.10, and 1.32 times. At the
+operational 0.1% calibration threshold it flagged 0/792 unmodified evaluation
+executions while still detecting 312 PT, 270 PEBS, 114 PMU, and three timing
+perturbations. Those corruptions are sensor controls, not vulnerability proxies.
+The manifest, report, and checkpoint SHA-256 values are
+`900b834c3d109d26fce7632f9ce9eaec02d19fa58d17e39911f51171bac51bc8`,
+`93d4747e4b514c5399d8f661c2ce8ca75eeec21ac11bf04aedd83e14456c986c`,
+and `798df994f3d93fbc3117a40463c93a7eb6baca926f583a550a3fe1a507176be2`.
+
+Copying the sealed 5.25 GB artifact from `trail-x86` to the local durable cache
+took 115.17 seconds, only 45.60 MB/s. That is below the run's 49.40 MB/s PT
+production rate and fails the required two-times headroom. Full raw streaming is
+therefore rejected. The same corpus's derived tensors occupy only 72 MB. The
+runner now supports a deterministic, content- and model-independent raw sampling
+fraction: it always retains derived tensors and the original raw hashes, while
+deleting non-sampled benign-pretraining raw files only after their derived file
+is sealed. This mode is for explicitly benign pretraining; prospective inference
+must score before retention and preserve every alert's original raw window.
+
 ## Small-model control
 
 The initial masked bidirectional transformer has 171,143 parameters for four

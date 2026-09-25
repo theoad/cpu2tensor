@@ -301,6 +301,27 @@ def make_plan(
     return tuple(plan), heldout
 
 
+def retain_raw_execution(
+    dataset_identity: str,
+    execution_id: str,
+    *,
+    seed: int,
+    fraction: float,
+) -> bool:
+    """Preregister a content-independent raw-custody sample."""
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError("raw retention fraction must be between zero and one")
+    if fraction == 0.0:
+        return False
+    if fraction == 1.0:
+        return True
+    digest = hashlib.sha256(
+        f"{dataset_identity}\0{seed}\0{execution_id}".encode("utf-8")
+    ).digest()
+    draw = int.from_bytes(digest[:8], "big") / float(1 << 64)
+    return draw < fraction
+
+
 def _hardware_payload(batch: HardwareBatch | None) -> dict[str, object] | None:
     if batch is None:
         return None
@@ -801,6 +822,9 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
         data_pages=args.data_pages,
         aux_pages=args.aux_pages,
     )
+    raw_retention_fraction = float(getattr(args, "retain_raw_fraction", 1.0))
+    if not 0.0 <= raw_retention_fraction <= 1.0:
+        raise ValueError("raw retention fraction must be between zero and one")
     artifact = args.artifact.resolve()
     if (artifact / "capture-manifest.json").exists():
         raise ValueError("artifact already contains a sealed capture manifest")
@@ -880,6 +904,12 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             "lanes": [_lane_payload(lane) for lane in lanes],
         })
         phases_ns["derived_sealing"] = time.perf_counter_ns() - derived_started_ns
+        raw_retained = retain_raw_execution(
+            identity["identity_sha256"], execution.execution_id,
+            seed=args.seed, fraction=raw_retention_fraction,
+        )
+        if not raw_retained:
+            raw_path.unlink()
         availability = {
             "pt": model_batch.pt_available,
             "pebs": model_batch.pebs_available,
@@ -897,6 +927,7 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             "loops": loops,
             "raw_path": str(raw_path.relative_to(artifact)),
             "raw_sha256": raw_hash,
+            "raw_retained": raw_retained,
             "derived_path": str(derived_path.relative_to(artifact)),
             "derived_sha256": derived_hash,
             "stdout_base64": base64.b64encode(captured.output).decode("ascii"),
@@ -955,6 +986,17 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             "unaccounted_wall_ns": max(0, collection_wall_ns - accounted_phase_ns),
             "missing_modality_executions": missing_modalities,
             "censored_tokens": censored_tokens,
+            "raw_retention": {
+                "method": "sha256_dataset_seed_execution_prefix_v1",
+                "fraction": raw_retention_fraction,
+                "retained_executions": sum(
+                    bool(entry["raw_retained"]) for entry in entries
+                ),
+                "discarded_executions": sum(
+                    not bool(entry["raw_retained"]) for entry in entries
+                ),
+                "decision_independent_of_trace_and_model": True,
+            },
         },
         "entries": entries,
     }
@@ -1000,8 +1042,9 @@ def load_dataset(artifact: Path) -> tuple[dict[str, object], dict[str, ModelBatc
     for entry in manifest["entries"]:
         raw_path = artifact / entry["raw_path"]
         derived_path = artifact / entry["derived_path"]
-        if _sha256(raw_path) != entry["raw_sha256"]:
-            raise ValueError(f"raw custody hash mismatch for {entry['execution_id']}")
+        if entry.get("raw_retained", True):
+            if _sha256(raw_path) != entry["raw_sha256"]:
+                raise ValueError(f"raw custody hash mismatch for {entry['execution_id']}")
         if _sha256(derived_path) != entry["derived_sha256"]:
             raise ValueError(f"derived tensor hash mismatch for {entry['execution_id']}")
         payload = torch.load(derived_path, map_location="cpu", weights_only=True)
@@ -1484,6 +1527,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if (args.loop_scale <= 0 or args.repetitions <= 0 or args.timeout <= 0 or
             args.capture_retries < 0):
         raise ValueError("loop scale, repetitions, and timeout must be positive")
+    if not 0.0 <= float(getattr(args, "retain_raw_fraction", 1.0)) <= 1.0:
+        raise ValueError("raw retention fraction must be between zero and one")
     if args.collect_only:
         return {"collection": collect(args)}
     if args.train_only:
@@ -1508,6 +1553,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--aux-pages", type=int, default=8192)
     result.add_argument("--timeout", type=float, default=30.0)
     result.add_argument("--capture-retries", type=int, default=2)
+    result.add_argument(
+        "--retain-raw-fraction", type=float, default=1.0,
+        help=("preregistered fraction of benign pretraining raw captures to keep; "
+              "derived tensors and custody hashes are always retained"),
+    )
     result.add_argument("--loop-scale", type=int, default=1)
     result.add_argument("--seed", type=int, default=20260925)
     result.add_argument("--repetitions", type=int, default=12)

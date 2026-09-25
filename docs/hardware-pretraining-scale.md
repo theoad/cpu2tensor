@@ -68,6 +68,17 @@ those fail, the campaign pauses; it does not move collection into AWS. Normal or
 bare-metal EC2 machines may be separate subjects for separate studies, never
 proxies for the physical host distribution learned here.
 
+The first real transfer gate failed: a 5.25 GB sealed corpus took 115.17 seconds
+to reach local durable storage, or 45.60 MB/s, while the same collection produced
+PT at 49.40 MB/s. The campaign must not stream every raw trace. During explicitly
+benign pretraining, `--retain-raw-fraction` preregisters a SHA-256 selection that
+is independent of trace contents and model scores; every execution retains its
+derived tensor and original raw hash, while only the selected raw captures remain.
+Derived tensors were 72 MB for 5.25 GB of total custody. During prospective
+inference this sampling mode is insufficient: scoring must precede eviction and
+every alert, integrity failure, plus the preregistered benign sample must retain
+its original raw windows.
+
 ## Data and capacity ladder
 
 One finite-capture lane has already produced roughly 250 executions/s and 10 MB/s

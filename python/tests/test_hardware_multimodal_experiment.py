@@ -111,6 +111,24 @@ class _Capture:
 
 
 class KernelMultimodalExperimentTests(unittest.TestCase):
+    def test_raw_retention_is_preregistered_and_content_independent(self) -> None:
+        first = experiment.retain_raw_execution(
+            "dataset", "execution", seed=7, fraction=0.5,
+        )
+        self.assertEqual(first, experiment.retain_raw_execution(
+            "dataset", "execution", seed=7, fraction=0.5,
+        ))
+        self.assertFalse(experiment.retain_raw_execution(
+            "dataset", "execution", seed=7, fraction=0.0,
+        ))
+        self.assertTrue(experiment.retain_raw_execution(
+            "dataset", "execution", seed=7, fraction=1.0,
+        ))
+        with self.assertRaisesRegex(ValueError, "between zero and one"):
+            experiment.retain_raw_execution(
+                "dataset", "execution", seed=7, fraction=1.1,
+            )
+
     @classmethod
     def setUpClass(cls) -> None:
         torch.set_num_threads(1)
@@ -305,6 +323,7 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                 artifact=root / "artifact",
                 loop_scale=1,
                 capture_retries=2,
+                retain_raw_fraction=0.0,
                 timeout=1.0,
             )
             set_num_threads = mock.Mock()
@@ -350,6 +369,14 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
         self.assertEqual(manifest["collection"]["loss_count"], 1)
         self.assertGreaterEqual(manifest["collection"]["unaccounted_wall_ns"], 0)
         self.assertEqual(manifest["entries"][0]["admission"]["attempt"], 3)
+        self.assertFalse(manifest["entries"][0]["raw_retained"])
+        self.assertEqual(manifest["collection"]["raw_retention"], {
+            "method": "sha256_dataset_seed_execution_prefix_v1",
+            "fraction": 0.0,
+            "retained_executions": 0,
+            "discarded_executions": 1,
+            "decision_independent_of_trace_and_model": True,
+        })
         self.assertEqual(manifest["entries"][0]["phases_ns"]["pt_histogram"], 5)
         self.assertEqual(
             set(manifest["collection"]["phase_costs_ns"]),
@@ -486,7 +513,14 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
             self.assertIn("worst_family", report["models"]["fused"])
             self.assertIn("timestamp_misalignment", report["models"]["fused"]["sensitivity"])
 
-            (artifact / entries[0]["raw_path"]).write_bytes(b"tampered")
+            manifest["entries"][0]["raw_retained"] = False
+            (artifact / entries[0]["raw_path"]).unlink()
+            manifest.pop("manifest_content_sha256")
+            manifest["manifest_content_sha256"] = experiment._json_hash(manifest)
+            experiment._atomic_json(artifact / "capture-manifest.json", manifest)
+            experiment.load_dataset(artifact)
+
+            (artifact / entries[1]["raw_path"]).write_bytes(b"tampered")
             with self.assertRaisesRegex(ValueError, "raw custody hash mismatch"):
                 experiment.load_dataset(artifact)
 
