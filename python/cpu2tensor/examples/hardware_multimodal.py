@@ -198,6 +198,7 @@ class MultimodalPrediction:
     pt: torch.Tensor
     pebs: torch.Tensor
     pmu: torch.Tensor
+    timing: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,7 @@ class MultimodalAnomalyEvidence:
     pt_token_error: torch.Tensor
     pebs_token_error: torch.Tensor
     pmu_token_error: torch.Tensor
+    timing_token_error: torch.Tensor
     pt_feature_error: torch.Tensor
     pebs_feature_error: torch.Tensor
     pmu_feature_error: torch.Tensor
@@ -249,6 +251,7 @@ class MaskedHardwareModel(nn.Module):
         self.pt_output = nn.Linear(dimensions, 256)
         self.pebs_output = nn.Linear(dimensions, config.pebs_features)
         self.pmu_output = nn.Linear(dimensions, config.pmu_features)
+        self.time_output = nn.Linear(dimensions, 6)
         self.register_buffer("pt_mean", torch.zeros(256))
         self.register_buffer("pt_scale", torch.ones(256))
         self.register_buffer("pebs_mean", torch.zeros(config.pebs_features))
@@ -302,6 +305,7 @@ class MaskedHardwareModel(nn.Module):
             (batch.pt - self.pt_mean) / self.pt_scale,
             (batch.pebs - self.pebs_mean) / self.pebs_scale,
             (batch.pmu - self.pmu_mean) / self.pmu_scale,
+            self._time_features(batch),
         )
 
     @staticmethod
@@ -331,6 +335,8 @@ class MaskedHardwareModel(nn.Module):
         self,
         batch: HardwareMultimodalBatch,
         masked: MaskedTokens,
+        *,
+        timing_features: torch.Tensor | None = None,
     ) -> MultimodalPrediction:
         self._check_batch(batch)
         if masked.pt.shape != batch.pt_available.shape:
@@ -372,11 +378,25 @@ class MaskedHardwareModel(nn.Module):
             torch.full((1,), 2, dtype=torch.long, device=token_values.device),
         ))
         positions = torch.arange(token_count, device=token_values.device)
+        all_masked = torch.cat((masked.pt, masked.pebs, masked.pmu), dim=2)
+        if timing_features is None:
+            timing_features = self._time_features(batch)
+        if timing_features.shape != (*all_masked.shape, 6):
+            raise ValueError("timing features differ from the batch")
+        observed_time = torch.where(
+            all_masked[..., None],
+            torch.zeros(
+                (*all_masked.shape, 6),
+                dtype=token_values.dtype,
+                device=token_values.device,
+            ),
+            timing_features,
+        )
         token_values = (
             token_values
             + self.modality_embedding(modality_ids).view(1, 1, token_count, dimensions)
             + self.position_embedding(positions).view(1, 1, token_count, dimensions)
-            + self.time_input(self._time_features(batch))
+            + self.time_input(observed_time)
         )
         summary = self.cpu_summary.expand(batch_size, cpus, -1, -1)
         local_input = torch.cat((summary, token_values), dim=2).reshape(
@@ -397,6 +417,7 @@ class MaskedHardwareModel(nn.Module):
             self.pt_output(tokens[:, :, :pt_end]),
             self.pebs_output(tokens[:, :, pt_end:pebs_end]),
             self.pmu_output(tokens[:, :, pebs_end:]),
+            self.time_output(tokens),
         )
 
 
@@ -450,8 +471,8 @@ def masked_reconstruction_loss(
     batch: HardwareMultimodalBatch,
     masked: MaskedTokens,
 ) -> torch.Tensor:
-    prediction = model(batch, masked)
     target = model.standardized_targets(batch)
+    prediction = model(batch, masked, timing_features=target.timing)
     losses = []
     for predicted, expected, selected in (
         (prediction.pt, target.pt, masked.pt),
@@ -461,6 +482,15 @@ def masked_reconstruction_loss(
         per_token = F.smooth_l1_loss(predicted, expected, reduction="none").mean(-1)
         if bool(selected.any()):
             losses.append(per_token[selected].mean())
+    timing_selected = torch.cat((masked.pt, masked.pebs, masked.pmu), dim=2)
+    timing_selected &= batch.timing_quality > 0
+    if bool(timing_selected.any()):
+        timing_error = F.smooth_l1_loss(
+            prediction.timing,
+            target.timing,
+            reduction="none",
+        ).mean(-1)
+        losses.append(timing_error[timing_selected].mean())
     if not losses:
         raise ValueError("at least one available token must be masked")
     return torch.stack(losses).mean()
@@ -548,6 +578,7 @@ def multimodal_anomaly_evidence(
         "pebs": torch.zeros_like(batch.pebs),
         "pmu": torch.zeros_like(batch.pmu),
     }
+    timing_errors = torch.zeros_like(batch.timing_quality)
     empty_pt = torch.zeros_like(batch.pt_available)
     empty_pebs = torch.zeros_like(batch.pebs_available)
     empty_pmu = torch.zeros_like(batch.pmu_available)
@@ -567,17 +598,34 @@ def multimodal_anomaly_evidence(
         selected = getattr(masked, name)
         if not bool(selected.any()):
             continue
-        prediction = model(batch, masked)
+        prediction = model(batch, masked, timing_features=targets.timing)
         per_feature = F.smooth_l1_loss(
             getattr(prediction, name), getattr(targets, name), reduction="none"
         )
         per_token = per_feature.mean(-1)
-        replace = selected & (per_token > errors[name])
+        timing_per_token = F.smooth_l1_loss(
+            prediction.timing,
+            targets.timing,
+            reduction="none",
+        ).mean(-1)
+        token_slice = {
+            "pt": slice(0, model.config.segments),
+            "pebs": slice(model.config.segments, 2 * model.config.segments),
+            "pmu": slice(2 * model.config.segments, 2 * model.config.segments + 1),
+        }[name]
+        timing_residual = timing_per_token[:, :, token_slice]
+        timing_quality = batch.timing_quality[:, :, token_slice]
+        combined = per_token + timing_residual * timing_quality
+        replace = selected & (combined > errors[name])
         errors[name][selected] = torch.maximum(
-            errors[name][selected], per_token[selected]
+            errors[name][selected], combined[selected]
         )
         feature_errors[name] = torch.where(
             replace[..., None], per_feature, feature_errors[name]
+        )
+        selected_timing_errors = timing_errors[:, :, token_slice]
+        timing_errors[:, :, token_slice] = torch.where(
+            replace, timing_residual, selected_timing_errors
         )
     modality_scores = []
     modality_present = []
@@ -601,6 +649,7 @@ def multimodal_anomaly_evidence(
         pt_token_error=errors["pt"],
         pebs_token_error=errors["pebs"],
         pmu_token_error=errors["pmu"],
+        timing_token_error=timing_errors,
         pt_feature_error=feature_errors["pt"],
         pebs_feature_error=feature_errors["pebs"],
         pmu_feature_error=feature_errors["pmu"],

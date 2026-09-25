@@ -70,35 +70,20 @@ proved nonzero equal perf scheduling times and an end-to-end live feature smoke
 produced finite `[1,1,16,256]` PT, `[1,1,16,24]` PEBS, and `[1,1,1,4]` PMU
 tensors. See [the measured results](hardware-pretraining-results.md).
 
-Current state: the real 204-execution kernel-family gate is complete. The fused
-model learned cross-modal mismatch residuals absent from marginal and PT-only
-controls: mean PEBS, PMU, and PT swap scores rose 1.449, 1.279, and 1.391 times
-over clean evidence. Whole-modality masking beat span-only on every swap. The
-gate also found two decisive blockers: PEBS timestamp permutation stayed at
-0.996 times clean, and 14/36 unseen benign executions alerted, including every
-held-out `memfd` execution. Finite capture plus Python featurization reached only
-1.069 executions/s. A later phase-instrumented pilot placed 88.70% of wall time
-inside PT histogram construction and exposed a 0.85-second cliff for roughly
-1--6 MB traces. The cause was a four-thread Torch pool inheriting the
-controller's one-CPU affinity. Matching the pool to that affinity cut the same
-9-execution matrix from 5.813 to 0.371 seconds, reduced PT histogram time 163
-times to 31.655 ms, and restored 673 MB/s aggregate reduction without changing
-capture admission. The corrected finite runner reaches 24.2 executions/s; a
-long-lived native capture/custody path remains necessary for high-rate fuzzing.
-The runner now removes the retry-until-PEBS-positive bias: three short `getpid`
-runs with verified exact affinity were retained with unavailable PEBS tokens,
-and all six sampled runs remained exact-IP, nonzero-address, and CPU-attributed.
-The 24-hour campaign
-remains **NO-GO** until timing learning, benign-family generalization, and the
-native persistent data path improve on a fresh retained split, then the same
-tri-modal qualification must pass on the exact `c5.metal` collector for three
-sessions. P5 Spot replacement capacity also scored only 1/10 and cannot be
-assumed. The deterministic health schema and bounded adjustment policy are
-implemented and tested; they are procedure machinery, not launch qualification.
-An isolated [temporal-consistency R1](hardware-temporal-consistency-r1.md)
-improved median held-out timing-shift AUROC to 0.742/0.704/0.678, but failed
-localization, seed stability, and the 10% overhead gate. Its code is preserved
-by tag `hardware-temporal-consistency-r1`, not merged into the accepted path.
+Current state: the fresh v2 204-execution corpus closes the three local blockers.
+Across four seeds, fused and span-only models alert on 0/36 executions from the
+wholly unseen `dup`, `memfd`, and `pipe` families while retaining strong
+cross-modal swap response. The integrated masked timing objective raises fused
+timestamp-misalignment scores by 1.505--1.552 times, localizes the changed PEBS
+token in 78/78 seed-41 validation executions, and adds only 0.6% to repeated
+batched scoring on the named MPS host. A long-lived loss-checked perf session
+sustains 8,119 complete PT+PEBS+PMU windows/s on one `trail-x86` core for the
+100-getpid benchmark. The LLM bundle retains exact replay input, empirical
+confidence, raw PT windows, timing and feature residuals, decoded PEBS semantics,
+and optional exact-boot symbols. Next: three randomized `c5.metal` sessions,
+rolling retained-alert custody plus accelerator batching, and the label-hidden
+matched known-CVE gate. The 24-hour campaign remains **NO-GO** until those gates
+pass. The prior isolated temporal R1 remains preserved by tag for provenance.
 
 ## Completed first iteration: AArch64 observation to MPS
 

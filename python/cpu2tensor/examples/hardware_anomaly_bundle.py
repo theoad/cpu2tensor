@@ -34,7 +34,7 @@ from cpu2tensor.examples.hardware_multimodal_features import (
 )
 
 
-ANOMALY_BUNDLE_SCHEMA = "cpu2tensor-hardware-anomaly-bundle-v1"
+ANOMALY_BUNDLE_SCHEMA = "cpu2tensor-hardware-anomaly-bundle-v2"
 _LEGACY_RAW_SCHEMA = "cpu2tensor-kernel-multimodal-raw-v1"
 _SEGMENTS = 16
 
@@ -138,7 +138,8 @@ def _top_features(error: torch.Tensor, names: Sequence[str], limit: int) -> list
 
 
 def _pt_windows(raw: dict[str, object], token_error: torch.Tensor,
-                feature_error: torch.Tensor, limit: int) -> list[dict[str, object]]:
+                feature_error: torch.Tensor, timing_error: torch.Tensor,
+                limit: int) -> list[dict[str, object]]:
     result = []
     for lane, batch in enumerate(raw["batches"]):
         trace = batch["pt"]["trace_bytes"]
@@ -155,6 +156,7 @@ def _pt_windows(raw: dict[str, object], token_error: torch.Tensor,
                 "raw_byte_start": start,
                 "raw_byte_stop": stop,
                 "residual": float(value),
+                "timing_residual": float(timing_error[lane, segment]),
                 "top_byte_residuals": _top_features(
                     feature_error[lane, segment],
                     tuple(f"0x{value:02x}" for value in range(256)),
@@ -165,6 +167,7 @@ def _pt_windows(raw: dict[str, object], token_error: torch.Tensor,
 
 
 def _pebs_samples(raw: dict[str, object], token_error: torch.Tensor,
+                  timing_error: torch.Tensor,
                   symbols: KernelSymbolTable | None, limit: int) -> list[dict[str, object]]:
     windows = []
     for lane, batch in enumerate(raw["batches"]):
@@ -184,6 +187,7 @@ def _pebs_samples(raw: dict[str, object], token_error: torch.Tensor,
                 "tid": batch["tid"],
                 "segment": segment,
                 "residual": float(token_error[lane, segment]),
+                "timing_residual": float(timing_error[lane, segment]),
                 "time_from_capture_start_ns": timestamp - start,
                 "cpu": int(pebs["cpu"][row]),
                 "ip": f"0x{ip:016x}",
@@ -282,16 +286,21 @@ def build_bundle(artifact: Path, execution_id: str, checkpoint: Path,
         "localization": {
             "pt_windows": _pt_windows(
                 raw, evidence.pt_token_error[0], evidence.pt_feature_error[0],
+                evidence.timing_token_error[0, :, :16],
                 top_windows,
             ),
             "pebs_samples": _pebs_samples(
-                raw, evidence.pebs_token_error[0], symbols, top_windows * 8
+                raw, evidence.pebs_token_error[0],
+                evidence.timing_token_error[0, :, 16:32], symbols, top_windows * 8
             ),
             "top_pebs_feature_residuals": _top_features(
                 pebs_features, PEBS_FEATURES, top_windows
             ),
             "top_pmu_feature_residuals": _top_features(
                 pmu_features, PMU_FEATURES, len(PMU_FEATURES)
+            ),
+            "pmu_timing_residual": float(
+                evidence.timing_token_error[0, :, 32:].amax()
             ),
             "symbols_available": symbols is not None,
         },

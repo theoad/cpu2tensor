@@ -27,7 +27,8 @@ static int gate(void) {
     if (write(STDOUT_FILENO, ready, sizeof(ready) - 1) != (ssize_t)(sizeof(ready) - 1)) {
         return -1;
     }
-    return read(STDIN_FILENO, &start, 1) == 1 ? 0 : -1;
+    ssize_t count = read(STDIN_FILENO, &start, 1);
+    return count == 1 ? 0 : count == 0 ? 1 : -1;
 }
 
 static int run_getpid(uint64_t loops, uint64_t *result) {
@@ -274,70 +275,108 @@ static int run_fork(uint64_t loops, uint64_t *result) {
     return 0;
 }
 
-int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s FAMILY LOOPS\n", argv[0]);
-        return 2;
+static int run_family(const char *family, uint64_t loops, uint64_t *result) {
+    if (strcmp(family, "getpid") == 0) {
+        return run_getpid(loops, result);
     }
+    if (strcmp(family, "fstat") == 0) {
+        return run_fstat(loops, result);
+    }
+    if (strcmp(family, "futex") == 0) {
+        return run_futex(loops, result);
+    }
+    if (strcmp(family, "openat") == 0) {
+        return run_openat(loops, result);
+    }
+    if (strcmp(family, "pipe") == 0) {
+        return run_pipe(loops, result);
+    }
+    if (strcmp(family, "mmap") == 0) {
+        return run_mmap(loops, result);
+    }
+    if (strcmp(family, "eventfd") == 0) {
+        return run_eventfd(loops, result);
+    }
+    if (strcmp(family, "epoll") == 0) {
+        return run_epoll(loops, result);
+    }
+    if (strcmp(family, "socketpair") == 0) {
+        return run_socketpair(loops, result);
+    }
+    if (strcmp(family, "getrandom") == 0) {
+        return run_getrandom(loops, result);
+    }
+    if (strcmp(family, "memfd") == 0) {
+        return run_memfd(loops, result);
+    }
+    if (strcmp(family, "ioctl") == 0) {
+        return run_ioctl(loops, result);
+    }
+    if (strcmp(family, "dup") == 0) {
+        return run_dup(loops, result);
+    }
+    if (strcmp(family, "yield") == 0) {
+        return run_yield(loops, result);
+    }
+    if (strcmp(family, "uname") == 0) {
+        return run_uname(loops, result);
+    }
+    if (strcmp(family, "readlink") == 0) {
+        return run_readlink(loops, result);
+    }
+    if (strcmp(family, "fork") == 0) {
+        return run_fork(loops, result);
+    }
+    errno = EINVAL;
+    return -1;
+}
+
+static int parse_loops(const char *text, uint64_t *loops) {
     errno = 0;
     char *end = NULL;
-    for (const unsigned char *cursor = (const unsigned char *)argv[2];
+    for (const unsigned char *cursor = (const unsigned char *)text;
          *cursor != '\0'; ++cursor) {
         if (*cursor < '0' || *cursor > '9') {
-            fprintf(stderr, "loops must be a positive integer\n");
-            return 2;
+            return -1;
         }
     }
-    uint64_t loops = strtoull(argv[2], &end, 10);
-    if (errno != 0 || end == argv[2] || *end != '\0' || loops == 0) {
+    *loops = strtoull(text, &end, 10);
+    return errno == 0 && end != text && *end == '\0' && *loops != 0 ? 0 : -1;
+}
+
+int main(int argc, char **argv) {
+    int server = argc == 4 && strcmp(argv[1], "--server") == 0;
+    if ((!server && argc != 3) || (server && argc != 4)) {
+        fprintf(stderr, "usage: %s [--server] FAMILY LOOPS\n", argv[0]);
+        return 2;
+    }
+    const char *family = argv[server ? 2 : 1];
+    uint64_t loops = 0;
+    if (parse_loops(argv[server ? 3 : 2], &loops) != 0) {
         fprintf(stderr, "loops must be a positive integer\n");
         return 2;
     }
-    if (gate() != 0) {
-        return 3;
-    }
-
-    uint64_t result = 0;
-    int status = -1;
-    if (strcmp(argv[1], "getpid") == 0) {
-        status = run_getpid(loops, &result);
-    } else if (strcmp(argv[1], "fstat") == 0) {
-        status = run_fstat(loops, &result);
-    } else if (strcmp(argv[1], "futex") == 0) {
-        status = run_futex(loops, &result);
-    } else if (strcmp(argv[1], "openat") == 0) {
-        status = run_openat(loops, &result);
-    } else if (strcmp(argv[1], "pipe") == 0) {
-        status = run_pipe(loops, &result);
-    } else if (strcmp(argv[1], "mmap") == 0) {
-        status = run_mmap(loops, &result);
-    } else if (strcmp(argv[1], "eventfd") == 0) {
-        status = run_eventfd(loops, &result);
-    } else if (strcmp(argv[1], "epoll") == 0) {
-        status = run_epoll(loops, &result);
-    } else if (strcmp(argv[1], "socketpair") == 0) {
-        status = run_socketpair(loops, &result);
-    } else if (strcmp(argv[1], "getrandom") == 0) {
-        status = run_getrandom(loops, &result);
-    } else if (strcmp(argv[1], "memfd") == 0) {
-        status = run_memfd(loops, &result);
-    } else if (strcmp(argv[1], "ioctl") == 0) {
-        status = run_ioctl(loops, &result);
-    } else if (strcmp(argv[1], "dup") == 0) {
-        status = run_dup(loops, &result);
-    } else if (strcmp(argv[1], "yield") == 0) {
-        status = run_yield(loops, &result);
-    } else if (strcmp(argv[1], "uname") == 0) {
-        status = run_uname(loops, &result);
-    } else if (strcmp(argv[1], "readlink") == 0) {
-        status = run_readlink(loops, &result);
-    } else if (strcmp(argv[1], "fork") == 0) {
-        status = run_fork(loops, &result);
-    }
-    if (status != 0) {
-        perror("hardware kernel workload");
-        return 4;
-    }
-    printf("%llu\n", (unsigned long long)result);
+    do {
+        int gated = gate();
+        if (server && gated == 1) {
+            return 0;
+        }
+        if (gated != 0) {
+            return 3;
+        }
+        uint64_t result = 0;
+        if (run_family(family, loops, &result) != 0) {
+            perror("hardware kernel workload");
+            return 4;
+        }
+        if (server) {
+            if (printf("DONE %llu\n", (unsigned long long)result) < 0 ||
+                fflush(stdout) != 0) {
+                return 5;
+            }
+        } else {
+            printf("%llu\n", (unsigned long long)result);
+        }
+    } while (server);
     return 0;
 }

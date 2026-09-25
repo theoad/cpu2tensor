@@ -12,7 +12,8 @@ import torch
 
 from cpu2tensor.hardware import (
     HardwareBatch, HardwareCaptureError, HardwareConfig, HardwareMultimodalConfig,
-    HardwareTraceLost, PerfCapture, PerfMultimodalCapture, _PerfAttr, _attribute,
+    HardwareTraceLost, PerfCapture, PerfMultimodalCapture, PerfMultimodalSession,
+    _PerfAttr, _attribute,
     _MultimodalSource, _counter_attribute, _counter_batch, _decode_records,
     _event_id, _read_counter_group, _ring_bytes,
     _open_event, _read_sampled_event, _source_value, _syscall_number, _tensor,
@@ -428,6 +429,74 @@ class HardwareTests(unittest.TestCase):
         with mock.patch("cpu2tensor.hardware.os.listdir", side_effect=OSError("gone")):
             with self.assertRaisesRegex(HardwareCaptureError, "enumerate process 43"):
                 missing.__enter__()
+
+    def test_multimodal_session_reuses_sources_and_consumes_each_window(self) -> None:
+        page = mmap.PAGESIZE
+        pt_record_size = len(record(11, struct.pack("<QQQ", 0, 4, 0)))
+        pebs_payload = struct.pack(
+            "<QIIQQIIQQQ", 0x123, 43, 43, 17, 0xABC, 2, 0, 100, 9, 7,
+        )
+        pebs_record = record(9, pebs_payload, misc=1 << 14)
+        pt_data = FakeMapping(page * 2)
+        pt_aux = FakeMapping(page)
+        pebs_data = FakeMapping(page * 2)
+        struct.pack_into("<8Q", pt_data, 1024, 0, 0, page, page, 0, 0, page * 2, page)
+        struct.pack_into("<8Q", pebs_data, 1024, 0, 0, page, page, 0, 0, 0, 0)
+
+        def counter_read(enabled, values):
+            fields = [3, enabled, enabled]
+            for value, identifier in zip(values, (101, 102, 103)):
+                fields.extend((value, identifier))
+            return struct.pack("<9Q", *fields)
+
+        reads = []
+        for _ in range(2):
+            reads.extend((
+                counter_read(0, (0, 0, 0)),
+                counter_read(50, (11, 13, 17)),
+                struct.pack("<QQQ", 1, 50, 50),
+            ))
+        config = HardwareMultimodalConfig(
+            "process_kernel", 43, data_pages=1, aux_pages=1,
+        )
+        with mock.patch("cpu2tensor.hardware.platform.system", return_value="Linux"):
+            session = PerfMultimodalSession(config)
+        with mock.patch("cpu2tensor.hardware.os.listdir", return_value=["43"]), \
+                mock.patch("cpu2tensor.hardware._attribute", return_value=_PerfAttr()), \
+                mock.patch("cpu2tensor.hardware._open_event", side_effect=[10, 11, 12, 13, 14]), \
+                mock.patch("cpu2tensor.hardware._event_id", side_effect=[101, 102, 103]), \
+                mock.patch("cpu2tensor.hardware.mmap.mmap",
+                           side_effect=[pt_data, pt_aux, pebs_data]), \
+                mock.patch("cpu2tensor.hardware.time.clock_gettime_ns",
+                           side_effect=range(100, 180, 10)), \
+                mock.patch("cpu2tensor.hardware.os.read", side_effect=reads), \
+                mock.patch("cpu2tensor.hardware.fcntl.ioctl"), \
+                mock.patch("cpu2tensor.hardware.os.close") as close:
+            with session:
+                results = []
+                for window in range(2):
+                    session.start()
+                    aux_offset = window * 4
+                    record_offset = window * pt_record_size
+                    pt_record = record(11, struct.pack("<QQQ", aux_offset, 4, 0))
+                    pt_data[page + record_offset:page + record_offset + len(pt_record)] = pt_record
+                    pt_aux[aux_offset:aux_offset + 4] = b"PT!!"
+                    struct.pack_into("<Q", pt_data, 1024, record_offset + len(pt_record))
+                    struct.pack_into("<Q", pt_data, 1024 + 32, aux_offset + 4)
+                    pebs_offset = window * len(pebs_record)
+                    pebs_data[page + pebs_offset:page + pebs_offset + len(pebs_record)] = pebs_record
+                    struct.pack_into("<Q", pebs_data, 1024, pebs_offset + len(pebs_record))
+                    results.append(session.stop()[0])
+        self.assertEqual([row.pt.trace_bytes.tolist() for row in results], [
+            list(b"PT!!"), list(b"PT!!"),
+        ])
+        self.assertEqual([row.pebs.address.tolist() for row in results], [[0xABC], [0xABC]])
+        self.assertEqual(struct.unpack_from("<Q", pt_data, 1024 + 8)[0], 2 * pt_record_size)
+        self.assertEqual(struct.unpack_from("<Q", pt_data, 1024 + 40)[0], 8)
+        self.assertEqual(struct.unpack_from("<Q", pebs_data, 1024 + 8)[0], 2 * len(pebs_record))
+        self.assertEqual(close.call_count, 5)
+        with self.assertRaises(RuntimeError):
+            session.start()
 
     def test_counter_delta_rejects_multiplexing_and_backward_values(self) -> None:
         source = _MultimodalSource(

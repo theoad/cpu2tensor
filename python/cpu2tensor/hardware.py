@@ -408,11 +408,18 @@ def _tensor(values: array | bytearray) -> torch.Tensor:
     return torch.frombuffer(values, dtype=torch.uint8 if isinstance(values, bytearray) else torch.int64)
 
 
-def _decode_records(data: bytes, signal: str, source: int, trace: bytes) -> HardwareBatch:
+def _decode_records(
+    data: bytes,
+    signal: str,
+    source: int,
+    trace: bytes,
+    *,
+    trace_offset: int = 0,
+) -> HardwareBatch:
     names = ("ip", "pid", "tid", "time", "cpu", "period", "address", "weight", "data_source", "exact_ip")
     columns = {name: array("q") for name in names}
     position = 0
-    aux_position = 0
+    aux_position = trace_offset
     while position < len(data):
         if len(data) - position < _HEADER.size:
             raise HardwareTraceLost("Perf ring ended inside a record header")
@@ -426,7 +433,8 @@ def _decode_records(data: bytes, signal: str, source: int, trace: bytes) -> Hard
             if len(record) < 24 or struct.unpack_from("<Q", record, 16)[0] & _AUX_BAD_FLAGS:
                 raise HardwareTraceLost("Intel PT reported incomplete AUX data")
             offset, length = struct.unpack_from("<QQ", record)
-            if signal != "intel_pt" or offset != aux_position or length == 0 or offset + length > len(trace):
+            if (signal != "intel_pt" or offset != aux_position or length == 0 or
+                    offset + length > trace_offset + len(trace)):
                 raise HardwareTraceLost("Intel PT AUX records do not cover the captured bytes")
             aux_position += length
         if kind == _SAMPLE:
@@ -441,7 +449,7 @@ def _decode_records(data: bytes, signal: str, source: int, trace: bytes) -> Hard
             for name, value in zip(names, row):
                 columns[name].append(value if value < 1 << 63 else value - (1 << 64))
         position += size
-    if signal == "intel_pt" and aux_position != len(trace):
+    if signal == "intel_pt" and aux_position != trace_offset + len(trace):
         raise HardwareTraceLost("Intel PT bytes have no matching AUX record")
     return HardwareBatch(source, signal, *(_tensor(columns[name]) for name in names), _tensor(bytearray(trace)))
 
@@ -591,6 +599,7 @@ def _read_mapped_batch(
     data_pages: int,
     signal: str,
     source: int,
+    consume: bool = False,
 ) -> HardwareBatch:
     head, tail, offset, size, aux_head, aux_tail, aux_offset, aux_size = struct.unpack_from(
         "<8Q", data, _DATA_HEADER_OFFSET,
@@ -603,7 +612,20 @@ def _read_mapped_batch(
         if aux_offset != mmap.PAGESIZE * (1 + data_pages) or aux_size != len(aux):
             raise HardwareCaptureError("Unexpected perf AUX layout")
         trace = _ring_bytes(aux, aux_head, aux_tail, 0, aux_size)
-    return _decode_records(records, signal, source, trace)
+    batch = _decode_records(
+        records,
+        signal,
+        source,
+        trace,
+        trace_offset=aux_tail if aux is not None else 0,
+    )
+    if consume:
+        # Publish ownership only after a complete decode. A failed decode leaves
+        # both tails untouched so callers can preserve the corrupt window.
+        struct.pack_into("<Q", data, _DATA_HEADER_OFFSET + 8, head)
+        if aux is not None:
+            struct.pack_into("<Q", data, _DATA_HEADER_OFFSET + 40, aux_head)
+    return batch
 
 
 def _counter_batch(
@@ -704,37 +726,62 @@ class PerfMultimodalCapture:
             source.counter_ids = tuple(_event_id(fd) for fd in fds)
         return source
 
-    def __enter__(self) -> "PerfMultimodalCapture":
-        if self._running or self._stopped:
-            raise RuntimeError("Create a new PerfMultimodalCapture for each run")
+    def _open_sources(self) -> None:
+        if self._sources:
+            raise RuntimeError("Perf sources are already open")
         try:
             tids = sorted(int(name) for name in os.listdir(f"/proc/{self.config.pid}/task"))
         except OSError as error:
             raise HardwareCaptureError(
                 f"Cannot enumerate process {self.config.pid} threads"
             ) from error
-        try:
-            for tid in tids:
-                self._open_source(tid)
-            self._arm_before_ns = time.clock_gettime_ns(_CLOCK_MONOTONIC_RAW)
-            for source in self._sources:
-                if source.pt_fd >= 0:
-                    fcntl.ioctl(source.pt_fd, _RESET, 0)
-                    fcntl.ioctl(source.pt_fd, _ENABLE, 0)
-                if source.pebs_fd >= 0:
-                    fcntl.ioctl(source.pebs_fd, _RESET, 0)
-                    fcntl.ioctl(source.pebs_fd, _ENABLE, 0)
-                if source.counter_fds:
-                    leader = source.counter_fds[0]
-                    fcntl.ioctl(leader, _RESET, _GROUP_FLAG)
-                    fcntl.ioctl(leader, _ENABLE, _GROUP_FLAG)
-            self._arm_after_ns = time.clock_gettime_ns(_CLOCK_MONOTONIC_RAW)
-            for source in self._sources:
-                if source.counter_fds:
-                    source.counter_start = _read_counter_group(
-                        source.counter_fds[0], source.counter_ids
+        for tid in tids:
+            self._open_source(tid)
+
+    def _assert_empty_rings(self) -> None:
+        for source in self._sources:
+            for data, has_aux in ((source.pt_data, True), (source.pebs_data, False)):
+                if data is None:
+                    continue
+                head, tail, _, _, aux_head, aux_tail, _, _ = struct.unpack_from(
+                    "<8Q", data, _DATA_HEADER_OFFSET,
+                )
+                if head != tail or (has_aux and aux_head != aux_tail):
+                    raise HardwareCaptureError(
+                        f"perf ring for thread {source.tid} was not completely consumed"
                     )
-            self._running = True
+
+    def _start_window(self, *, require_empty: bool) -> None:
+        if self._running:
+            raise RuntimeError("Capture window is already running")
+        if require_empty:
+            self._assert_empty_rings()
+        self._arm_before_ns = time.clock_gettime_ns(_CLOCK_MONOTONIC_RAW)
+        for source in self._sources:
+            if source.pt_fd >= 0:
+                fcntl.ioctl(source.pt_fd, _RESET, 0)
+                fcntl.ioctl(source.pt_fd, _ENABLE, 0)
+            if source.pebs_fd >= 0:
+                fcntl.ioctl(source.pebs_fd, _RESET, 0)
+                fcntl.ioctl(source.pebs_fd, _ENABLE, 0)
+            if source.counter_fds:
+                leader = source.counter_fds[0]
+                fcntl.ioctl(leader, _RESET, _GROUP_FLAG)
+                fcntl.ioctl(leader, _ENABLE, _GROUP_FLAG)
+        self._arm_after_ns = time.clock_gettime_ns(_CLOCK_MONOTONIC_RAW)
+        for source in self._sources:
+            if source.counter_fds:
+                source.counter_start = _read_counter_group(
+                    source.counter_fds[0], source.counter_ids
+                )
+        self._running = True
+
+    def __enter__(self) -> "PerfMultimodalCapture":
+        if self._running or self._stopped:
+            raise RuntimeError("Create a new PerfMultimodalCapture for each run")
+        try:
+            self._open_sources()
+            self._start_window(require_empty=False)
             return self
         except BaseException:
             self.close()
@@ -744,6 +791,9 @@ class PerfMultimodalCapture:
         if not self._running or self._stopped:
             raise RuntimeError("Capture must be running and stopped only once")
         self._stopped = True
+        return self._stop_window(consume=False)
+
+    def _stop_window(self, *, consume: bool) -> tuple[HardwareMultimodalBatch, ...]:
         stop_before_ns = time.clock_gettime_ns(_CLOCK_MONOTONIC_RAW)
         final_counters: dict[int, tuple[tuple[int, ...], int, int]] = {}
         try:
@@ -783,6 +833,7 @@ class PerfMultimodalCapture:
                     data_pages=self.config.data_pages,
                     signal="intel_pt",
                     source=source.tid,
+                    consume=consume,
                 )
             if source.pebs_data is not None:
                 pebs = _read_mapped_batch(
@@ -791,6 +842,7 @@ class PerfMultimodalCapture:
                     data_pages=self.config.data_pages,
                     signal="memory_loads",
                     source=source.tid,
+                    consume=consume,
                 )
             if source.counter_fds:
                 counters = _counter_batch(source, final_counters[source.tid])
@@ -861,3 +913,44 @@ class PerfMultimodalCapture:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+class PerfMultimodalSession(PerfMultimodalCapture):
+    """Long-lived perf ownership with loss-checked, individually owned windows.
+
+    The target thread set is frozen when the session opens. ``start`` and
+    ``stop`` reset and disable the same descriptors, while ``stop`` advances the
+    data and AUX tails only after a complete decode. This removes event-open and
+    mmap work from the hot path without weakening per-window custody.
+    """
+
+    def __init__(self, config: HardwareMultimodalConfig) -> None:
+        super().__init__(config)
+        self._entered = False
+
+    def __enter__(self) -> "PerfMultimodalSession":
+        if self._entered or self._sources:
+            raise RuntimeError("PerfMultimodalSession is already open")
+        try:
+            self._open_sources()
+            self._assert_empty_rings()
+            self._entered = True
+            return self
+        except BaseException:
+            self.close()
+            raise
+
+    def start(self) -> "PerfMultimodalSession":
+        if not self._entered:
+            raise RuntimeError("Open the session before starting a window")
+        self._start_window(require_empty=True)
+        return self
+
+    def stop(self) -> tuple[HardwareMultimodalBatch, ...]:
+        if not self._entered or not self._running:
+            raise RuntimeError("A session window must be running before stop")
+        return self._stop_window(consume=True)
+
+    def close(self) -> None:
+        super().close()
+        self._entered = False

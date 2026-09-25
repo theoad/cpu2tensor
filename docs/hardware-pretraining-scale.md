@@ -202,20 +202,21 @@ conditions. Preserve suspicious raw trajectories before teardown.
 Proceed only if the PoC demonstrates all three modalities with acceptable
 perturbation, explicit timing uncertainty, deterministic checkpoint reload,
 useful cross-modal prediction beyond marginal baselines, and a frozen threshold
-that meets the familiar-benign alert budget. The September 25 kernel-family run
-passes capture integrity, checkpoint determinism, and cross-modal swap learning,
-but the accepted model fails timing sensitivity and unfamiliar-benign
-generalization. The corrected finite pilot reaches 24.2 executions/s, still far
-below the target that requires long-lived perf sessions and rolling custody. An
-experimental temporal head improved held-out timing-shift AUROC, but missed its
-localization, seed-stability, and inference-overhead gates. The campaign is
-therefore
-**NO-GO** in its current form. First fix those measured blockers and reproduce
-the result on a fresh whole-family split. Then repeat the tri-modal gate for at
-least three randomized sessions on the exact `c5.metal` boot: zero PT/AUX or
-PEBS loss, nonzero equal PEBS and PMU running/enabled times, exact-IP nonzero
-PEBS addresses, stable attribution, and recorded AMI/kernel/microcode/topology/
-capture hashes. The current `trail-x86` result does not qualify AWS. Spend the
-24 hours fixing a failed gate rather than scaling it.
+that meets the familiar-benign alert budget. The fresh September 25 v2 corpus
+closes the earlier representation, temporal, localization, seed-stability, and
+long-lived capture-throughput failures on one named host. Its fused models gave
+zero alerts on 36 wholly unseen-family executions across four seeds, timestamp
+misalignment raised mean score 1.505--1.552 times, exact changed-token
+localization was 78/78 for seed 41, and steady capture reached 8,119 complete
+windows/s/core.
+
+The 24-hour campaign remains **NO-GO** until the tri-modal gate passes in three
+randomized sessions on the exact `c5.metal` boot: zero PT/AUX or PEBS loss,
+nonzero equal PEBS and PMU running/enabled times, exact-IP nonzero PEBS
+addresses, stable attribution, and recorded AMI/kernel/microcode/topology/
+capture hashes. Rolling alert retention and accelerator batching must keep up
+with the measured producer, followed by the label-hidden matched known-CVE
+validation. A dedicated anomaly token or attention export is optional and must
+beat faithful residual localization under blinded intervention before admission.
 
 AWS instance specifications: [P5 instances](https://aws.amazon.com/ec2/instance-types/p5/).

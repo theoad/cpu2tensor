@@ -85,16 +85,19 @@ class HardwareAnomalyBundleTests(unittest.TestCase):
             path.write_text("0000000000001000 T first\n0000000000002000 T second\n")
             symbols = KernelSymbolTable.load(path)
 
-            pt = _pt_windows(raw, token_error, feature_error, 2)
-            pebs = _pebs_samples(raw, token_error, symbols, 2)
+            timing_error = torch.arange(16, dtype=torch.float32).view(1, 16)
+            pt = _pt_windows(raw, token_error, feature_error, timing_error, 2)
+            pebs = _pebs_samples(raw, token_error, timing_error, symbols, 2)
 
         self.assertEqual((pt[0]["segment"], pt[0]["raw_byte_start"],
                           pt[0]["raw_byte_stop"]), (15, 30, 32))
         self.assertEqual(pt[0]["top_byte_residuals"][0], {
             "feature": "0x09", "residual": 7.0,
         })
+        self.assertEqual(pt[0]["timing_residual"], 15.0)
         self.assertEqual(pebs[0]["segment"], 15)
         self.assertEqual(pebs[0]["ip_symbol"]["name"], "second")
+        self.assertEqual(pebs[0]["timing_residual"], 15.0)
         self.assertEqual(pebs[1]["segment"], 0)
         self.assertEqual(pebs[1]["ip_symbol"]["offset"], 5)
 

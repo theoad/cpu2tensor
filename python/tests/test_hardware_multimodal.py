@@ -105,13 +105,19 @@ class HardwareMultimodalTests(unittest.TestCase):
 
         torch.testing.assert_close(evidence.score, multimodal_anomaly_score(model, batch))
         torch.testing.assert_close(
-            evidence.pt_token_error, evidence.pt_feature_error.mean(-1)
+            evidence.pt_token_error,
+            evidence.pt_feature_error.mean(-1)
+            + evidence.timing_token_error[:, :, :16] * batch.timing_quality[:, :, :16],
         )
         torch.testing.assert_close(
-            evidence.pebs_token_error, evidence.pebs_feature_error.mean(-1)
+            evidence.pebs_token_error,
+            evidence.pebs_feature_error.mean(-1)
+            + evidence.timing_token_error[:, :, 16:32] * batch.timing_quality[:, :, 16:32],
         )
         torch.testing.assert_close(
-            evidence.pmu_token_error, evidence.pmu_feature_error.mean(-1)
+            evidence.pmu_token_error,
+            evidence.pmu_feature_error.mean(-1)
+            + evidence.timing_token_error[:, :, 32:] * batch.timing_quality[:, :, 32:],
         )
         torch.testing.assert_close(
             evidence.score,

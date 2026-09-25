@@ -16,11 +16,12 @@ checkpoint, rescoring one retained execution without updating the model. It emit
 - scalar score, frozen threshold, calibration count, and finite-sample empirical
   tail probability;
 - separate PT, PEBS, and PMU scores;
-- ranked PT segments mapped back to raw AUX byte offsets and byte-feature
-  residuals;
+- ranked PT segments mapped back to raw AUX byte offsets, byte-feature
+  residuals, and the timing residual used by the score;
 - ranked PEBS samples with timestamp bucket, CPU, IP, address, weight, period,
   exact-IP state, and a lossless semantic decode of `perf_mem_data_src`; and
-- ranked PEBS and PMU feature residuals.
+- ranked PEBS and PMU feature residuals, plus PEBS- and PMU-token timing
+  residuals.
 
 Per-token reconstruction error is the actual contribution used by the scalar
 score, not an unrelated attention visualization. Per-feature residuals come from

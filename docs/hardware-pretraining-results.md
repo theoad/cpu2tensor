@@ -168,6 +168,53 @@ It adds real held-out timing sensitivity but fails localization, seed stability,
 and the inference-overhead gate, so the experimental head remains out of the
 accepted path.
 
+## Fresh v2 representation and temporal gate
+
+Commit `3719b01` was used to collect a new sealed 204-execution corpus on the
+same named `trail-x86` subject. The feature contract applies `log1p` to each raw
+PT byte count while retaining the original undecoded bytes. Collection admitted
+204/214 attempts without PT/AUX loss, retained 1,714,632,128 PT bytes and 16,865
+PEBS samples, and completed in 19.50 seconds. The capture manifest SHA-256 is
+`f20cedcfb88c6155119863797b9a0be99c7896de1a14827c49a023631955e589`.
+
+Across model seeds 17, 23, 31, and 41, both transformer variants produced zero
+alerts in all 36 executions from the wholly unseen `dup`, `memfd`, and `pipe`
+families. The fused model retained 2.25--2.71 times clean mean score under PT,
+PEBS, and PMU row swaps. Its only recurring familiar-benign alert cluster was
+`fork`, with one to three of three validation repetitions depending on seed.
+This is treated as one stable novel behavior for review, not silently relabeled
+normal and not counted twelve times in an operational queue.
+
+The accepted temporal objective hides the selected token's timing input and
+predicts its six bounded timing features alongside its modality value. Across
+the same four seeds, PEBS-bound reversal raised fused mean score by
+1.505--1.552 times clean; all four models retained zero unseen-family alerts.
+For seed 41, the maximum timing residual landed on a genuinely changed PEBS
+token in 78/78 validation executions. Changed tokens averaged 0.2722 timing
+residual versus 0.0232 for the 22 unchanged tokens. Batched scoring of 78 rows
+on the named MPS host reached 1,497 executions/s versus 1,505/s for the exact
+pre-temporal model, a measured 0.6% reduction. The seed-41 report and checkpoint
+SHA-256 values are `a66044e653a47c4496373f0d3da4e18dcb473cd1ba79c3ed3820a3fd2374c749`
+and `d0924f7797a5dd028f5ad64af4140bc259597035b003f456975d57d56806a4de`.
+
+The hardware evidence bundle now preserves the exact invocation and sealed raw
+input, empirical tail probability, modality and timing residuals, raw PT byte
+windows, decoded PEBS memory-source semantics, raw IP/address values, and
+exact-boot symbol resolution when authorized symbols are supplied. Residuals
+are the quantities that produced the score. No attention weight is presented as
+a causal explanation, and an anomaly token will be admitted only if a blinded
+intervention test improves localization beyond these faithful residuals.
+
+The long-lived perf path reuses event descriptors and mappings while resetting
+each window and publishing data/AUX tails only after successful decode. On
+`trail-x86`, 1,000 steady-state `getpid` windows of 100 syscalls each sustained
+8,119 complete PT+PEBS+PMU windows/s on one core, with 118.8 microsecond median,
+175.6 microsecond p99, and 397.2 microsecond maximum latency after one lazy
+Torch warm-up. This includes perf control, workload execution, ring copy, record
+validation, and tensor construction, but excludes durable alert retention and
+model inference. It clears the 1,000 windows/s/core systems gate on this named
+host; aggregate accelerator scoring and rolling retention remain separate gates.
+
 ## Throughput profile
 
 The 204-run manifest separates 7.896 seconds of accepted workload execution
