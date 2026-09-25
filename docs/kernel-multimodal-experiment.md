@@ -57,6 +57,46 @@ context close and loop/manifest overhead). These timers diagnose the finite
 evidence runner; they do not change the perf capture envelope or imply a
 high-rate production data path.
 
+### Zero-sample admission timing pilot
+
+The smallest valid three-family matrix ran on `iseeyou` (Intel Core i7-10510U,
+x86-64, Linux `7.0.0-31-generic`, boot
+`2ba4b210-4c31-48ce-92d5-4b306e16d26c`) from clean revision
+`555315f52f67b7a5cef56f9c1075a53a650f7d4d`. It used target CPU 2,
+controller CPU 3, PEBS period 10,000, the default 32 MiB AUX allocation, loop
+scale 1, and three repetitions each of `getpid`, `openat`, and `memfd`. This is a
+pilot-only diagnostic, not a throughput or operational-alert claim.
+
+All 9 executions were admitted on their first attempt with no source loss or
+multiplexing: 6 had PEBS samples and 3 `getpid` executions had zero samples.
+Those three retained unavailable PEBS tokens and recorded exact target affinity
+`[2]`; they were not retried into the positive-sample population. The 216
+observed samples were all exact-IP, nonzero-address, and CPU-2 attributed.
+Collection took 5.813 s for 21,397,296 raw PT bytes. Custody reload revalidated
+all 9 rows. The sealed manifest content hash is
+`fb07998ea7c08db1ece0d252c98ed63c45d3d79628810079b63ec4bab0d59081`.
+
+| Monotonic phase | Total | Median/execution | Collection wall |
+| --- | ---: | ---: | ---: |
+| Launch/READY | 21.554 ms | 1.983 ms | 0.37% |
+| Event open/arm | 81.603 ms | 10.401 ms | 1.40% |
+| Workload | 114.697 ms | 4.261 ms | 1.97% |
+| Stop/drain/decode | 13.759 ms | 0.729 ms | 0.24% |
+| PT histogram | 5,156.467 ms | 853.985 ms | 88.70% |
+| PEBS and PMU features | 3.184 ms | 0.348 ms | 0.05% |
+| Raw serialization/fsync/hash | 207.449 ms | 18.576 ms | 3.57% |
+| Derived sealing | 53.659 ms | 6.806 ms | 0.92% |
+
+The separately reported unaccounted wall time was 160.842 ms (2.77%), which
+keeps capture-context close and remaining loop/manifest overhead visible rather
+than assigning it to a named phase. The artifact and preserved log are on the
+measurement host at
+`~/.cache/cpu2tensor/kernel-multimodal-admission-timing/pilot-555315f` and
+`~/.cache/cpu2tensor/kernel-multimodal-admission-timing/pilot-555315f.log`;
+their manifest-file and log SHA-256 values are respectively
+`f05f129fefd02df48b0fb4cd4a1c2552e4f6b77f1804ff8c2cc9a9f1b19e6b80` and
+`9152e871cb4502a6e63f52cd460502ae963579e7c547733052b40640d4f7b5ed`.
+
 ## Transfer and train on macOS
 
 Copy the entire artifact directory with a hash-preserving tool, then run:
