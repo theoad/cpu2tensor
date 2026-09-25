@@ -236,6 +236,15 @@ def subject_manifest(binary: Path, *, target_cpu: int, controller_cpu: int,
         "kernel_version": platform.version(),
         "boot_id": _read("/proc/sys/kernel/random/boot_id"),
         "microcode": _read("/sys/devices/system/cpu/cpu0/microcode/version"),
+        "intel_pstate_no_turbo": _read(
+            "/sys/devices/system/cpu/intel_pstate/no_turbo"
+        ),
+        "target_scaling_governor": _read(
+            f"/sys/devices/system/cpu/cpu{target_cpu}/cpufreq/scaling_governor"
+        ),
+        "target_scaling_max_freq_khz": _read(
+            f"/sys/devices/system/cpu/cpu{target_cpu}/cpufreq/scaling_max_freq"
+        ),
         "kernel_btf_sha256": _optional_sha256("/sys/kernel/btf/vmlinux"),
         "kernel_notes_sha256": _optional_sha256("/sys/kernel/notes"),
         "kernel_cmdline_sha256": _optional_sha256("/proc/cmdline"),

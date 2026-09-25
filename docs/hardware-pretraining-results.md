@@ -528,6 +528,25 @@ at period 1,000, and roughly 5,900--8,300 such samples per 10-loop canary at
 period 100. This qualifies store sampling as a candidate observation path, but
 does not yet prove that it distinguishes the vulnerable mutation.
 
+A 3,060-execution store-sampling benign run at period 1,000 collected 2,992,074
+usable precise-store samples with zero loss or retry, and trained a frozen
+subject-matched model. Its blinded 12+12 corrected lawful-sibling replay again
+manifested 20/20 effect mutations per execution without capture loss. The
+store-model separation was AUROC 0.4375, 4/12 paired effect wins, and no alerts
+in either arm. Report content SHA-256:
+`6839085d8ab15976ae3571e9994acef9dec79a810ef1f3c7547a37bc000921dc`.
+The store signal exists, but the 24-feature PEBS reduction (principally counts,
+data-source sketch, and IP/address moments) did not retain enough evidence for
+this validation. A subsequent v3 feature experiment adds relative instruction
+sites, address page offsets, and their joint sketch; this is a hypothesis, not
+yet a sensitivity result.
+
+The laptop package reached 97--100°C during these short pilots with turbo
+enabled. Turbo was disabled before further sustained work, lowering the CPU 2
+maximum policy frequency from 4.9 to 1.8 GHz. The frequency policy is now
+included in the exact subject identity; prior checkpoints must not be reused
+under the lower-power policy.
+
 The full 278-test local suite passed with 75 platform skips before the
 decode-generation change; its focused 31-test suite passed afterward. The
 24-hour campaign remains **NO-GO** pending a better invariant-bearing signal,

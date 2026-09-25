@@ -234,7 +234,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "labels_unblinded_after_scoring": True,
             "expected_manifestation": args.expected_manifestation,
             "effect": "splice/write against a caller-owned read-only file",
-            "neutral": "matched pipe/file operations without the splice primitive",
+            "neutral": "matched splice with its page-cache pipe buffer drained before write",
         },
         "separation": {
             "effect_mean": sum(effect) / len(effect),

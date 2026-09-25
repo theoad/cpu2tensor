@@ -28,10 +28,13 @@ from cpu2tensor.hardware import (
 )
 
 
-MULTIMODAL_FEATURE_SCHEMA = "cpu2tensor-hardware-multimodal-features-v2"
+MULTIMODAL_FEATURE_SCHEMA = "cpu2tensor-hardware-multimodal-features-v3"
 SEGMENTS = 16
 BYTE_VALUES = 256
 DATA_SOURCE_BINS = 16
+IP_BINS = 64
+PAGE_OFFSET_BINS = 16
+IP_ADDRESS_BINS = 32
 PEBS_FEATURES = (
     # Count/latency and exact-IP summaries precede a normalized hash sketch of
     # the untouched data-source bit pattern and relocation-invariant offsets.
@@ -44,6 +47,9 @@ PEBS_FEATURES = (
     "std_log_address_offset",
     "mean_log_ip_offset",
     "std_log_ip_offset",
+    *(f"raw_ip_hash_{index:02d}" for index in range(IP_BINS)),
+    *(f"address_page_offset_{index:02d}" for index in range(PAGE_OFFSET_BINS)),
+    *(f"ip_address_joint_{index:02d}" for index in range(IP_ADDRESS_BINS)),
 )
 PMU_FEATURES = (
     "instructions_per_second",
@@ -297,12 +303,16 @@ def _unsigned(value: int) -> int:
     return value & _UINT64_MASK
 
 
-def _data_source_bin(value: int) -> int:
+def _mix64(value: int) -> int:
     # SplitMix64 finalizer: deterministic across Python and torch versions.
     mixed = _unsigned(value)
     mixed = (mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9 & _UINT64_MASK
     mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EB & _UINT64_MASK
-    return (mixed ^ (mixed >> 31)) % DATA_SOURCE_BINS
+    return mixed ^ (mixed >> 31)
+
+
+def _data_source_bin(value: int) -> int:
+    return _mix64(value) % DATA_SOURCE_BINS
 
 
 def _mean_std(values: list[float]) -> tuple[float, float]:
@@ -381,8 +391,20 @@ def _pebs_features(
         address_mean, address_std = _mean_std(address_offsets)
         ip_mean, ip_std = _mean_std(ip_offsets)
         sketch = [0.0] * DATA_SOURCE_BINS
+        ip_sketch = [0.0] * IP_BINS
+        page_offset_sketch = [0.0] * PAGE_OFFSET_BINS
+        joint_sketch = [0.0] * IP_ADDRESS_BINS
         for row in selected:
             sketch[_data_source_bin(data_sources[row])] += 1.0 / count
+            # Relative sites survive uniform relocation while the previous
+            # mean/std of IP offsets erased rare instruction sites.
+            relative_ip = ips[row] - ip_anchor
+            ip_sketch[_mix64(relative_ip) % IP_BINS] += 1.0 / count
+            page_offset = addresses[row] & 0xFFF
+            page_offset_sketch[page_offset // 256] += 1.0 / count
+            joint_sketch[
+                _mix64(relative_ip ^ (page_offset << 32)) % IP_ADDRESS_BINS
+            ] += 1.0 / count
         features[segment] = torch.tensor(
             (
                 math.log1p(count),
@@ -394,6 +416,9 @@ def _pebs_features(
                 address_std,
                 ip_mean,
                 ip_std,
+                *ip_sketch,
+                *page_offset_sketch,
+                *joint_sketch,
             ),
             dtype=torch.float32,
         )

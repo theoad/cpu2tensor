@@ -104,8 +104,13 @@ the blind effect/lawful-sibling comparison. That replay failed: AUROC 0.3681,
 captures and 20/20 effect mutations each time. Precise kernel-store sampling
 is available on the same host and is now an optional, event-identity-separated
 PEBS observation path. Next: qualify simultaneous PT/store/PMU capture and
-test whether frozen store-based training improves this gate; retain a closer
-non-triggering splice control before interpreting any positive separation.
+test whether richer relative-IP/address features improve this gate. The first
+store-based model also failed (AUROC 0.4375, zero alerts in either arm). A closer
+non-triggering splice control is now implemented for any positive follow-up.
+The laptop's 97--100°C short-run package temperature required a fixed no-turbo
+policy before sustained collection; exact subject identity now records that
+policy. Scale remains conditional on thermally safe capture and a bounded
+storage/custody plan.
 Semantic Intel PT decode remains open. The 24-hour campaign is **NO-GO** until
 one of these paths demonstrates useful sensitivity and custody.
 

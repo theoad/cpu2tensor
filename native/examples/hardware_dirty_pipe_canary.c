@@ -96,12 +96,12 @@ static int run_once(const char *mode, uint64_t iteration, int *mutated) {
     const int effect = strcmp(mode, "effect") == 0;
     const char *payload = effect ? "BUG!" : "AAAA";
     int status = 0;
-    unsigned char ordinary_read = 0;
-    // The neutral sibling must not attach a page-cache buffer to the pipe.
-    // Writing identical bytes through the vulnerable splice path would still
-    // exercise the bug even though the final file contents appear unchanged.
-    if ((effect && splice(readonly, &offset, pipe_descriptors[1], NULL, 1, 0) != 1) ||
-        (!effect && pread(readonly, &ordinary_read, 1, offset) != 1) ||
+    // Both arms enter splice. The neutral arm consumes the page-cache-backed
+    // pipe buffer before its write, so the write cannot merge into that page.
+    // Merely writing unchanged bytes through the attached buffer is not neutral.
+    unsigned char drained = 0;
+    if (splice(readonly, &offset, pipe_descriptors[1], NULL, 1, 0) != 1 ||
+        (!effect && read(pipe_descriptors[0], &drained, 1) != 1) ||
         write_all(pipe_descriptors[1], payload, marker_bytes) != 0) {
         status = -1;
     }

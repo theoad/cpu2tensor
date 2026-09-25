@@ -173,6 +173,19 @@ def _assert_batches_equal(
 
 
 class HardwareMultimodalFeatureTests(unittest.TestCase):
+    def test_instruction_sketch_keeps_relative_sites_but_not_uniform_relocation(self) -> None:
+        lane = _lane(10, cpu=3)
+        assert lane.pebs is not None
+        shifted = replace(lane, pebs=replace(lane.pebs, ip=lane.pebs.ip + 0x100000))
+        changed_ips = lane.pebs.ip.clone()
+        changed_ips[-1] += 0x100000
+        changed = replace(lane, pebs=replace(lane.pebs, ip=changed_ips))
+        original = featurize_hardware_capture((lane,)).batch.pebs
+        relocated = featurize_hardware_capture((shifted,)).batch.pebs
+        modified = featurize_hardware_capture((changed,)).batch.pebs
+        torch.testing.assert_close(original, relocated)
+        self.assertFalse(torch.equal(original[..., 24:88], modified[..., 24:88]))
+
     def test_precise_store_lane_preserves_signal_and_timing(self) -> None:
         lane = _lane(10, cpu=3)
         assert lane.pebs is not None
