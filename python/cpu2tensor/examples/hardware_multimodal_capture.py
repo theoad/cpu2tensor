@@ -255,7 +255,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--runs", type=int, default=5)
     result.add_argument("--seed", type=int, default=20260925)
     result.add_argument("--pebs-period", type=int, default=10_000)
-    result.add_argument("--data-pages", type=int, default=64)
+    result.add_argument("--data-pages", type=int, default=1024)
     result.add_argument("--aux-pages", type=int, default=2048)
     result.add_argument("--timeout", type=float, default=30.0)
     return result

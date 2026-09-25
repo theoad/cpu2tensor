@@ -16,6 +16,7 @@ import re
 import torch
 
 from cpu2tensor.examples.hardware_multimodal import (
+    frozen_multimodal_metadata,
     load_frozen_multimodal_model,
     multimodal_anomaly_evidence,
 )
@@ -51,10 +52,13 @@ def _parse_output(output: bytes, arm: str, loops: int) -> int:
     if match is None or match.group(1) != arm or int(match.group(2)) != loops:
         raise RuntimeError(f"unexpected canary output: {output!r}")
     mutations = int(match.group(3))
-    expected = loops if arm == "effect" else 0
-    if mutations != expected:
+    if arm == "neutral" and mutations != 0:
         raise RuntimeError(
-            f"{arm} canary produced {mutations} mutations, expected {expected}"
+            f"neutral canary produced {mutations} mutations, expected zero"
+        )
+    if arm == "effect" and mutations not in (0, loops):
+        raise RuntimeError(
+            f"effect canary produced partial manifestation {mutations}/{loops}"
         )
     return mutations
 
@@ -78,6 +82,19 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("target and controller CPUs must be allowed")
     os.sched_setaffinity(0, {args.controller_cpu})
     torch.set_num_threads(1)
+    subject = subject_manifest(
+        binary, target_cpu=args.target_cpu, controller_cpu=args.controller_cpu,
+        data_pages=args.data_pages, aux_pages=args.aux_pages,
+    )
+    metadata = frozen_multimodal_metadata(checkpoint)
+    if (
+        metadata.get("schema") != "cpu2tensor-frozen-hardware-subject-v1"
+        or metadata.get("subject_identity_sha256")
+        != subject["subject_identity_sha256"]
+        or metadata.get("event_identity_sha256")
+        != subject["event_identity_sha256"]
+    ):
+        raise ValueError("checkpoint differs from the exact validation subject")
     model, threshold = load_frozen_multimodal_model(checkpoint, device="cpu")
 
     schedule = [
@@ -178,10 +195,19 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         }
         for pair in range(args.runs)
     }
-    subject = subject_manifest(
-        binary, target_cpu=args.target_cpu, controller_cpu=args.controller_cpu,
-        data_pages=args.data_pages, aux_pages=args.aux_pages,
-    )
+    effect_mutations = {
+        int(row["mutations"]) for row in rows if row["arm"] == "effect"
+    }
+    if len(effect_mutations) != 1:
+        raise RuntimeError("Dirty Pipe manifestation changed across effect repeats")
+    manifested = next(iter(effect_mutations)) == args.loops
+    if args.expected_manifestation != "either" and manifested != (
+        args.expected_manifestation == "present"
+    ):
+        raise RuntimeError(
+            f"Dirty Pipe manifestation was {'present' if manifested else 'absent'}, "
+            f"expected {args.expected_manifestation}"
+        )
     report = {
         "schema": SCHEMA,
         "subject": subject,
@@ -197,6 +223,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "loops": args.loops,
             "schedule": [arm for _, arm in schedule],
             "labels_used_by_model": False,
+            "labels_unblinded_after_scoring": True,
+            "expected_manifestation": args.expected_manifestation,
             "effect": "splice/write against a caller-owned read-only file",
             "neutral": "matched pipe/file operations without the splice primitive",
         },
@@ -207,6 +235,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 sum(effect) / len(effect) - sum(neutral) / len(neutral)
             ),
             "effect_vs_neutral_auc": _auc(effect, neutral),
+            "manifested": manifested,
+            "effect_mutations_per_execution": next(iter(effect_mutations)),
             "paired_effect_wins": sum(
                 values["effect"] > values["neutral"] for values in paired.values()
             ),
@@ -236,9 +266,13 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--seed", type=int, default=20260925)
     result.add_argument("--target-cpu", type=int, default=2)
     result.add_argument("--controller-cpu", type=int, default=3)
-    result.add_argument("--data-pages", type=int, default=64)
+    result.add_argument("--data-pages", type=int, default=1024)
     result.add_argument("--aux-pages", type=int, default=8192)
     result.add_argument("--capture-retries", type=int, default=2)
+    result.add_argument(
+        "--expected-manifestation", choices=("present", "absent", "either"),
+        default="either",
+    )
     result.add_argument("--timeout", type=float, default=30.0)
     return result
 

@@ -10,11 +10,12 @@ class HardwareDirtyPipeValidationTests(unittest.TestCase):
     def test_auc_counts_wins_and_ties(self) -> None:
         self.assertEqual(_auc([2.0, 3.0], [1.0, 2.0]), 0.875)
 
-    def test_output_requires_the_safe_expected_mutation(self) -> None:
+    def test_output_accepts_fixed_or_vulnerable_safe_manifestation(self) -> None:
         self.assertEqual(_parse_output(b"mode=effect loops=4 mutations=4\n", "effect", 4), 4)
+        self.assertEqual(_parse_output(b"mode=effect loops=4 mutations=0\n", "effect", 4), 0)
         self.assertEqual(_parse_output(b"mode=neutral loops=4 mutations=0\n", "neutral", 4), 0)
-        with self.assertRaisesRegex(RuntimeError, "expected 4"):
-            _parse_output(b"mode=effect loops=4 mutations=0\n", "effect", 4)
+        with self.assertRaisesRegex(RuntimeError, "partial manifestation"):
+            _parse_output(b"mode=effect loops=4 mutations=2\n", "effect", 4)
         with self.assertRaisesRegex(RuntimeError, "unexpected"):
             _parse_output(b"mode=neutral loops=3 mutations=0\n", "neutral", 4)
 
