@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
@@ -244,6 +244,7 @@ def subject_manifest(binary: Path, *, target_cpu: int, controller_cpu: int,
         "intel_pt_representation": "raw_aux_bytes_no_decode",
         "pebs_event": "memory_loads",
         "pebs_period": PEBS_PERIOD,
+        "pebs_sample_policy": "retain_raw_censor_inexact_ip_or_zero_address",
         "boundary_counters": list(COUNTER_NAMES),
         "data_pages": data_pages,
         "aux_pages": aux_pages,
@@ -534,7 +535,8 @@ def _validate_capture(
         raise CaptureAdmissionError(
             "target_thread_missing", "capture omitted the gated target thread"
         )
-    counts = {"pt_bytes": 0, "pebs_samples": 0, "pebs_exact_ip": 0,
+    counts = {"pt_bytes": 0, "pebs_samples": 0, "pebs_usable_samples": 0,
+              "pebs_censored_samples": 0, "pebs_exact_ip": 0,
               "pebs_nonzero_address": 0, "lost_sources": 0,
               "missing_sources": 0, "multiplexed_sources": 0}
     for batch in batches:
@@ -576,12 +578,13 @@ def _validate_capture(
             counts["pebs_samples"] += samples
             counts["pebs_exact_ip"] += int(batch.pebs.exact_ip.sum())
             counts["pebs_nonzero_address"] += int((batch.pebs.address != 0).sum())
-            if (samples and (not bool(batch.pebs.exact_ip.all()) or
-                             not bool((batch.pebs.address != 0).all()) or
-                             set(batch.pebs.cpu.tolist()) != {target_cpu})):
+            usable = batch.pebs.exact_ip.bool() & (batch.pebs.address != 0)
+            counts["pebs_usable_samples"] += int(usable.sum())
+            counts["pebs_censored_samples"] += samples - int(usable.sum())
+            if samples and set(batch.pebs.cpu.tolist()) != {target_cpu}:
                 raise CaptureAdmissionError(
                     "pebs_sample_quality",
-                    "PEBS samples must be exact-IP, nonzero-address, and target-CPU attributed"
+                    "PEBS samples must remain target-CPU attributed"
                 )
         if batch.counters is not None:
             multiplexed = batch.counters.time_enabled_ns != batch.counters.time_running_ns
@@ -594,6 +597,29 @@ def _validate_capture(
     if counts["pt_bytes"] == 0:
         raise CaptureAdmissionError("empty_pt", "raw Intel PT capture was empty")
     return counts
+
+
+def _model_capture(
+    batches: Sequence[HardwareMultimodalBatch],
+) -> tuple[HardwareMultimodalBatch, ...]:
+    """Censor unusable PEBS rows for learning while retaining raw custody."""
+    result = []
+    fields = (
+        "ip", "pid", "tid", "time", "cpu", "period", "address", "weight",
+        "data_source", "exact_ip",
+    )
+    for batch in batches:
+        pebs = batch.pebs
+        if pebs is None:
+            result.append(batch)
+            continue
+        usable = pebs.exact_ip.bool() & (pebs.address != 0)
+        filtered = replace(
+            pebs,
+            **{name: getattr(pebs, name)[usable] for name in fields},
+        )
+        result.append(replace(batch, pebs=filtered))
+    return tuple(result)
 
 
 def capture_execution(
@@ -784,6 +810,8 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
     feature_seconds = 0.0
     total_pt_bytes = 0
     total_pebs_samples = 0
+    total_pebs_usable_samples = 0
+    total_pebs_censored_samples = 0
     rejected_reasons: Counter[str] = Counter()
     admitted_reasons: Counter[str] = Counter()
     total_attempts = 0
@@ -802,7 +830,7 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
                 feature_phases_ns: dict[str, int] = {}
                 feature_started = time.perf_counter()
                 model_batch, lanes = _featurize_capture(
-                    captured.batches, feature_phases_ns
+                    _model_capture(captured.batches), feature_phases_ns
                 )
                 feature_seconds += time.perf_counter() - feature_started
                 lane_counts = _validate_lanes(
@@ -812,7 +840,20 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
             except (HardwareCaptureError, HardwareFeatureError) as error:
                 rejected_reasons[_rejection_reason(error)] += 1
                 if attempt == args.capture_retries:
-                    raise
+                    _atomic_json(artifact / "failure.json", {
+                        "schema": "cpu2tensor-kernel-multimodal-failure-v1",
+                        "dataset_identity_sha256": identity["identity_sha256"],
+                        "execution": asdict(execution),
+                        "attempt": attempt + 1,
+                        "total_attempts": total_attempts,
+                        "reason": _rejection_reason(error),
+                        "message": str(error),
+                        "rejected": dict(sorted(rejected_reasons.items())),
+                    })
+                    raise RuntimeError(
+                        f"capture exhausted retries for {execution.execution_id}: "
+                        f"{_rejection_reason(error)}"
+                    ) from error
         admission_reason = (
             "sampled_pebs" if captured.counts["pebs_samples"] else
             "zero_pebs_with_exact_affinity"
@@ -849,6 +890,8 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
             censored_tokens[name] += int((~available).sum())
         total_pt_bytes += captured.counts["pt_bytes"]
         total_pebs_samples += captured.counts["pebs_samples"]
+        total_pebs_usable_samples += captured.counts["pebs_usable_samples"]
+        total_pebs_censored_samples += captured.counts["pebs_censored_samples"]
         entries.append({
             **asdict(execution),
             "loops": loops,
@@ -896,6 +939,8 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
             "total_pt_bytes": total_pt_bytes,
             "pt_bytes_per_second": total_pt_bytes / collection_seconds,
             "total_pebs_samples": total_pebs_samples,
+            "total_pebs_usable_samples": total_pebs_usable_samples,
+            "total_pebs_censored_samples": total_pebs_censored_samples,
             "loss_count": (
                 rejected_reasons["hardware_trace_lost"]
                 + rejected_reasons["source_reported_loss"]

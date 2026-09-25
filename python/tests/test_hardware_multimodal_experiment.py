@@ -161,6 +161,8 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
         self.assertEqual(captured.counts["pt_bytes"], 2)
         self.assertEqual(captured.counts["pebs_exact_ip"], 1)
         self.assertEqual(captured.counts["pebs_nonzero_address"], 1)
+        self.assertEqual(captured.counts["pebs_usable_samples"], 1)
+        self.assertEqual(captured.counts["pebs_censored_samples"], 0)
         self.assertEqual(captured.target_affinity, (2,))
         self.assertEqual(
             set(captured.phases_ns),
@@ -168,20 +170,25 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
         )
         self.assertEqual(len(captured.batches), 1)
 
-    def test_capture_rejects_unqualified_pebs_rows_and_lanes(self) -> None:
+    def test_capture_censors_unusable_pebs_rows_but_rejects_migration(self) -> None:
         batch = _capture_batch()
         assert batch.pebs is not None
-        invalid = (
+        unusable = (
             replace(batch.pebs, exact_ip=torch.tensor([False])),
             replace(batch.pebs, address=torch.tensor([0], dtype=torch.int64)),
-            replace(batch.pebs, cpu=torch.tensor([3], dtype=torch.int32)),
         )
-        for pebs in invalid:
+        for pebs in unusable:
             with self.subTest(pebs=pebs):
-                with self.assertRaisesRegex(
-                    experiment.HardwareCaptureError, "PEBS"
-                ):
-                    experiment._validate_capture((replace(batch, pebs=pebs),), 77, 2)
+                capture = (replace(batch, pebs=pebs),)
+                counts = experiment._validate_capture(capture, 77, 2)
+                self.assertEqual(counts["pebs_usable_samples"], 0)
+                self.assertEqual(counts["pebs_censored_samples"], 1)
+                filtered = experiment._model_capture(capture)
+                self.assertEqual(filtered[0].pebs.ip.numel(), 0)
+                self.assertEqual(capture[0].pebs.ip.numel(), 1)
+        migrated = replace(batch.pebs, cpu=torch.tensor([3], dtype=torch.int64))
+        with self.assertRaisesRegex(experiment.HardwareCaptureError, "target-CPU"):
+            experiment._validate_capture((replace(batch, pebs=migrated),), 77, 2)
 
         sampled_lane = argparse.Namespace(
             tid=77, observed_cpu=3, migration_verified=True, pebs_samples=1
@@ -242,6 +249,8 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                 counts={
                     "pt_bytes": 2,
                     "pebs_samples": 1,
+                    "pebs_usable_samples": 1,
+                    "pebs_censored_samples": 0,
                     "pebs_exact_ip": 1,
                     "pebs_nonzero_address": 1,
                     "lost_sources": 0,
