@@ -82,8 +82,14 @@ production and at least 50 MiB/s. Use 128--256 MiB shards. Derived tensors may
 remain reproducible local artifacts rather than duplicating another full corpus.
 
 The real 204-execution tri-modal runner produced 8.47 MB of PT per execution and
-attributed 88.40% of its wall time to live featurization, although exact-shard
-replay is much faster and requires phase-level diagnosis. Persisting
+attributed 88.40% of its wall time to live featurization. A subsequent
+phase-instrumented pilot localized 88.70% of wall time to the PT histogram, with
+a sharp latency cliff above the shortest trace. The cause was a four-thread
+Torch pool inheriting the controller's one-CPU affinity; matching the pool to
+that affinity improved the same matrix 15.6 times and restored 673 MB/s
+aggregate histogram throughput. The corrected finite runner still reaches only
+24.2 executions/s across the deliberately mixed 0.65--33 ms workloads, with
+per-execution perf setup and durable custody intact. Persisting
 that volume at the desired eventual aggregate rate is impossible: 100,000
 executions/s would approach 847 GB/s and 73 PB/day. The high-rate design must
 therefore keep long-lived per-core perf sessions, continuously drain and score
@@ -198,8 +204,12 @@ perturbation, explicit timing uncertainty, deterministic checkpoint reload,
 useful cross-modal prediction beyond marginal baselines, and a frozen threshold
 that meets the familiar-benign alert budget. The September 25 kernel-family run
 passes capture integrity, checkpoint determinism, and cross-modal swap learning,
-but fails timing sensitivity and unfamiliar-benign generalization; its finite
-data path also reaches only 1.069 executions/s. The campaign is therefore
+but the accepted model fails timing sensitivity and unfamiliar-benign
+generalization. The corrected finite pilot reaches 24.2 executions/s, still far
+below the target that requires long-lived perf sessions and rolling custody. An
+experimental temporal head improved held-out timing-shift AUROC, but missed its
+localization, seed-stability, and inference-overhead gates. The campaign is
+therefore
 **NO-GO** in its current form. First fix those measured blockers and reproduce
 the result on a fresh whole-family split. Then repeat the tri-modal gate for at
 least three randomized sessions on the exact `c5.metal` boot: zero PT/AUX or

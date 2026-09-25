@@ -97,6 +97,32 @@ their manifest-file and log SHA-256 values are respectively
 `f05f129fefd02df48b0fb4cd4a1c2552e4f6b77f1804ff8c2cc9a9f1b19e6b80` and
 `9152e871cb4502a6e63f52cd460502ae963579e7c547733052b40640d4f7b5ed`.
 
+The histogram cliff was an affinity-order bug. Torch selected four intra-op
+workers while the controller still had CPUs 0--7 available; the runner then
+pinned itself to CPU 3 before the pool was created, so all four workers inherited
+one CPU and contended in `bincount`. The diagnostic used Python 3.12.3 and Torch
+2.14.0+cpu with its OpenMP backend and no thread environment overrides. Exact
+retained and live-buffer microbenchmarks
+both reproduced roughly 864 ms for 1 MB and 6 MB inputs. Configuring one intra-op
+worker immediately after the one-CPU pin reduced them to 1.6--1.9 ms and
+8.0--8.6 ms; warming the pool before pinning was also fast but violates the
+controller ownership design.
+
+A fresh run of the same matrix from clean revision
+`eadcff44b255c517b47f9b1f08ff1e81cc9f5d35` retained all 9 rows on their first
+attempt with the same 6 sampled and 3 verified zero-PEBS outcomes. It took
+0.3715 s (24.23 executions/s), including 39.573 ms of featurization and
+31.655 ms of PT histogram construction. The latter processed 21,302,272 bytes
+at 673 MB/s and used 8.52% of wall time, versus 88.70% before the fix. Workload
+windows and raw serialization/fsync/hash now use 30.43% and 28.82% respectively.
+All 9 custody rows revalidated. The manifest content, manifest file, and log
+SHA-256 values are respectively
+`adc8f886e49b0b898422e701380b76642f3aedcbd1d92cbd18f1ac937a4e5984`,
+`4be4c62f7fad9049a4ba5464562c46e0e0966f358c0d834553879a475c4dc552`, and
+`7c1a4d47de968fcf5d6b70a5a9b557e7782a1dd43c3f5d0a629e66e7c7c32d3f`.
+The retained artifact and log are under
+`~/.cache/cpu2tensor/kernel-multimodal-pin-fix/` on `trail-x86`.
+
 ## Transfer and train on macOS
 
 Copy the entire artifact directory with a hash-preserving tool, then run:

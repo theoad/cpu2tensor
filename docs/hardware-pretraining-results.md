@@ -173,17 +173,32 @@ accepted path.
 The 204-run manifest separates 7.896 seconds of accepted workload execution
 from 168.649 seconds of explicit featurization and 14.234 seconds of all other
 capture/custody work. The live timer therefore attributes 88.40% of the 190.78
-second run to the featurizer. It is not yet valid to attribute that cost to the
-histogram itself: replaying the exact featurizer over 40 retained shards on the
-same pinned `trail-x86` CPU processed 254.7 MB at 568 MB/s, and the isolated
-29.9 MB `memfd` histogram reached 637 MB/s there and 1.60 GB/s on `mac.local`.
-Those rates are roughly 55 and 156 times the live run's implied 10.25 MB/s. The
-discrepancy points to a live-buffer/runtime interaction or an over-broad phase
-timer and needs subphase instrumentation before optimization. PEBS contained
-only 16,960 samples and is unlikely to explain 168.649 seconds. Raw custody
-wrote 1.731 GB, fsynced each execution, then reread it for SHA-256; this belongs
-in the same phase benchmark but is bounded by the 14.234-second residual as
-currently timed.
+second run to the featurizer. A later nine-execution phase-instrumented pilot
+localized 5.156 of its 5.813 wall seconds (88.70%) to PT histogram construction;
+PEBS and PMU features used only 3.184 ms. The cliff was workload dependent:
+107 KB `getpid` traces took 0.55--0.59 ms, while both roughly 1 MB `openat` and
+6 MB `memfd` traces took 0.85--0.87 seconds. This rules out the earlier
+over-broad-timer hypothesis.
+
+The cause was controller affinity, not the tensor representation or histogram
+algorithm. Torch selected four intra-op workers while the process could use all
+eight logical CPUs; the runner then pinned the controller to CPU 3 before those
+workers were created. The workers inherited the one-CPU mask and contended when
+`bincount` entered its parallel path. Retained and live-buffer tensors both took
+about 864 ms under that ordering. Setting the intra-op pool to one immediately
+after pinning reduced isolated 1 MB and 6 MB histograms to 1.6--1.9 ms and
+8.0--8.6 ms.
+
+A clean end-to-end rerun at revision `eadcff44b255c517b47f9b1f08ff1e81cc9f5d35`
+confirmed the correction without changing capture admission: 9/9 executions
+were retained on their first attempt, with the same 6 sampled and 3 verified
+zero-PEBS outcomes and no source loss or multiplexing. Wall time fell from
+5.813 to 0.371 seconds (15.6 times), explicit featurization from 5.310 seconds
+to 39.573 ms (134 times), and PT histogram construction from 5.156 seconds to
+31.655 ms (163 times). The histogram now accounts for 8.52% of wall time and
+processes the aggregate 21.3 MB at 673 MB/s, consistent with retained-shard
+replay. Raw serialization/fsync/hash is now 28.82% and the workload windows
+30.43%, exposing the next real finite-run costs.
 
 The workload itself also prevents a 1,000-execution/s claim: its mean accepted
 window was 38.7 ms, and even `getpid` averaged 2.44 ms. High-rate operation needs
@@ -195,12 +210,16 @@ design must score every execution from bounded raw memory while retaining full
 raw evidence for alerts and a preregistered benign training sample, rather than
 claiming durable raw custody for every high-rate execution.
 
-The nine pre-admission retries expose another bias: requiring at least one PEBS
-sample at period 10,000 preferentially retains executions that happen to receive
-a sample. The next runner must admit a zero-sample PEBS interval as explicitly
-unavailable when the pinned event and target CPU affinity are independently
-verified, rather than resampling until positive. Suspicious cases can receive a
-targeted denser PEBS replay.
+The full run's nine pre-admission retries exposed a selection bias: requiring at
+least one PEBS sample at period 10,000 preferentially retained executions that
+happened to receive a sample. The runner now admits a zero-sample PEBS interval
+as explicitly unavailable only when the event is present, scheduled without
+multiplexing, and the target affinity is independently exact. In the retained
+nine-execution pilot, all three short `getpid` runs were admitted this way on
+their first attempt, while the six longer runs carried 216 exact-IP, nonzero-
+address samples on the requested CPU. The manifest reports admission reasons
+and every rejected attempt; suspicious cases may still receive a separate,
+denser PEBS replay.
 
 ## Small-model control
 
