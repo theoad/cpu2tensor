@@ -560,6 +560,29 @@ neutral write. All 12 effect executions again manifested 20/20 mutations; all
 This is another negative sensitivity result; adding relative-IP/address sketches
 alone does not justify claiming invariant learning.
 
+## Bounded 102,000-execution scale collection
+
+The user authorized a larger data-and-capacity experiment despite the negative
+Dirty Pipe development canary. A 102-execution smoke with deterministic loop
+divisors 1, 2, and 4 completed without retry or loss at 13.99 sealed
+executions/s on the no-turbo `trail-x86` subject. The follow-up collection is
+running as `cpu2tensor-store-scale100k-r2.service` from source `6609a30`, under
+`/home/user/.cache/cpu2tensor/vulnerable-kernel-5.13.0-30/store-v3-scale100k-r2`.
+It requests 6,000 repeats of each of 17 benign families: 56,000 familiar
+training, 21,000 calibration, 7,000 familiar validation, and 18,000 whole-family
+holdout executions. The raw audit selection is fixed at 0.5%, independent of
+trace content; every derived tensor and raw content hash is retained. The unit
+has a five-hour runtime limit and 6 GiB memory limit. A separate timer restores
+turbo after the hard stop. Its first service attempt, `r1`, exited before capture
+because systemd lacked Git's `SUDO_UID` for this verified user-owned checkout;
+`r2` passes only the checkout owner's UID in the unit environment, without a
+global Git trust exception.
+
+This run is collection only. No large-model result, known-CVE sensitivity, or
+24-hour GO is implied. The next gate is the sealed 102,000-execution manifest,
+loss/retry accounting, thermal/storage runway, verified off-host copy, then a
+same-data small-versus-larger model comparison.
+
 The full 278-test local suite passed with 75 platform skips before the
 decode-generation change; its focused 31-test suite passed afterward. The
 24-hour campaign remains **NO-GO** pending a better invariant-bearing signal,
