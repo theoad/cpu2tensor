@@ -22,5 +22,7 @@ capture and review-budget gates that are still open.
 on a Linux Intel PT host without decoding trace packets. Its checkpoint reloads
 with `load_frozen_raw_trace_pca` for ordinary frozen inference; scoring never
 updates the fitted model.
+[hardware_multimodal](hardware_multimodal.py) is the fixed-tensor masked PT,
+PEBS, and PMU training and calibration fixture.
 
 - [Context-only blocks](../../../docs/context-only.md): compact paging state and vectorized block association.
