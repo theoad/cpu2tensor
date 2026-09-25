@@ -110,6 +110,8 @@ class HardwareTests(unittest.TestCase):
                 return "11"
             if name.endswith("/events/mem-loads"):
                 return "event=0xcd,umask=0x1,ldlat=3"
+            if name.endswith("/events/mem-stores"):
+                return "event=0xd0,umask=0x82"
             if name.endswith("/format/pt"):
                 return "config:0"
             if name.endswith("/format/branch"):
@@ -118,8 +120,10 @@ class HardwareTests(unittest.TestCase):
 
         with mock.patch("pathlib.Path.read_text", read_text):
             memory = _attribute(HardwareConfig("kernel", cpus=(0,), signal="memory_loads"))
+            stores = _attribute(HardwareConfig("kernel", cpus=(0,), signal="memory_stores"))
             pt = _attribute(HardwareConfig("process", pid=7, signal="intel_pt"))
         self.assertEqual((memory.type, memory.config, memory.config1), (11, 0x1CD, 3))
+        self.assertEqual((stores.type, stores.config, stores.config1), (11, 0x82D0, 0))
         self.assertEqual((memory.flags >> 15) & 3, 2)
         self.assertTrue(memory.flags & (1 << 2))
         self.assertEqual(memory.read_format, 3)
@@ -137,13 +141,16 @@ class HardwareTests(unittest.TestCase):
         with mock.patch("pathlib.Path.read_text", side_effect=["4", "other"]):
             with self.assertRaises(HardwareCaptureError):
                 _attribute(HardwareConfig("kernel", cpus=(0,), signal="memory_loads"))
+        with mock.patch("pathlib.Path.read_text", side_effect=["4", "other"]):
+            with self.assertRaises(HardwareCaptureError):
+                _attribute(HardwareConfig("kernel", cpus=(0,), signal="memory_stores"))
         with mock.patch("pathlib.Path.read_text", side_effect=["11", "config:2", "config:13"]):
             with self.assertRaises(HardwareCaptureError):
                 _attribute(HardwareConfig("kernel", cpus=(0,), signal="intel_pt"))
         with mock.patch("pathlib.Path.read_text", side_effect=["11", "config:0", "config:12"]):
             with self.assertRaises(HardwareCaptureError):
                 _attribute(HardwareConfig("kernel", cpus=(0,), signal="intel_pt"))
-        for signal in ("memory_loads", "intel_pt"):
+        for signal in ("memory_loads", "memory_stores", "intel_pt"):
             with mock.patch("pathlib.Path.read_text", side_effect=["11", OSError("absent")]):
                 with self.subTest(signal=signal), self.assertRaises(HardwareCaptureError):
                     _attribute(HardwareConfig("kernel", cpus=(0,), signal=signal))
@@ -249,6 +256,10 @@ class HardwareTests(unittest.TestCase):
         self.assertEqual(result.trace_bytes.numel(), 0)
         self.assertEqual(_tensor(array("q")).dtype, torch.int64)
         self.assertEqual(_tensor(bytearray()).dtype, torch.uint8)
+        stores = _decode_records(data, "memory_stores", 2, b"")
+        self.assertEqual(stores.address.tolist(), [0xABC])
+        self.assertEqual(stores.weight.tolist(), [77])
+        self.assertEqual(stores.data_source.tolist(), [9])
         self.assertEqual(_decode_records(record(9, sample[:48]), "cycles", 0, b"").ip.tolist(), [-1])
 
     def test_pt_packets_are_retained_and_gaps_rejected(self) -> None:

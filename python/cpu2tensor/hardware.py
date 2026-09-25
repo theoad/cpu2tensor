@@ -70,7 +70,9 @@ class HardwareConfig:
     """
 
     scope: Literal["process", "process_kernel", "kernel"]
-    signal: Literal["cycles", "instructions", "memory_loads", "intel_pt"] = "cycles"
+    signal: Literal[
+        "cycles", "instructions", "memory_loads", "memory_stores", "intel_pt"
+    ] = "cycles"
     pid: int | None = None
     cpus: tuple[int, ...] | None = None
     period: int = 100_000
@@ -80,7 +82,9 @@ class HardwareConfig:
     def __post_init__(self) -> None:
         if self.scope not in ("process", "process_kernel", "kernel"):
             raise ValueError("scope must be process, process_kernel, or kernel")
-        if self.signal not in ("cycles", "instructions", "memory_loads", "intel_pt"):
+        if self.signal not in (
+            "cycles", "instructions", "memory_loads", "memory_stores", "intel_pt"
+        ):
             raise ValueError("Unknown hardware signal")
         if self.scope in ("process", "process_kernel") and (
             self.pid is None or self.pid <= 0 or self.cpus is not None
@@ -104,7 +108,8 @@ class HardwareBatch:
 
     Every tensor is CPU resident. ``ip`` is sampled, not a complete instruction
     trace. ``address``, ``weight`` and ``data_source`` are meaningful only for
-    ``memory_loads``. ``exact_ip`` reports the kernel's exact-IP sample flag.
+    ``memory_loads`` and ``memory_stores``. ``exact_ip`` reports the kernel's
+    exact-IP sample flag.
     ``trace_bytes`` contains PT packets and is empty for sampled PMU events.
     """
 
@@ -250,7 +255,8 @@ def _attribute(config: HardwareConfig) -> _PerfAttr:
     attr = _PerfAttr()
     attr.size = ctypes.sizeof(_PerfAttr)
     attr.sample_period = config.period
-    attr.sample_type = _MEMORY_FIELDS if config.signal == "memory_loads" else _SAMPLE_FIELDS
+    memory_signal = config.signal in ("memory_loads", "memory_stores")
+    attr.sample_type = _MEMORY_FIELDS if memory_signal else _SAMPLE_FIELDS
     attr.flags = 1 | (1 << 6)  # disabled; exclude hypervisor
     if config.scope == "process":
         # A per-thread event with cpu=-1 cannot mmap a ring when inherit is set.
@@ -260,19 +266,26 @@ def _attribute(config: HardwareConfig) -> _PerfAttr:
     if config.signal in ("cycles", "instructions"):
         attr.type = 0  # PERF_TYPE_HARDWARE
         attr.config = 0 if config.signal == "cycles" else 1
-    elif config.signal == "memory_loads":
+    elif memory_signal:
         root = "/sys/bus/event_source/devices/cpu"
         attr.type = _source_value(root + "/type")
-        # Intel's mem-loads alias must keep its event/umask/ldlat contract.
-        # Other PMUs need their own reviewed encoding and decoder.
+        alias_name = "mem-loads" if config.signal == "memory_loads" else "mem-stores"
         try:
-            alias = Path(root + "/events/mem-loads").read_text().strip()
+            alias = Path(root + f"/events/{alias_name}").read_text().strip()
         except OSError as error:
-            raise HardwareCaptureError("Precise memory-load PMU is unavailable") from error
-        if not alias.startswith("event=0xcd,umask=0x1,ldlat="):
-            raise HardwareCaptureError("Unsupported precise memory-load PMU encoding")
-        attr.config = 0x1CD
-        attr.config1 = int(alias.split("ldlat=", 1)[1], 0)
+            raise HardwareCaptureError(
+                f"Precise {config.signal.replace('_', ' ')} PMU is unavailable"
+            ) from error
+        if config.signal == "memory_loads":
+            # Intel's alias must keep its event/umask/ldlat contract.
+            if not alias.startswith("event=0xcd,umask=0x1,ldlat="):
+                raise HardwareCaptureError("Unsupported precise memory-load PMU encoding")
+            attr.config = 0x1CD
+            attr.config1 = int(alias.split("ldlat=", 1)[1], 0)
+        else:
+            if alias != "event=0xd0,umask=0x82":
+                raise HardwareCaptureError("Unsupported precise memory-store PMU encoding")
+            attr.config = 0x82D0
         # Fail instead of silently time-sharing the precise event with the PMU
         # boundary group. The read-format times are checked after disable.
         attr.flags |= (2 << 15) | (1 << 2)
@@ -440,11 +453,15 @@ def _decode_records(
         if kind == _SAMPLE:
             if signal == "intel_pt":
                 raise HardwareCaptureError("Unexpected sample in an Intel PT stream")
-            expected = _SAMPLE_ROW.size + (16 if signal == "memory_loads" else 0)
+            memory_signal = signal in ("memory_loads", "memory_stores")
+            expected = _SAMPLE_ROW.size + (16 if memory_signal else 0)
             if len(record) != expected:
                 raise HardwareCaptureError("Unexpected perf sample layout")
             ip, pid, tid, time, address, cpu, _, period = _SAMPLE_ROW.unpack_from(record)
-            weight, data_source = struct.unpack_from("<QQ", record, _SAMPLE_ROW.size) if signal == "memory_loads" else (0, 0)
+            weight, data_source = (
+                struct.unpack_from("<QQ", record, _SAMPLE_ROW.size)
+                if memory_signal else (0, 0)
+            )
             row = (ip, pid, tid, time, cpu, period, address, weight, data_source, bool(misc & (1 << 14)))
             for name, value in zip(names, row):
                 columns[name].append(value if value < 1 << 63 else value - (1 << 64))

@@ -39,10 +39,10 @@ select a short enough capture window for the configured rings.
 
 `cycles` and `instructions` produce sampled IP, PID, TID, CPU, perf timestamp,
 and sample period tensors. Those generic PMU signals can work on Intel, AMD,
-and AArch64 where perf exposes them. `memory_loads` uses the checked Intel
-`mem-loads` event: sampled load virtual address, weight, and data-source bits.
-It does not record every load, any store, a memory value, or a page-table
-translation. `exact_ip` identifies samples for which perf asserts an exact IP;
+and AArch64 where perf exposes them. `memory_loads` and `memory_stores` use the
+checked Intel `mem-loads` and `mem-stores` aliases: sampled virtual address,
+weight, and data-source bits. Neither records every memory operation, a memory
+value, or a page-table translation. `exact_ip` identifies samples for which perf asserts an exact IP;
 the client must not assume all samples are exact. Addresses are signed `int64`
 tensor bit patterns; reinterpret negative values as unsigned addresses when
 needed.
