@@ -317,6 +317,21 @@ class MaskedHardwareModel(nn.Module):
         batch: HardwareMultimodalBatch,
         masked: MaskedTokens,
     ) -> MultimodalPrediction:
+        tokens = self.encoded_tokens(batch, masked)
+        pt_end = self.config.segments
+        pebs_end = 2 * self.config.segments
+        return MultimodalPrediction(
+            self.pt_output(tokens[:, :, :pt_end]),
+            self.pebs_output(tokens[:, :, pt_end:pebs_end]),
+            self.pmu_output(tokens[:, :, pebs_end:]),
+        )
+
+    def encoded_tokens(
+        self,
+        batch: HardwareMultimodalBatch,
+        masked: MaskedTokens,
+    ) -> torch.Tensor:
+        """Return contextual tokens for small experimental auxiliary heads."""
         self._check_batch(batch)
         if masked.pt.shape != batch.pt_available.shape:
             raise ValueError("PT masks differ from the batch")
@@ -375,14 +390,7 @@ class MaskedHardwareModel(nn.Module):
         cpu_summaries = local[:, 0].reshape(batch_size, cpus, dimensions)
         cpu_context = self.cross_cpu_encoder(cpu_summaries)
         tokens = local[:, 1:].reshape(batch_size, cpus, token_count, dimensions)
-        tokens = self.output_norm(tokens + cpu_context[:, :, None, :])
-        pt_end = self.config.segments
-        pebs_end = 2 * self.config.segments
-        return MultimodalPrediction(
-            self.pt_output(tokens[:, :, :pt_end]),
-            self.pebs_output(tokens[:, :, pt_end:pebs_end]),
-            self.pmu_output(tokens[:, :, pebs_end:]),
-        )
+        return self.output_norm(tokens + cpu_context[:, :, None, :])
 
 
 def make_training_masks(

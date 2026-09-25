@@ -28,6 +28,10 @@ PEBS, and PMU training and calibration fixture.
 [kernel-only multimodal corpus](../../../docs/kernel-multimodal-experiment.md),
 then trains and evaluates fused whole-modality and span-only frozen models. Its
 collect-only/train-only split supports capture on Linux x86 and training on MPS.
+`hardware_temporal_consistency` is an isolated
+[temporal-objective experiment](../../../docs/hardware-temporal-consistency-r1.md)
+that re-featurizes coherent within-lane raw-PEBS timestamp interventions. It does
+not change the capture or model-input schemas.
 [hardware_pretraining_health](hardware_pretraining_health.py) validates the
 versioned JSONL health ledger and applies the pure bounded 24-hour campaign
 policy from the [scale procedure](../../../docs/hardware-pretraining-scale.md); it
