@@ -45,10 +45,13 @@ Preferred topology:
    manifests, sealed shards, checkpoints, and metrics. NVMe is a cache, never the
    sole copy.
 
-As observed on 2026-09-25, `p5.4xlarge` Spot was about $2.60/hour and `c5.metal`
-Spot about $1.03/hour in `us-east-1`; Spot prices and capacity are not a launch
-guarantee. Query price, quota, capacity, and the on-demand collector rate again
-before approval. The local `trail-x86` collector is preferable only if a 1 GiB
+As observed through the AWS APIs on 2026-09-25, `p5.4xlarge` Spot was about
+$2.60/hour and shared-tenancy Linux `c5.metal` on demand was $4.08/hour in
+`us-east-1`. That is approximately $160.24 for 24 hours of compute, or $173.59
+at the 26-hour hard stop, before block/object storage and taxes. Prices and Spot
+capacity are not a launch guarantee. Query price, quota, capacity, and storage
+rates again before approval, and require a separately approved campaign ceiling.
+The local `trail-x86` collector is preferable only if a 1 GiB
 transfer probe sustains twice the measured producer rate and the host can remain
 powered, thermally stable, and uncontended for 24 hours.
 
@@ -145,4 +148,3 @@ frozen threshold that meets the familiar-benign alert budget. Otherwise spend th
 24 hours fixing the measured blocker rather than scaling an unqualified signal.
 
 AWS instance specifications: [P5 instances](https://aws.amazon.com/ec2/instance-types/p5/).
-

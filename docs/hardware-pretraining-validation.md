@@ -7,6 +7,16 @@ measurement channels with different sampling, loss, and timing semantics; the
 capture manifest must preserve those differences instead of manufacturing a total
 order.
 
+There are two deliberately separate scopes. The canary below runs with
+`scope=process` and qualifies whether the sensors and fused model can retain known
+flow, memory, and timing differences. It includes application execution and is
+therefore an acquisition control, not evidence about a kernel-only model. The
+pretraining subject runs with `scope=process_kernel` against the gated benign
+syscall families in `hardware_kernel_workload`; user instructions are excluded.
+Its required tests are whole-family holdouts, modality/time corruptions, and the
+later matched vulnerable/fixed conditions. A process-scope canary pass cannot
+satisfy a kernel-only go/no-go gate.
+
 ## Deterministic canary target
 
 Build the Linux-only target with the existing hardware-example option:
@@ -74,7 +84,7 @@ score threshold at the calibration 99th percentile. The evaluator retains the ma
 from opaque condition IDs to variants until scoring finishes. Unseen benign
 families are test data and never adjust the threshold.
 
-Tonight's engineering gate is:
+Tonight's process-scope sensor gate is:
 
 - all requested modalities are present, attributable to the recorded CPU, and
   complete or explicitly rejected for loss;
@@ -94,6 +104,13 @@ gate.
 Passing this gate establishes sensitivity to controlled hardware-observable
 changes. It does not establish that the model detects bugs, distinguishes causes,
 or operates at an acceptable prospective false-alert rate.
+
+The separate kernel-only PoC gate uses the exact same boot and hardware but
+`scope=process_kernel`. It must capture all three modalities without loss or PMU
+multiplexing; beat the marginal and PT-only baselines on cross-modal matching;
+retain the frozen familiar-family alert budget; and report every held-out syscall
+family rather than averaging them away. No application-scope sample may enter
+kernel-only training, calibration, or evaluation.
 
 ## Unknown-alert handling
 

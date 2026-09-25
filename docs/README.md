@@ -9,6 +9,10 @@
 - [Capture benchmark](benchmark-capture.md): reproducible signal overhead and [x86 results](benchmark-capture-results.md).
 - [Adding a signal notebook](tutorials/normalization.ipynb): executable layout, owned tensors and measured learning across relocation.
 - [Instrumentation](instrumentation.md): current register/memory contract and limits.
+- [Multimodal hardware validation](hardware-pretraining-validation.md): blinded
+  flow, memory, contention, phase, and later matched-CVE gates.
+- [Twenty-four-hour hardware pretraining](hardware-pretraining-scale.md): frozen
+  subject, capacity ladder, health policy, resource plan, and abort criteria.
 - [Repeated action windows](action-windows.md): guest boundaries and fixed
   per-vCPU transition counts.
 - [Custom kernel actions](custom-kernel-actions.md): client-owned syscall sequences
