@@ -200,6 +200,21 @@ class MultimodalPrediction:
     pmu: torch.Tensor
 
 
+@dataclass(frozen=True)
+class MultimodalAnomalyEvidence:
+    """Faithful reconstruction evidence retained for suspicious executions."""
+
+    score: torch.Tensor
+    modality_scores: torch.Tensor
+    modality_present: torch.Tensor
+    pt_token_error: torch.Tensor
+    pebs_token_error: torch.Tensor
+    pmu_token_error: torch.Tensor
+    pt_feature_error: torch.Tensor
+    pebs_feature_error: torch.Tensor
+    pmu_feature_error: torch.Tensor
+
+
 def _encoder(config: MultimodalConfig, layers: int) -> nn.TransformerEncoder:
     layer = nn.TransformerEncoderLayer(
         d_model=config.model_dimensions,
@@ -515,11 +530,11 @@ def _top_token_error(error: torch.Tensor, available: torch.Tensor) -> tuple[torc
 
 
 @torch.no_grad()
-def multimodal_anomaly_score(
+def multimodal_anomaly_evidence(
     model: MaskedHardwareModel,
     batch: HardwareMultimodalBatch,
-) -> torch.Tensor:
-    """Score every available token once with deterministic complementary masks."""
+) -> MultimodalAnomalyEvidence:
+    """Score every token and retain the exact residuals behind the score."""
     if model.training or any(parameter.requires_grad for parameter in model.parameters()):
         raise RuntimeError("freeze the model before anomaly scoring")
     targets = model.standardized_targets(batch)
@@ -527,6 +542,11 @@ def multimodal_anomaly_score(
         "pt": torch.zeros_like(batch.pt_available, dtype=torch.float32),
         "pebs": torch.zeros_like(batch.pebs_available, dtype=torch.float32),
         "pmu": torch.zeros_like(batch.pmu_available, dtype=torch.float32),
+    }
+    feature_errors = {
+        "pt": torch.zeros_like(batch.pt),
+        "pebs": torch.zeros_like(batch.pebs),
+        "pmu": torch.zeros_like(batch.pmu),
     }
     empty_pt = torch.zeros_like(batch.pt_available)
     empty_pebs = torch.zeros_like(batch.pebs_available)
@@ -548,11 +568,16 @@ def multimodal_anomaly_score(
         if not bool(selected.any()):
             continue
         prediction = model(batch, masked)
-        per_token = F.smooth_l1_loss(
+        per_feature = F.smooth_l1_loss(
             getattr(prediction, name), getattr(targets, name), reduction="none"
-        ).mean(-1)
+        )
+        per_token = per_feature.mean(-1)
+        replace = selected & (per_token > errors[name])
         errors[name][selected] = torch.maximum(
             errors[name][selected], per_token[selected]
+        )
+        feature_errors[name] = torch.where(
+            replace[..., None], per_feature, feature_errors[name]
         )
     modality_scores = []
     modality_present = []
@@ -569,7 +594,45 @@ def multimodal_anomaly_score(
     result = torch.where(present, scores, torch.zeros_like(scores)).sum(1) / present.sum(1)
     if not bool(torch.isfinite(result).all()):
         raise RuntimeError("multimodal scoring produced a non-finite value")
-    return result
+    return MultimodalAnomalyEvidence(
+        score=result,
+        modality_scores=scores,
+        modality_present=present,
+        pt_token_error=errors["pt"],
+        pebs_token_error=errors["pebs"],
+        pmu_token_error=errors["pmu"],
+        pt_feature_error=feature_errors["pt"],
+        pebs_feature_error=feature_errors["pebs"],
+        pmu_feature_error=feature_errors["pmu"],
+    )
+
+
+@torch.no_grad()
+def multimodal_anomaly_score(
+    model: MaskedHardwareModel,
+    batch: HardwareMultimodalBatch,
+) -> torch.Tensor:
+    """Return the scalar projection of faithful token-level evidence."""
+    return multimodal_anomaly_evidence(model, batch).score
+
+
+def empirical_tail_probability(
+    scores: torch.Tensor,
+    calibration_scores: torch.Tensor,
+) -> torch.Tensor:
+    """Finite-sample conformal tail probability without distributional claims."""
+    if scores.ndim != 1 or calibration_scores.ndim != 1:
+        raise ValueError("scores and calibration scores must be one-dimensional")
+    if calibration_scores.numel() == 0:
+        raise ValueError("calibration scores must not be empty")
+    if scores.device != calibration_scores.device:
+        raise ValueError("scores and calibration scores must share one device")
+    if not bool(torch.isfinite(scores).all() and torch.isfinite(calibration_scores).all()):
+        raise ValueError("scores and calibration scores must be finite")
+    exceedances = (
+        calibration_scores[None, :] >= scores[:, None]
+    ).sum(1)
+    return (exceedances + 1).to(torch.float32) / (calibration_scores.numel() + 1)
 
 
 def calibrate_multimodal_threshold(

@@ -17,6 +17,8 @@
   capture, perturbation, PEBS-period, and small-model evidence.
 - [Temporal consistency R1](hardware-temporal-consistency-r1.md): isolated
   within-lane timing objective result and rejection decision.
+- [Hardware anomaly evidence](hardware-anomaly-evidence.md): replayable LLM
+  handoff, faithful residual localization, PEBS semantics, and symbol sideband.
 - [Kernel-only multimodal experiment](kernel-multimodal-experiment.md): sealed
   corpus collection, MPS training, frozen calibration, and corruption evaluation.
 - [Repeated action windows](action-windows.md): guest boundaries and fixed

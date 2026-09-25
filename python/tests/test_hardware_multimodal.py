@@ -12,9 +12,11 @@ from cpu2tensor.examples.hardware_multimodal import (
     MaskedHardwareModel,
     MultimodalConfig,
     calibrate_multimodal_threshold,
+    empirical_tail_probability,
     freeze_multimodal_model,
     load_frozen_multimodal_model,
     make_training_masks,
+    multimodal_anomaly_evidence,
     multimodal_anomaly_score,
     save_frozen_multimodal_model,
     train_masked_model,
@@ -93,6 +95,33 @@ def _replace(
 
 
 class HardwareMultimodalTests(unittest.TestCase):
+    def test_anomaly_evidence_retains_score_contributors_and_confidence(self) -> None:
+        batch = _fixture(rows=5, cpus=2)
+        model = _model(batch)
+        model.fit_normalization(batch)
+        freeze_multimodal_model(model)
+
+        evidence = multimodal_anomaly_evidence(model, batch)
+
+        torch.testing.assert_close(evidence.score, multimodal_anomaly_score(model, batch))
+        torch.testing.assert_close(
+            evidence.pt_token_error, evidence.pt_feature_error.mean(-1)
+        )
+        torch.testing.assert_close(
+            evidence.pebs_token_error, evidence.pebs_feature_error.mean(-1)
+        )
+        torch.testing.assert_close(
+            evidence.pmu_token_error, evidence.pmu_feature_error.mean(-1)
+        )
+        torch.testing.assert_close(
+            evidence.score,
+            evidence.modality_scores.sum(1) / evidence.modality_present.sum(1),
+        )
+        probabilities = empirical_tail_probability(
+            torch.tensor([0.0, 2.0]), torch.tensor([0.0, 1.0, 2.0])
+        )
+        torch.testing.assert_close(probabilities, torch.tensor([1.0, 0.5]))
+
     @classmethod
     def setUpClass(cls) -> None:
         torch.set_num_threads(1)

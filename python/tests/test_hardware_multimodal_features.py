@@ -195,11 +195,15 @@ class HardwareMultimodalFeatureTests(unittest.TestCase):
 
         # TID 10 is first even though input order and CPU order say otherwise.
         for segment in range(16):
-            self.assertEqual(float(result.batch.pt[0, 0, segment, 2 * segment]), 1.0)
-            self.assertEqual(
-                float(result.batch.pt[0, 0, segment, 2 * segment + 1]), 1.0
+            self.assertAlmostEqual(
+                float(result.batch.pt[0, 0, segment, 2 * segment]), math.log1p(1)
             )
-        self.assertEqual(result.batch.pt[0, 1, :, 9].tolist(), [2.0] * 16)
+            self.assertAlmostEqual(
+                float(result.batch.pt[0, 0, segment, 2 * segment + 1]), math.log1p(1)
+            )
+        torch.testing.assert_close(
+            result.batch.pt[0, 1, :, 9], torch.full((16,), math.log1p(2))
+        )
         self.assertTrue(bool(result.batch.pt_available.all()))
         self.assertEqual(int(result.batch.pebs_available[0, 0].sum()), 2)
         populated = torch.nonzero(result.batch.pebs_available[0, 0]).flatten().tolist()

@@ -129,6 +129,14 @@ kernel logs, then use KASAN, KCSAN, or UBSAN only in a separate diagnostic repla
 because instrumentation changes the distribution. Minimize a reproducible case
 before adjudication.
 
+Every reviewed alert uses the
+[hardware anomaly evidence bundle](hardware-anomaly-evidence.md). Review cost is
+reported both per execution and per previously unseen stable evidence cluster.
+Accepting one explained-benign cluster may suppress later members from expensive
+LLM review, but it does not change their archived anomaly scores or retrain the
+frozen model. A cluster assignment is part of the report and must not be used to
+erase unresolved singleton trajectories.
+
 The report has three disjoint buckets: expected positives, explained-benign
 alerts, and unresolved anomalies. The conservative operational alert rate includes
 unresolved anomalies. A second explained-benign rate and the unresolved rate may

@@ -38,7 +38,10 @@ from cpu2tensor.examples.hardware_multimodal import (
     save_frozen_multimodal_model,
     train_masked_model,
 )
-from cpu2tensor.examples.hardware_multimodal_features import HardwareFeatureError
+from cpu2tensor.examples.hardware_multimodal_features import (
+    HardwareFeatureError,
+    MULTIMODAL_FEATURE_SCHEMA,
+)
 from cpu2tensor.hardware import (
     HardwareBatch,
     HardwareCounterBatch,
@@ -51,7 +54,7 @@ from cpu2tensor.hardware import (
 
 
 SCHEMA = "cpu2tensor-kernel-multimodal-experiment-v1"
-RAW_SCHEMA = "cpu2tensor-kernel-multimodal-raw-v1"
+RAW_SCHEMA = "cpu2tensor-kernel-multimodal-raw-v2"
 DERIVED_SCHEMA = "cpu2tensor-kernel-multimodal-derived-v1"
 SCOPE = "process_kernel"
 PEBS_PERIOD = 10_000
@@ -338,6 +341,10 @@ def raw_capture_payload(
         "schema": RAW_SCHEMA,
         "execution": asdict(execution),
         "loops": loops,
+        "invocation": {
+            "argv": [execution.family, str(loops)],
+            "stdin": torch.empty(0, dtype=torch.uint8),
+        },
         "stdout": torch.tensor(list(stdout), dtype=torch.uint8),
         "elapsed_ns": elapsed_ns,
         "batches": [{
@@ -825,6 +832,7 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         derived_started_ns = time.perf_counter_ns()
         derived_hash = _atomic_torch_save(derived_path, {
             "schema": DERIVED_SCHEMA,
+            "feature_schema": MULTIMODAL_FEATURE_SCHEMA,
             "execution": asdict(execution),
             "raw_sha256": raw_hash,
             "batch": _model_payload(model_batch),
@@ -869,6 +877,7 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
     collection_wall_ns = int(collection_seconds * 1_000_000_000)
     manifest = {
         "schema": SCHEMA,
+        "feature_schema": MULTIMODAL_FEATURE_SCHEMA,
         **identity,
         "split": {
             "seed": args.seed,
@@ -914,6 +923,9 @@ def load_dataset(artifact: Path) -> tuple[dict[str, object], dict[str, ModelBatc
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("schema") != SCHEMA:
         raise ValueError("unsupported kernel multimodal manifest")
+    feature_schema = manifest.get("feature_schema")
+    if feature_schema is not None and feature_schema != MULTIMODAL_FEATURE_SCHEMA:
+        raise ValueError("unsupported multimodal feature schema")
     event = manifest.get("event", {})
     if (event.get("scope") != SCOPE or event.get("pebs_period") != PEBS_PERIOD or
             tuple(event.get("modalities", ())) != MODALITIES or
@@ -934,6 +946,8 @@ def load_dataset(artifact: Path) -> tuple[dict[str, object], dict[str, ModelBatc
             raise ValueError(f"derived tensor hash mismatch for {entry['execution_id']}")
         payload = torch.load(derived_path, map_location="cpu", weights_only=True)
         if (payload.get("schema") != DERIVED_SCHEMA or
+                (feature_schema is not None and
+                 payload.get("feature_schema") != feature_schema) or
                 payload.get("raw_sha256") != entry["raw_sha256"] or
                 payload.get("execution") != {
                     name: entry[name] for name in (

@@ -28,6 +28,9 @@ PEBS, and PMU training and calibration fixture.
 [kernel-only multimodal corpus](../../../docs/kernel-multimodal-experiment.md),
 then trains and evaluates fused whole-modality and span-only frozen models. Its
 collect-only/train-only split supports capture on Linux x86 and training on MPS.
+`hardware_anomaly_bundle` turns one retained score into the replay, localization,
+confidence, PEBS semantic, and optional exact-boot symbol evidence described in
+the [LLM handoff contract](../../../docs/hardware-anomaly-evidence.md).
 [hardware_pretraining_health](hardware_pretraining_health.py) validates the
 versioned JSONL health ledger and applies the pure bounded 24-hour campaign
 policy from the [scale procedure](../../../docs/hardware-pretraining-scale.md); it

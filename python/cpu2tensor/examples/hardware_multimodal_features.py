@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Deterministic bridge from perf capture batches to multimodal model tensors.
 
-Raw PT bytes retain only byte order at sixteen contiguous histogram segments.
+Raw PT bytes retain byte order at sixteen contiguous log-count histogram segments.
 PEBS timestamps use their CLOCK_MONOTONIC_RAW clock, while PT and PMU receive the
 full capture envelope.  In particular, this module never assigns timestamps to
 PT byte positions or imposes an event order between lanes.
@@ -28,7 +28,7 @@ from cpu2tensor.hardware import (
 )
 
 
-MULTIMODAL_FEATURE_SCHEMA = "cpu2tensor-hardware-multimodal-features-v1"
+MULTIMODAL_FEATURE_SCHEMA = "cpu2tensor-hardware-multimodal-features-v2"
 SEGMENTS = 16
 BYTE_VALUES = 256
 DATA_SOURCE_BINS = 16
@@ -275,9 +275,12 @@ def _pt_features(batch: HardwareBatch) -> tuple[torch.Tensor, torch.Tensor]:
         stop = length * (segment + 1) // SEGMENTS
         if stop > start:
             available[segment] = True
-            result[segment] = torch.bincount(
+            # PT volume varies by orders of magnitude across lawful workloads.
+            # Compress counts before training so trace length cannot dominate
+            # byte-distribution and cross-modal residuals.
+            result[segment] = torch.log1p(torch.bincount(
                 trace[start:stop].to(torch.int64), minlength=BYTE_VALUES
-            ).to(torch.float32)
+            ).to(torch.float32))
     return result, available
 
 
