@@ -93,9 +93,9 @@ all three alerts and safely evicted six below-threshold rows after scoring. A
 blind 8+8 Dirty Pipe control on the fixed production kernel manifested no
 mutation, as expected, but an intentionally tiny smoke model could not separate
 effect from neutral inputs. The first archived vulnerable production candidate,
-Ubuntu `5.13.0-30.33`, passed package, initramfs, and driver preflight but failed
-to return on a one-shot physical boot and is not accepted as validation data.
-Next: recover the host, qualify a bootable archived vendor kernel, train and
+Ubuntu `5.13.0-30.33`, passed package, initramfs, and driver preflight and
+booted to the desktop; the wired interface remained DOWN, so remote capture is
+pending network recovery. Next: restore the host connection, train and
 calibrate independently on that exact subject, run the still-blind matched arm,
 and wire semantic Intel PT decode over the now-complete original sideband.
 

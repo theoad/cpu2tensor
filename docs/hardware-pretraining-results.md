@@ -481,13 +481,14 @@ permanent GRUB default. Their SHA-256 values are
 `a822bd320e16ced00ed434793dd33f6799016862c0294a46f5ec3314eed01b75` and
 `4262902743dffc76f510d924dc8f2c2a295bb18d2e3e3bee7ba54b616d569997`.
 The generated initramfs contains the laptop's NVMe and `e1000e` drivers and the
-package database is clean. A one-shot boot did not regain network presence,
-however, so this package is currently rejected as a runnable subject rather than
-treated as missing data. No vulnerable-arm or CVE-sensitivity claim is made.
+package database is clean. The one-shot boot reached the desktop, and the local
+`uname` reported `5.13.0-30-generic`; its wired interface was DOWN and the host
+did not regain network presence. Capture qualification awaits network recovery.
+No vulnerable-arm or CVE-sensitivity claim is made.
 
 The full 278-test local suite passes with 75 platform skips at commit `ad17739`.
-The 24-hour campaign remains **NO-GO** pending a bootable archived vulnerable
-production kernel, subject-matched training and blinded trigger/sibling
+The 24-hour campaign remains **NO-GO** pending hardware capture on the booted
+vulnerable production kernel, subject-matched training and blinded trigger/sibling
 validation, and semantic Intel PT packet/address decoding from the preserved
 same-session sideband.
 
