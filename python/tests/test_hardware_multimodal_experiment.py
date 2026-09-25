@@ -233,6 +233,22 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
         )
         self.assertEqual(len(captured.batches), 1)
 
+    def test_store_capture_is_admitted_under_its_own_event_identity(self) -> None:
+        batch = _capture_batch()
+        assert batch.pebs is not None
+        status = list(batch.status)
+        status[1] = replace(status[1], signal="memory_stores")
+        stores = replace(
+            batch, status=tuple(status),
+            pebs=replace(batch.pebs, signal="memory_stores"),
+        )
+        counts = experiment._validate_capture((stores,), 77, 2, "memory_stores")
+        self.assertEqual(counts["pebs_usable_samples"], 1)
+        with self.assertRaisesRegex(
+            experiment.HardwareCaptureError, "frozen source"
+        ):
+            experiment._validate_capture((stores,), 77, 2, "memory_loads")
+
     def test_capture_censors_unusable_pebs_rows_but_rejects_migration(self) -> None:
         batch = _capture_batch()
         assert batch.pebs is not None

@@ -49,6 +49,7 @@ _DATA_HEADER_OFFSET = 1024
 _AUX_BAD_FLAGS = 0x0F  # truncated, overwritten, partial, or collided
 _COUNTER_SIGNALS = ("instructions", "cycles", "ref_cycles")
 _MODALITIES = ("intel_pt", "memory_loads", "counters")
+_PEBS_SIGNALS = ("memory_loads", "memory_stores")
 _KERNEL_DECODE_CACHE: tuple[bytes, bytes, bytes, bytes, str] | None = None
 _SIDEBAND_SAMPLE_FIELDS = (1 << 1) | (1 << 2) | (1 << 7)  # TID, time, CPU.
 _PT_SIDEBAND_FLAGS = (
@@ -194,8 +195,11 @@ class HardwareMultimodalConfig:
             raise ValueError("Multimodal capture needs a positive pid")
         if not self.modalities or len(set(self.modalities)) != len(self.modalities):
             raise ValueError("modalities must be nonempty and distinct")
-        if any(modality not in _MODALITIES for modality in self.modalities):
+        if any(modality not in (*_MODALITIES, "memory_stores")
+               for modality in self.modalities):
             raise ValueError("Unknown multimodal hardware source")
+        if sum(signal in self.modalities for signal in _PEBS_SIGNALS) > 1:
+            raise ValueError("one precise memory event is supported per capture")
         if self.pebs_period <= 0:
             raise ValueError("pebs_period must be positive")
         for name, pages in (("data_pages", self.data_pages), ("aux_pages", self.aux_pages)):
@@ -872,9 +876,13 @@ class PerfMultimodalCapture:
                 source.pt_data.close()
                 source.pt_data = None
                 raise
-        if "memory_loads" in self.config.modalities:
+        pebs_signal = next(
+            (signal for signal in _PEBS_SIGNALS if signal in self.config.modalities),
+            None,
+        )
+        if pebs_signal is not None:
             source.pebs_fd = _open_event(
-                _attribute(self._hardware_config("memory_loads")), tid, -1
+                _attribute(self._hardware_config(pebs_signal)), tid, -1
             )
             source.pebs_data = _map_data(source.pebs_fd, self.config.data_pages)
         if "counters" in self.config.modalities:
@@ -1012,36 +1020,43 @@ class PerfMultimodalCapture:
                     source.pebs_data,
                     None,
                     data_pages=self.config.data_pages,
-                    signal="memory_loads",
+                    signal=next(
+                        signal for signal in _PEBS_SIGNALS
+                        if signal in self.config.modalities
+                    ),
                     source=source.tid,
                     consume=consume,
                 )
             if source.counter_fds:
                 counters = _counter_batch(source, final_counters[source.tid])
+            pebs_signal = next(
+                (signal for signal in _PEBS_SIGNALS if signal in self.config.modalities),
+                "memory_loads",
+            )
             status = tuple(
                 HardwareSourceStatus(
                     signal=modality,
                     requested=modality in self.config.modalities,
                     available=(pt is not None if modality == "intel_pt" else
-                               pebs is not None if modality == "memory_loads" else
+                               pebs is not None if modality == pebs_signal else
                                counters is not None),
                     lost=False,
                     time_enabled_ns=(
                         source.pebs_time_enabled_ns
-                        if modality == "memory_loads" and pebs is not None
+                        if modality == pebs_signal and pebs is not None
                         else counters.time_enabled_ns
                         if modality == "counters" and counters is not None
                         else None
                     ),
                     time_running_ns=(
                         source.pebs_time_running_ns
-                        if modality == "memory_loads" and pebs is not None
+                        if modality == pebs_signal and pebs is not None
                         else counters.time_running_ns
                         if modality == "counters" and counters is not None
                         else None
                     ),
                 )
-                for modality in _MODALITIES
+                for modality in ("intel_pt", pebs_signal, "counters")
             )
             batches.append(
                 HardwareMultimodalBatch(

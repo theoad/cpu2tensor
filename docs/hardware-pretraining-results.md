@@ -515,11 +515,24 @@ The corrected neutral arm uses an ordinary read before writing to the pipe.
 All 24 original raw captures and their exact decode state remain preserved as
 invalid-control evidence; no sensitivity or review-rate claim follows from them.
 
+The corrected lawful-sibling replay used the same frozen checkpoint on the same
+boot. It again completed 24/24 first-attempt lossless captures and all effect
+executions manifested 20/20 mutations, but the model ranked the effect *below*
+the lawful sibling: AUROC 0.3681, 4/12 paired wins, and 2/12 effect versus 5/12
+lawful-sibling alerts. The report content SHA-256 is
+`396c2db0c3c74f6970c2f03368049e135e8697e1ffb0f7972f7bf6da8873ca32`.
+This is a failed known-CVE sensitivity gate, not a capture failure. On the
+vulnerable `trail-x86` i7-10510U host, a separate process-kernel precise-store
+probe obtained 954 exact-IP/nonzero-address samples on 5,000 `mmap` iterations
+at period 1,000, and roughly 5,900--8,300 such samples per 10-loop canary at
+period 100. This qualifies store sampling as a candidate observation path, but
+does not yet prove that it distinguishes the vulnerable mutation.
+
 The full 278-test local suite passed with 75 platform skips before the
 decode-generation change; its focused 31-test suite passed afterward. The
-24-hour campaign remains **NO-GO** pending a rerun with the corrected lawful
-control, independent calibration, and semantic Intel PT packet/address decoding
-from the preserved same-session sideband.
+24-hour campaign remains **NO-GO** pending a better invariant-bearing signal,
+independent calibration, and semantic Intel PT packet/address decoding from the
+preserved same-session sideband.
 
 ## Small-model control
 

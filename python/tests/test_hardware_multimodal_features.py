@@ -173,6 +173,21 @@ def _assert_batches_equal(
 
 
 class HardwareMultimodalFeatureTests(unittest.TestCase):
+    def test_precise_store_lane_preserves_signal_and_timing(self) -> None:
+        lane = _lane(10, cpu=3)
+        assert lane.pebs is not None
+        status = list(lane.status)
+        status[1] = replace(status[1], signal="memory_stores")
+        stores = replace(
+            lane,
+            status=tuple(status),
+            pebs=replace(lane.pebs, signal="memory_stores"),
+        )
+        result = featurize_hardware_capture((stores,))
+        self.assertEqual(result.batch.pebs.shape, (1, 1, 16, len(PEBS_FEATURES)))
+        self.assertEqual(result.lanes[0].pebs_samples, 3)
+        self.assertEqual(int(result.batch.pebs_available.sum()), 2)
+
     def test_real_capture_fixture_round_trips_to_fixed_model_contract(self) -> None:
         raw = (_lane(20, cpu=7, trace=bytes([9]) * 32), _lane(10, cpu=3))
         file = io.BytesIO()

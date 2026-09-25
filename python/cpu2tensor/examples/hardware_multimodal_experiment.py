@@ -209,7 +209,9 @@ def _module_identity(module: Path) -> dict[str, str]:
 
 
 def subject_manifest(binary: Path, *, target_cpu: int, controller_cpu: int,
-                     data_pages: int, aux_pages: int) -> dict[str, object]:
+                     data_pages: int, aux_pages: int,
+                     pebs_signal: str = "memory_loads",
+                     pebs_period: int = PEBS_PERIOD) -> dict[str, object]:
     """Return the immutable build, boot, and event identity for collection."""
     runner = Path(__file__).resolve()
     package = runner.parents[1]
@@ -243,10 +245,10 @@ def subject_manifest(binary: Path, *, target_cpu: int, controller_cpu: int,
     }
     event = {
         "scope": SCOPE,
-        "modalities": list(MODALITIES),
+        "modalities": ["intel_pt", pebs_signal, "counters"],
         "intel_pt_representation": "raw_aux_bytes_no_decode",
-        "pebs_event": "memory_loads",
-        "pebs_period": PEBS_PERIOD,
+        "pebs_event": pebs_signal,
+        "pebs_period": pebs_period,
         "pebs_sample_policy": "retain_raw_censor_inexact_ip_or_zero_address",
         "boundary_counters": list(COUNTER_NAMES),
         "data_pages": data_pages,
@@ -625,6 +627,7 @@ def _featurize_capture(
 
 def _validate_capture(
     batches: Sequence[HardwareMultimodalBatch], target_pid: int, target_cpu: int,
+    pebs_signal: str = "memory_loads",
 ) -> dict[str, int]:
     if not batches or any(batch.tid != batch.source for batch in batches):
         raise CaptureAdmissionError(
@@ -640,8 +643,9 @@ def _validate_capture(
               "missing_sources": 0, "multiplexed_sources": 0}
     for batch in batches:
         status_by_signal = {status.signal: status for status in batch.status}
-        if (set(status_by_signal) != set(MODALITIES) or
-                any(not status_by_signal[name].requested for name in MODALITIES)):
+        expected_modalities = ("intel_pt", pebs_signal, "counters")
+        if (set(status_by_signal) != set(expected_modalities) or
+                any(not status_by_signal[name].requested for name in expected_modalities)):
             raise CaptureAdmissionError(
                 "requested_source_contract",
                 "kernel multimodal admission requires every frozen source",
@@ -659,7 +663,7 @@ def _validate_capture(
                 "requested hardware modality was unavailable",
             )
         for status in requested:
-            if status.signal in ("memory_loads", "counters"):
+            if status.signal in ("memory_loads", "memory_stores", "counters"):
                 multiplexed = (
                     status.time_enabled_ns is None or status.time_enabled_ns <= 0 or
                     status.time_running_ns != status.time_enabled_ns
@@ -730,6 +734,8 @@ def capture_execution(
     data_pages: int,
     aux_pages: int,
     timeout: float,
+    pebs_signal: str = "memory_loads",
+    pebs_period: int = PEBS_PERIOD,
 ) -> CapturedExecution:
     launch_started_ns = time.perf_counter_ns()
     process = subprocess.Popen(
@@ -746,8 +752,8 @@ def capture_execution(
     config = HardwareMultimodalConfig(
         SCOPE,
         process.pid,
-        modalities=MODALITIES,
-        pebs_period=PEBS_PERIOD,
+        modalities=("intel_pt", pebs_signal, "counters"),
+        pebs_period=pebs_period,
         data_pages=data_pages,
         aux_pages=aux_pages,
     )
@@ -779,7 +785,7 @@ def capture_execution(
             f"{execution.execution_id} failed: status={process.returncode}, "
             f"stdout={output!r}, stderr={error!r}"
         )
-    counts = _validate_capture(batches, process.pid, target_cpu)
+    counts = _validate_capture(batches, process.pid, target_cpu, pebs_signal)
     return CapturedExecution(
         batches=batches,
         decode_sideband=decode_sideband,
@@ -902,6 +908,8 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
         controller_cpu=args.controller_cpu,
         data_pages=args.data_pages,
         aux_pages=args.aux_pages,
+        pebs_signal=getattr(args, "pebs_signal", "memory_loads"),
+        pebs_period=getattr(args, "pebs_period", PEBS_PERIOD),
     )
     prospective_checkpoint = getattr(args, "prospective_checkpoint", None)
     prospective_model = None
@@ -952,6 +960,8 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
                     binary, execution, loops=loops, target_cpu=args.target_cpu,
                     data_pages=args.data_pages, aux_pages=args.aux_pages,
                     timeout=args.timeout,
+                    pebs_signal=getattr(args, "pebs_signal", "memory_loads"),
+                    pebs_period=getattr(args, "pebs_period", PEBS_PERIOD),
                 )
                 feature_phases_ns: dict[str, int] = {}
                 feature_started = time.perf_counter()
@@ -1182,8 +1192,13 @@ def load_dataset(artifact: Path) -> tuple[dict[str, object], dict[str, ModelBatc
     if feature_schema is not None and feature_schema != MULTIMODAL_FEATURE_SCHEMA:
         raise ValueError("unsupported multimodal feature schema")
     event = manifest.get("event", {})
-    if (event.get("scope") != SCOPE or event.get("pebs_period") != PEBS_PERIOD or
-            tuple(event.get("modalities", ())) != MODALITIES or
+    pebs_signal = event.get("pebs_event", "memory_loads")
+    if (event.get("scope") != SCOPE or
+            pebs_signal not in ("memory_loads", "memory_stores") or
+            not isinstance(event.get("pebs_period"), int) or
+            event["pebs_period"] <= 0 or
+            tuple(event.get("modalities", ())) !=
+            ("intel_pt", pebs_signal, "counters") or
             event.get("intel_pt_representation") != "raw_aux_bytes_no_decode"):
         raise ValueError("dataset is not the frozen kernel-only event contract")
     expected_content_hash = manifest.pop("manifest_content_sha256", None)
@@ -1690,6 +1705,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if (args.loop_scale <= 0 or args.repetitions <= 0 or args.timeout <= 0 or
             args.capture_retries < 0):
         raise ValueError("loop scale, repetitions, and timeout must be positive")
+    if getattr(args, "pebs_period", PEBS_PERIOD) <= 0:
+        raise ValueError("precise-memory sampling period must be positive")
     if not 0.0 <= float(getattr(args, "retain_raw_fraction", 1.0)) <= 1.0:
         raise ValueError("raw retention fraction must be between zero and one")
     if args.collect_only:
@@ -1714,6 +1731,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--controller-cpu", type=int, default=3)
     result.add_argument("--data-pages", type=int, default=1024)
     result.add_argument("--aux-pages", type=int, default=8192)
+    result.add_argument(
+        "--pebs-signal", choices=("memory_loads", "memory_stores"),
+        default="memory_loads",
+    )
+    result.add_argument("--pebs-period", type=int, default=PEBS_PERIOD)
     result.add_argument("--timeout", type=float, default=30.0)
     result.add_argument("--capture-retries", type=int, default=2)
     result.add_argument(

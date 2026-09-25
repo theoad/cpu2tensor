@@ -85,6 +85,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     subject = subject_manifest(
         binary, target_cpu=args.target_cpu, controller_cpu=args.controller_cpu,
         data_pages=args.data_pages, aux_pages=args.aux_pages,
+        pebs_signal=getattr(args, "pebs_signal", "memory_loads"),
+        pebs_period=getattr(args, "pebs_period", 10_000),
     )
     metadata = frozen_multimodal_metadata(checkpoint)
     if (
@@ -120,6 +122,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                         target_cpu=args.target_cpu,
                         data_pages=args.data_pages, aux_pages=args.aux_pages,
                         timeout=args.timeout,
+                        pebs_signal=getattr(args, "pebs_signal", "memory_loads"),
+                        pebs_period=getattr(args, "pebs_period", 10_000),
                     )
                     batch, lanes = _featurize_capture(
                         _model_capture(captured.batches)
@@ -272,6 +276,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--controller-cpu", type=int, default=3)
     result.add_argument("--data-pages", type=int, default=1024)
     result.add_argument("--aux-pages", type=int, default=8192)
+    result.add_argument(
+        "--pebs-signal", choices=("memory_loads", "memory_stores"),
+        default="memory_loads",
+    )
+    result.add_argument("--pebs-period", type=int, default=10_000)
     result.add_argument("--capture-retries", type=int, default=2)
     result.add_argument(
         "--expected-manifestation", choices=("present", "absent", "either"),

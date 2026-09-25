@@ -99,10 +99,15 @@ Pipe validation manifested all effect mutations, but its supposed neutral arm
 also executed the vulnerable splice/write path with unchanged bytes. Its AUROC
 0.6319 is therefore invalid as a lawful-counterfactual metric. The control is
 now corrected to use an ordinary read before writing to the pipe. Next: rerun
-the blind effect/lawful-sibling comparison; then decide whether generic
-invariant-bearing observation must improve before scaling. Semantic Intel PT
-decode over the complete same-session sideband also remains open. The 24-hour
-campaign remains **NO-GO**.
+the blind effect/lawful-sibling comparison. That replay failed: AUROC 0.3681,
+2/12 effect alerts versus 5/12 lawful-sibling alerts, with 24/24 lossless
+captures and 20/20 effect mutations each time. Precise kernel-store sampling
+is available on the same host and is now an optional, event-identity-separated
+PEBS observation path. Next: qualify simultaneous PT/store/PMU capture and
+test whether frozen store-based training improves this gate; retain a closer
+non-triggering splice control before interpreting any positive separation.
+Semantic Intel PT decode remains open. The 24-hour campaign is **NO-GO** until
+one of these paths demonstrates useful sensitivity and custody.
 
 ## Completed first iteration: AArch64 observation to MPS
 

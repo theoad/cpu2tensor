@@ -67,12 +67,21 @@ class HardwareTests(unittest.TestCase):
             config.modalities,
             ("intel_pt", "memory_loads", "counters"),
         )
+        self.assertEqual(
+            HardwareMultimodalConfig(
+                "process_kernel", 7,
+                modalities=("intel_pt", "memory_stores", "counters"),
+            ).modalities,
+            ("intel_pt", "memory_stores", "counters"),
+        )
         invalid = (
             dict(scope="kernel", pid=7),
             dict(scope="process", pid=0),
             dict(scope="process", pid=7, modalities=()),
             dict(scope="process", pid=7, modalities=("counters", "counters")),
             dict(scope="process", pid=7, modalities=("unknown",)),
+            dict(scope="process", pid=7,
+                 modalities=("memory_loads", "memory_stores")),
             dict(scope="process", pid=7, pebs_period=0),
             dict(scope="process", pid=7, data_pages=3),
             dict(scope="process", pid=7, aux_pages=0),

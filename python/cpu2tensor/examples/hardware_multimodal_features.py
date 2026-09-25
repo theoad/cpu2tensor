@@ -53,6 +53,7 @@ PMU_FEATURES = (
 )
 
 _MODALITIES = ("intel_pt", "memory_loads", "counters")
+_PEBS_SIGNALS = ("memory_loads", "memory_stores")
 _COUNTERS = ("instructions", "cycles", "ref_cycles")
 _UINT64_MASK = (1 << 64) - 1
 _CAPTURE_FIELDS = (
@@ -166,12 +167,15 @@ def _validate_envelope(envelope: HardwareCaptureEnvelope) -> tuple[int, int, int
 def _validate_status(batch: CaptureHardwareMultimodalBatch) -> dict[str, bool]:
     if not isinstance(batch.status, tuple) or len(batch.status) != len(_MODALITIES):
         raise HardwareFeatureError("capture status schema changed")
+    pebs_signal = batch.status[1].signal
+    if pebs_signal not in _PEBS_SIGNALS:
+        raise HardwareFeatureError("capture precise-memory signal changed")
     actual = {
         "intel_pt": batch.pt is not None,
-        "memory_loads": batch.pebs is not None,
+        pebs_signal: batch.pebs is not None,
         "counters": batch.counters is not None,
     }
-    for expected_signal, status in zip(_MODALITIES, batch.status):
+    for expected_signal, status in zip(("intel_pt", pebs_signal, "counters"), batch.status):
         _require_schema(status, HardwareSourceStatus, _STATUS_FIELDS)
         if status.signal != expected_signal:
             raise HardwareFeatureError("capture status order or signal schema changed")
@@ -194,7 +198,7 @@ def _validate_status(batch: CaptureHardwareMultimodalBatch) -> dict[str, bool]:
             raise HardwareFeatureError(
                 f"requested {status.signal} source is unavailable"
             )
-        timed = status.signal in ("memory_loads", "counters")
+        timed = status.signal in (*_PEBS_SIGNALS, "counters")
         if status.available and timed:
             enabled = status.time_enabled_ns
             running = status.time_running_ns
@@ -314,7 +318,9 @@ def _pebs_features(
     outer_start_ns: int,
     outer_stop_ns: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int | None]:
-    rows = _validate_hardware_batch(batch, signal="memory_loads", source=tid)
+    if batch.signal not in _PEBS_SIGNALS:
+        raise HardwareFeatureError("unknown precise-memory sample signal")
+    rows = _validate_hardware_batch(batch, signal=batch.signal, source=tid)
     if batch.trace_bytes.numel() != 0:
         raise HardwareFeatureError("PEBS sample batches must not contain AUX bytes")
     if rows == 0:
@@ -479,7 +485,7 @@ def featurize_hardware_capture(
         pebs_available = torch.zeros(SEGMENTS, dtype=torch.bool)
         pebs_time_bounds = torch.full((SEGMENTS, 2), torch.nan, dtype=torch.float32)
         observed_cpu = None
-        if actual["memory_loads"]:
+        if actual[batch.status[1].signal]:
             assert batch.pebs is not None
             started_ns = time.perf_counter_ns()
             pebs, pebs_available, pebs_time_bounds, observed_cpu = _pebs_features(
