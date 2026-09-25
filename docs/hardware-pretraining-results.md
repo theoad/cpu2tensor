@@ -8,10 +8,17 @@ kernel anomaly detection.
 
 ## Exact subject
 
-The capture qualification ran on `trail-x86`, an Intel Core i7-10510U host,
+The capture qualification ran on `trail-x86` (`iseeyou`), an Intel Core
+i7-10510U host,
 with target CPU 2 and controller CPU 3. The retained subject was Linux
 `7.0.0-31-generic`, boot `2ba4b210-4c31-48ce-92d5-4b306e16d26c`, microcode
-`0x100`. The first qualification artifact is cached as
+`0x100`. Its BTF SHA-256 is
+`c0c2d95eb84d04b2332c7a456b9d6cf4d18974ee439abd1b44c20d9f738bcd38`,
+kernel-notes SHA-256 is
+`764d1c9de60154c47117ba8d6889a52f50e5f79cc4b38b25fa1683da0d81011e`,
+and workload SHA-256 is
+`d3290444d0ce16c4060985b9297d009245fbaab34ba9c5442aa6b2de027f70bd`.
+The first qualification artifact is cached as
 `~/.cache/cpu2tensor/multimodal-poc/qualification-r12-v2.json`; its SHA-256 is
 `655981233a19e8c4f89e30c66b6b7fb838bd78eb8c14fefab137c8889f8e59b8`.
 
