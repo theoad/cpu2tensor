@@ -1,6 +1,6 @@
 # Work board
 
-Updated 2026-09-11. This file owns work status. The first vertical slice is complete:
+Updated 2026-09-25. This file owns work status. The first vertical slice is complete:
 real observation, integration, packaging, and standard-IDE navigation checks pass.
 Core register and memory instrumentation is checked on ARM, x86 guests, CPU and
 MPS. Mixed frames, bounded multiworker collation and packed MPS uploads are now
@@ -43,6 +43,62 @@ draining; larger models are not justified by benign reconstruction alone.
 One minimal AWS bare-metal replication independently completed capture, offline
 fit, checkpoint reload, and frozen inference, while again rejecting unseen-family
 quality; its exact subject and rates are in the R2 results.
+
+### Active multimodal pretraining PoC
+
+Requested 2026-09-25. Within six hours, qualify simultaneous target-attributed
+Intel PT, PEBS, and sparse non-multiplexed PMU observation on one exact bare-metal
+subject; encode per-lane timing uncertainty without manufacturing total order;
+train and freeze a small masked cross-modal model; and run blinded flow, memory,
+contention, phase, swap, and timestamp canaries. Capture, model, and validation
+work proceed on disjoint branches against one coordinator-owned tensor contract.
+
+The accepted first model is a bidirectional masked predictor rather than a causal
+GPT: completed executions provide both contexts, reconstruction residuals support
+calibrated anomaly scores, and a first JEPA target would add collapse and teacher
+choices before the signal is qualified. The PCA remains the external baseline.
+The proposed [24-hour scale procedure](hardware-pretraining-scale.md) uses a
+capacity ladder, immutable shards, recurrent health checks, bounded adjustments,
+and final blinded evaluation; it is not authorized to launch until the PoC gates
+pass.
+
+Capture, scheduling evidence, and the real tensor seam now pass on one retained
+`trail-x86` boot. Across `openat`, `mmap`, and `socketpair`, PEBS period 10,000
+gave 8.31--11.36 samples per million PT bytes with exact outputs, no loss, and
+4.20--5.30% tri-modal overhead in the six-repeat matrix. A later pinned-PEBS replay
+proved nonzero equal perf scheduling times and an end-to-end live feature smoke
+produced finite `[1,1,16,256]` PT, `[1,1,16,24]` PEBS, and `[1,1,1,4]` PMU
+tensors. See [the measured results](hardware-pretraining-results.md).
+
+Current state: the real 204-execution kernel-family gate is complete. The fused
+model learned cross-modal mismatch residuals absent from marginal and PT-only
+controls: mean PEBS, PMU, and PT swap scores rose 1.449, 1.279, and 1.391 times
+over clean evidence. Whole-modality masking beat span-only on every swap. The
+gate also found two decisive blockers: PEBS timestamp permutation stayed at
+0.996 times clean, and 14/36 unseen benign executions alerted, including every
+held-out `memfd` execution. Finite capture plus Python featurization reached only
+1.069 executions/s. A later phase-instrumented pilot placed 88.70% of wall time
+inside PT histogram construction and exposed a 0.85-second cliff for roughly
+1--6 MB traces. The cause was a four-thread Torch pool inheriting the
+controller's one-CPU affinity. Matching the pool to that affinity cut the same
+9-execution matrix from 5.813 to 0.371 seconds, reduced PT histogram time 163
+times to 31.655 ms, and restored 673 MB/s aggregate reduction without changing
+capture admission. The corrected finite runner reaches 24.2 executions/s; a
+long-lived native capture/custody path remains necessary for high-rate fuzzing.
+The runner now removes the retry-until-PEBS-positive bias: three short `getpid`
+runs with verified exact affinity were retained with unavailable PEBS tokens,
+and all six sampled runs remained exact-IP, nonzero-address, and CPU-attributed.
+The 24-hour campaign
+remains **NO-GO** until timing learning, benign-family generalization, and the
+native persistent data path improve on a fresh retained split, then the same
+tri-modal qualification must pass on the exact `c5.metal` collector for three
+sessions. P5 Spot replacement capacity also scored only 1/10 and cannot be
+assumed. The deterministic health schema and bounded adjustment policy are
+implemented and tested; they are procedure machinery, not launch qualification.
+An isolated [temporal-consistency R1](hardware-temporal-consistency-r1.md)
+improved median held-out timing-shift AUROC to 0.742/0.704/0.678, but failed
+localization, seed stability, and the 10% overhead gate. Its code is preserved
+by tag `hardware-temporal-consistency-r1`, not merged into the accepted path.
 
 ## Completed first iteration: AArch64 observation to MPS
 

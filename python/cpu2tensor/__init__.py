@@ -19,8 +19,10 @@ if TYPE_CHECKING:
     )
     from cpu2tensor.wire import WireFrame, WireObserver
     from cpu2tensor.hardware import (
-        HardwareBatch, HardwareCaptureError, HardwareConfig, HardwareTraceLost,
-        PerfCapture,
+        HardwareBatch, HardwareCaptureEnvelope, HardwareCaptureError,
+        HardwareConfig, HardwareCounterBatch, HardwareMultimodalBatch,
+        HardwareMultimodalConfig, HardwareSourceStatus, HardwareTraceLost,
+        PerfCapture, PerfMultimodalCapture,
     )
     from cpu2tensor.windows_hardware import WprBatch, WprCapture, WprConfig
 
@@ -40,7 +42,10 @@ _EXPORTS = {
     'WireFrame': 'wire', 'WireObserver': 'wire',
     'HardwareBatch': 'hardware', 'HardwareCaptureError': 'hardware',
     'HardwareConfig': 'hardware', 'HardwareTraceLost': 'hardware',
-    'PerfCapture': 'hardware', 'WprBatch': 'windows_hardware',
+    'HardwareCaptureEnvelope': 'hardware', 'HardwareCounterBatch': 'hardware',
+    'HardwareMultimodalBatch': 'hardware', 'HardwareMultimodalConfig': 'hardware',
+    'HardwareSourceStatus': 'hardware', 'PerfCapture': 'hardware',
+    'PerfMultimodalCapture': 'hardware', 'WprBatch': 'windows_hardware',
     'WprCapture': 'windows_hardware', 'WprConfig': 'windows_hardware',
 }
 __all__ = list(_EXPORTS)

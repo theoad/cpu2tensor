@@ -22,5 +22,15 @@ capture and review-budget gates that are still open.
 on a Linux Intel PT host without decoding trace packets. Its checkpoint reloads
 with `load_frozen_raw_trace_pca` for ordinary frozen inference; scoring never
 updates the fitted model.
+[hardware_multimodal](hardware_multimodal.py) is the fixed-tensor masked PT,
+PEBS, and PMU training and calibration fixture.
+`hardware_multimodal_experiment` collects the gated
+[kernel-only multimodal corpus](../../../docs/kernel-multimodal-experiment.md),
+then trains and evaluates fused whole-modality and span-only frozen models. Its
+collect-only/train-only split supports capture on Linux x86 and training on MPS.
+[hardware_pretraining_health](hardware_pretraining_health.py) validates the
+versioned JSONL health ledger and applies the pure bounded 24-hour campaign
+policy from the [scale procedure](../../../docs/hardware-pretraining-scale.md); it
+performs no provisioning or experiment execution.
 
 - [Context-only blocks](../../../docs/context-only.md): compact paging state and vectorized block association.
