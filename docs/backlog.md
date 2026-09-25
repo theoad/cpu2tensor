@@ -88,6 +88,10 @@ tri-modal qualification must pass on the exact `c5.metal` collector for three
 sessions. P5 Spot replacement capacity also scored only 1/10 and cannot be
 assumed. The deterministic health schema and bounded adjustment policy are
 implemented and tested; they are procedure machinery, not launch qualification.
+An isolated [temporal-consistency R1](hardware-temporal-consistency-r1.md)
+improved median held-out timing-shift AUROC to 0.742/0.704/0.678, but failed
+localization, seed stability, and the 10% overhead gate. Its code is preserved
+by tag `hardware-temporal-consistency-r1`, not merged into the accepted path.
 
 ## Completed first iteration: AArch64 observation to MPS
 

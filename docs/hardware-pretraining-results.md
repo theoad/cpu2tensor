@@ -163,6 +163,11 @@ next test is therefore an explicit within-lane temporal-consistency energy train
 with coherent timestamp-shift negatives re-featurized from retained raw samples;
 it must not manufacture order across CPU lanes.
 
+That test is complete in [temporal-consistency R1](hardware-temporal-consistency-r1.md).
+It adds real held-out timing sensitivity but fails localization, seed stability,
+and the inference-overhead gate, so the experimental head remains out of the
+accepted path.
+
 ## Throughput profile
 
 The 204-run manifest separates 7.896 seconds of accepted workload execution
