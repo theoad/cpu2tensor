@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Anomaly bundles retain replay, localization, and honest symbol evidence."""
 
+import base64
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ import torch
 from cpu2tensor.examples.hardware_anomaly_bundle import (
     KernelSymbolTable,
     _pebs_samples,
+    _pmu_lanes,
     _pt_windows,
     decode_perf_mem_data_source,
 )
@@ -73,6 +75,13 @@ class HardwareAnomalyBundleTests(unittest.TestCase):
                     "exact_ip": torch.tensor([True, True]),
                     "data_source": torch.tensor([0x42, 0x42]),
                 },
+                "counters": {
+                    "cpu": 2,
+                    "names": ["instructions", "cycles", "ref_cycles"],
+                    "values": torch.tensor([100, 200, 180]),
+                    "time_enabled_ns": 1_000,
+                    "time_running_ns": 1_000,
+                },
             }],
         }
         token_error = torch.zeros((1, 16))
@@ -88,6 +97,11 @@ class HardwareAnomalyBundleTests(unittest.TestCase):
             timing_error = torch.arange(16, dtype=torch.float32).view(1, 16)
             pt = _pt_windows(raw, token_error, feature_error, timing_error, 2)
             pebs = _pebs_samples(raw, token_error, timing_error, symbols, 2)
+            pmu = _pmu_lanes(
+                raw,
+                torch.tensor([[[0.1, 0.2, 0.3, 0.4]]]),
+                torch.tensor([[0.5]]),
+            )
 
         self.assertEqual((pt[0]["segment"], pt[0]["raw_byte_start"],
                           pt[0]["raw_byte_stop"]), (15, 30, 32))
@@ -95,11 +109,24 @@ class HardwareAnomalyBundleTests(unittest.TestCase):
             "feature": "0x09", "residual": 7.0,
         })
         self.assertEqual(pt[0]["timing_residual"], 15.0)
+        self.assertEqual(base64.b64decode(pt[0]["raw_bytes_base64"]), bytes([30, 31]))
         self.assertEqual(pebs[0]["segment"], 15)
         self.assertEqual(pebs[0]["ip_symbol"]["name"], "second")
         self.assertEqual(pebs[0]["timing_residual"], 15.0)
         self.assertEqual(pebs[1]["segment"], 0)
         self.assertEqual(pebs[1]["ip_symbol"]["offset"], 5)
+        self.assertEqual(pmu[0]["counters"][1], {"event": "cycles", "delta": 200})
+        self.assertEqual(
+            pmu[0]["derived_feature_residuals"][3]["feature"],
+            "instructions_per_cycle",
+        )
+        self.assertAlmostEqual(
+            pmu[0]["derived_feature_residuals"][3]["residual"], 0.4,
+        )
+        self.assertEqual(
+            pmu[0]["address_semantics"],
+            "boundary_delta_has_no_instruction_address",
+        )
 
 
 if __name__ == "__main__":

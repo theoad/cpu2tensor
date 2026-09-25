@@ -34,7 +34,7 @@ from cpu2tensor.examples.hardware_multimodal_features import (
 )
 
 
-ANOMALY_BUNDLE_SCHEMA = "cpu2tensor-hardware-anomaly-bundle-v2"
+ANOMALY_BUNDLE_SCHEMA = "cpu2tensor-hardware-anomaly-bundle-v3"
 _LEGACY_RAW_SCHEMA = "cpu2tensor-kernel-multimodal-raw-v1"
 _SEGMENTS = 16
 
@@ -149,12 +149,15 @@ def _pt_windows(raw: dict[str, object], token_error: torch.Tensor,
             segment = int(segment_tensor)
             start = count * segment // _SEGMENTS
             stop = count * (segment + 1) // _SEGMENTS
+            window = bytes(trace[start:stop].tolist())
             result.append({
                 "lane": lane,
                 "tid": batch["tid"],
                 "segment": segment,
                 "raw_byte_start": start,
                 "raw_byte_stop": stop,
+                "raw_bytes_base64": base64.b64encode(window).decode("ascii"),
+                "raw_bytes_sha256": hashlib.sha256(window).hexdigest(),
                 "residual": float(value),
                 "timing_residual": float(timing_error[lane, segment]),
                 "top_byte_residuals": _top_features(
@@ -168,7 +171,8 @@ def _pt_windows(raw: dict[str, object], token_error: torch.Tensor,
 
 def _pebs_samples(raw: dict[str, object], token_error: torch.Tensor,
                   timing_error: torch.Tensor,
-                  symbols: KernelSymbolTable | None, limit: int) -> list[dict[str, object]]:
+                  symbols: KernelSymbolTable | None,
+                  limit: int | None = None) -> list[dict[str, object]]:
     windows = []
     for lane, batch in enumerate(raw["batches"]):
         pebs = batch["pebs"]
@@ -185,6 +189,7 @@ def _pebs_samples(raw: dict[str, object], token_error: torch.Tensor,
             windows.append({
                 "lane": lane,
                 "tid": batch["tid"],
+                "sample_index": row,
                 "segment": segment,
                 "residual": float(token_error[lane, segment]),
                 "timing_residual": float(timing_error[lane, segment]),
@@ -198,7 +203,43 @@ def _pebs_samples(raw: dict[str, object], token_error: torch.Tensor,
                 "exact_ip": bool(pebs["exact_ip"][row]),
                 "data_source": decode_perf_mem_data_source(int(pebs["data_source"][row])),
             })
-    return sorted(windows, key=lambda row: row["residual"], reverse=True)[:limit]
+    ranked = sorted(windows, key=lambda row: row["residual"], reverse=True)
+    return ranked if limit is None else ranked[:limit]
+
+
+def _pmu_lanes(raw: dict[str, object], feature_error: torch.Tensor,
+               timing_error: torch.Tensor) -> list[dict[str, object]]:
+    """Retain every boundary counter with its lane and scored residual.
+
+    Boundary counters have no instruction address, so assigning them a symbol
+    would fabricate precision. PT and PEBS provide the address-bearing context.
+    """
+    result = []
+    for lane, batch in enumerate(raw["batches"]):
+        counters = batch["counters"]
+        if counters is None:
+            continue
+        names = list(counters["names"])
+        values = counters["values"].tolist()
+        residuals = feature_error[lane, 0].tolist()
+        result.append({
+            "lane": lane,
+            "tid": batch["tid"],
+            "cpu": counters["cpu"],
+            "time_enabled_ns": counters["time_enabled_ns"],
+            "time_running_ns": counters["time_running_ns"],
+            "timing_residual": float(timing_error[lane, 0]),
+            "counters": [
+                {"event": name, "delta": int(value)}
+                for name, value in zip(names, values)
+            ],
+            "derived_feature_residuals": [
+                {"feature": name, "residual": float(residual)}
+                for name, residual in zip(PMU_FEATURES, residuals)
+            ],
+            "address_semantics": "boundary_delta_has_no_instruction_address",
+        })
+    return result
 
 
 def _atomic_json(path: Path, value: dict[str, object]) -> str:
@@ -246,6 +287,11 @@ def build_bundle(artifact: Path, execution_id: str, checkpoint: Path,
     stdout = bytes(raw["stdout"].tolist())
     pebs_features = evidence.pebs_feature_error[0].amax((0, 1))
     pmu_features = evidence.pmu_feature_error[0].amax((0, 1))
+    pebs_samples = _pebs_samples(
+        raw, evidence.pebs_token_error[0],
+        evidence.timing_token_error[0, :, 16:32], symbols,
+    )
+    score = float(evidence.score[0])
     return {
         "schema": ANOMALY_BUNDLE_SCHEMA,
         "subject": manifest["subject"],
@@ -274,13 +320,20 @@ def build_bundle(artifact: Path, execution_id: str, checkpoint: Path,
             "checkpoint_path": str(checkpoint),
             "checkpoint_sha256": _sha256(checkpoint),
             "threshold": threshold,
-            "score": float(evidence.score[0]),
+            "score": score,
+            "alert": score > threshold,
+            "threshold_margin": score - threshold,
             "empirical_tail_probability": float(tail[0]),
             "calibration_executions": calibration_scores.numel(),
             "modality_scores": {
                 name: float(evidence.modality_scores[0, index])
                 for index, name in enumerate(("pt", "pebs", "pmu"))
                 if bool(evidence.modality_present[0, index])
+            },
+            "explanation_signal": {
+                "method": "masked_reconstruction_residuals_used_by_score",
+                "attention_exported": False,
+                "anomaly_token_exported": False,
             },
         },
         "localization": {
@@ -289,9 +342,11 @@ def build_bundle(artifact: Path, execution_id: str, checkpoint: Path,
                 evidence.timing_token_error[0, :, :16],
                 top_windows,
             ),
-            "pebs_samples": _pebs_samples(
-                raw, evidence.pebs_token_error[0],
-                evidence.timing_token_error[0, :, 16:32], symbols, top_windows * 8
+            "pebs_sample_count": len(pebs_samples),
+            "pebs_samples": pebs_samples[:top_windows * 8],
+            "pmu_lanes": _pmu_lanes(
+                raw, evidence.pmu_feature_error[0],
+                evidence.timing_token_error[0, :, 32:],
             ),
             "top_pebs_feature_residuals": _top_features(
                 pebs_features, PEBS_FEATURES, top_windows
@@ -303,6 +358,13 @@ def build_bundle(artifact: Path, execution_id: str, checkpoint: Path,
                 evidence.timing_token_error[0, :, 32:].amax()
             ),
             "symbols_available": symbols is not None,
+        },
+        "full_evidence": {
+            "pebs_samples": pebs_samples,
+            "pt_note": (
+                "Ranked PT windows retain the original AUX bytes. Decoded branches "
+                "require exact-session perf sideband and are not inferred here."
+            ),
         },
     }
 

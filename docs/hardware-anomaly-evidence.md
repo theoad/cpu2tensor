@@ -17,11 +17,20 @@ checkpoint, rescoring one retained execution without updating the model. It emit
   tail probability;
 - separate PT, PEBS, and PMU scores;
 - ranked PT segments mapped back to raw AUX byte offsets, byte-feature
-  residuals, and the timing residual used by the score;
+  residuals, the exact retained bytes and hashes, and the timing residual used
+  by the score;
 - ranked PEBS samples with timestamp bucket, CPU, IP, address, weight, period,
   exact-IP state, and a lossless semantic decode of `perf_mem_data_src`; and
-- ranked PEBS and PMU feature residuals, plus PEBS- and PMU-token timing
-  residuals.
+- every PEBS sample in a full-evidence section, a bounded ranked PEBS view for
+  the reviewer, every lane's raw PMU counter deltas and derived feature
+  residuals, plus PEBS- and PMU-token timing residuals.
+
+PEBS IPs and decoded PT branch addresses are symbol-bearing. Boundary PMU
+counters are not samples and have no instruction address; the bundle therefore
+ties them to the exact TID, CPU, interval, and PT/PEBS context instead of
+inventing a symbol. The decision record also carries the alert bit, threshold
+margin, finite-sample tail probability, and an explicit declaration of which
+model explanation signal was exported.
 
 Per-token reconstruction error is the actual contribution used by the scalar
 score, not an unrelated attention visualization. Per-feature residuals come from
@@ -50,7 +59,8 @@ session. The loader rejects an all-zero table instead of emitting counterfeit
 symbols.
 
 The raw direct-perf AUX representation is not yet a complete `perf.data` file.
-The bundle localizes raw PT byte windows but does not claim packet decoding until
+The bundle embeds and hashes the highest-ranked raw PT byte windows but does not
+claim packet decoding until
 the persistent collector retains the required AUXTRACE, mmap, build-ID, module,
 and BPF sideband. A diagnostic replay may collect a normal `perf.data`, but it is
 secondary evidence and cannot replace a non-reproducible original window.
