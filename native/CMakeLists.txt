@@ -40,10 +40,39 @@ if(CPU2TENSOR_BUILD_HARDWARE_EXAMPLE)
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
         message(FATAL_ERROR "The hardware trace workload needs a Linux toolchain.")
     endif()
+    find_package(Threads REQUIRED)
     add_executable(hardware_kernel_workload examples/hardware_kernel_workload.c)
     target_compile_features(hardware_kernel_workload PRIVATE c_std_17)
     target_compile_definitions(hardware_kernel_workload PRIVATE _GNU_SOURCE)
     target_compile_options(hardware_kernel_workload PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_executable(hardware_multimodal_canary examples/hardware_multimodal_canary.c)
+    target_compile_features(hardware_multimodal_canary PRIVATE c_std_17)
+    target_compile_definitions(hardware_multimodal_canary PRIVATE _GNU_SOURCE)
+    target_compile_options(hardware_multimodal_canary PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_link_libraries(hardware_multimodal_canary PRIVATE Threads::Threads)
+    if(BUILD_TESTING)
+        function(add_hardware_canary_smoke name mode variant loops)
+            add_test(
+                NAME ${name}
+                COMMAND /bin/sh -c
+                    "printf x | \"$1\" \"$2\" \"$3\" \"$4\""
+                    canary "$<TARGET_FILE:hardware_multimodal_canary>"
+                    "${mode}" "${variant}" "${loops}")
+            set_tests_properties(
+                ${name} PROPERTIES
+                PASS_REGULAR_EXPRESSION
+                    "RESULT mode=${mode} variant=${variant} .*oracle=pass"
+                TIMEOUT 20)
+        endfunction()
+        add_hardware_canary_smoke(hardware_canary_flow_ordered flow ordered 128)
+        add_hardware_canary_smoke(hardware_canary_flow_permuted flow permuted 128)
+        add_hardware_canary_smoke(hardware_canary_memory_hot memory hot 4096)
+        add_hardware_canary_smoke(hardware_canary_memory_large memory large 4096)
+        add_hardware_canary_smoke(hardware_canary_contention_private contention private 4096)
+        add_hardware_canary_smoke(hardware_canary_contention_shared contention shared 4096)
+        add_hardware_canary_smoke(hardware_canary_phase_normal phase normal 64)
+        add_hardware_canary_smoke(hardware_canary_phase_shifted phase shifted 64)
+    endif()
 endif()
 
 if(CPU2TENSOR_BUILD_PYTHON)
