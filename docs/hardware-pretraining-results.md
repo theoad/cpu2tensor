@@ -268,6 +268,53 @@ address samples on the requested CPU. The manifest reports admission reasons
 and every rejected attempt; suspicious cases may still receive a separate,
 denser PEBS replay.
 
+## Bare-metal 5.16.10 and Dirty Pipe boundary
+
+The first known-CVE hardware validation ran on an AWS `c5.metal` host with an
+optimized upstream `5.16.10-cpu2tensor-dirtypipe` kernel, boot
+`56bee244-ea31-4b36-b7ce-773b09d34ffd`. A fresh broad pretraining corpus retained
+204/204 first-attempt executions, 320,535,776 PT bytes, and 2,942 exact usable
+PEBS load samples with no censored sample. Its manifest, fused checkpoint, and
+report SHA-256 values are
+`ad9c03bbbd938fed2855a57f8a55ee378948031cd5e62f7b84565ac0880f6dc8`,
+`aec56b1db67ded18da18ab40fd212712afd84d74eaea7602a93a8e0327626146`,
+and `1f2ce7f5f3ab9e51754a8ddd8ee59d83954068172b49fa51360e95f7bf8c7c8b`.
+The fused model scored 1,681 executions/s on eight named host CPUs, but its small
+calibration produced 3/42 familiar and 7/36 held-out alerts and is not an
+operational false-positive estimate.
+
+The safe canary exercised CVE-2022-0847 only against caller-owned temporary
+files. Every vulnerable effect execution changed all requested markers and
+every matched `AAAA` arm retained identical file bytes. With 12 randomized
+executions per arm at 20 loops, the frozen model alerted on all 24 but separated
+the arms at only 0.528 AUROC; PT alone reached 0.625. At 200 loops, fused and PT
+AUROC were 0.563 and 0.632. Adding 24 neutral same-workload executions to benign
+training and six to calibration did not rescue held-out separation: 36 hidden
+effects versus six neutral validations produced 0.468 AUROC. A label-aware
+linear probe trained on a separate session also failed to generalize, reaching
+0.479 AUROC for byte histograms and 0.417 for adjacent-byte sketches. The
+20-loop and 200-loop report SHA-256 values are
+`2d6296dfe62f394f123b9c653b0e4abbde7a5ca4d97993c10fdcf1faf0779372`
+and `11990552e48990d21a7a7fdfc6538fd816ba4c10cf6d06435df4c2f696feb96c`.
+
+This is an expected sensor boundary, not a detected vulnerability. Both canary
+arms execute the vulnerable splice/write path; one writes different bytes while
+the other writes bytes already present. Kernel control flow is therefore nearly
+identical, raw PT carries no data values, and the accepted PEBS event sampled
+loads only. Increasing trace length or transformer capacity cannot recover an
+unobserved state mutation. Commit `061f431` added strict Intel `mem-stores`
+capture. A live period-1,000 smoke on this exact boot produced 898 neutral and
+972 effect store samples for 20 loops; every sample had exact IP, nonzero virtual
+address, and CPU 2 attribution. Store sampling exposes the missing mutation
+channel, but a matched fixed build and address-provenance sideband are still
+required before it can qualify CVE detection.
+
+The campaign also found that the combined collect-and-train command retained
+the collector's one-CPU affinity during training. Commit `0aa0100` restores the
+caller's full CPU set on success and failure. Re-running the sealed corpus with
+`--train-only` on CPUs 4--11 completed the same work promptly; this was an
+orchestration defect, not a model improvement.
+
 ## Small-model control
 
 The initial masked bidirectional transformer has 171,143 parameters for four
