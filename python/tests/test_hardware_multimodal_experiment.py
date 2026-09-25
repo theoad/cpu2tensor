@@ -140,6 +140,22 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
             self.assertEqual(partitions.count("calibration"), 2)
             self.assertEqual(partitions.count("familiar_validation"), 2)
 
+    def test_collect_restores_affinity_after_failure(self) -> None:
+        error = RuntimeError("capture failed")
+        with mock.patch.object(experiment.platform, "system", return_value="Linux"), \
+                mock.patch.object(
+                    experiment.os, "sched_getaffinity", create=True,
+                    return_value={1, 2, 3},
+                ), mock.patch.object(
+                    experiment.os, "sched_setaffinity", create=True,
+                ) as set_affinity, mock.patch.object(
+                    experiment, "_collect_pinned", side_effect=error,
+                ):
+            with self.assertRaisesRegex(RuntimeError, "capture failed"):
+                experiment.collect(argparse.Namespace())
+
+        set_affinity.assert_called_once_with(0, {1, 2, 3})
+
     def test_capture_is_kernel_only_pinned_raw_pt_and_period_10000(self) -> None:
         execution = experiment.PlannedExecution("mmap-00000", "mmap", 0, "training")
         with mock.patch.object(experiment.subprocess, "Popen", return_value=_Process()) as popen, \
@@ -298,7 +314,7 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                         return_value={2, 3},
                     ), mock.patch.object(
                         experiment.os, "sched_setaffinity", create=True,
-                    ), mock.patch.object(
+                    ) as set_affinity, mock.patch.object(
                         experiment.torch, "set_num_threads", new=set_num_threads,
                     ), mock.patch.object(
                         experiment, "make_plan", return_value=((execution,), ("openat",)),
@@ -321,6 +337,10 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                 manifest = experiment.collect(args)
 
         set_num_threads.assert_called_once_with(1)
+        self.assertEqual(
+            set_affinity.call_args_list,
+            [mock.call(0, {3}), mock.call(0, {2, 3})],
+        )
         admission = manifest["collection"]["admission"]
         self.assertEqual(admission["total_attempts"], 3)
         self.assertEqual(

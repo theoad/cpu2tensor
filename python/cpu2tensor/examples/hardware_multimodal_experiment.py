@@ -769,7 +769,7 @@ def _phase_summary(entries: Sequence[dict[str, object]]) -> dict[str, object]:
     return result
 
 
-def collect(args: argparse.Namespace) -> dict[str, object]:
+def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
     if platform.system() != "Linux":
         raise RuntimeError("kernel-only perf collection requires Linux")
     binary = args.binary.resolve()
@@ -961,6 +961,21 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
     manifest["manifest_content_sha256"] = _json_hash(manifest)
     _atomic_json(artifact / "capture-manifest.json", manifest)
     return manifest
+
+
+def collect(args: argparse.Namespace) -> dict[str, object]:
+    """Collect on one controller CPU, then restore the caller's CPU set.
+
+    A combined collect-and-train process must not strand its training phase on
+    the controller CPU. Restoration also runs after an interrupted collection.
+    """
+    if platform.system() != "Linux":
+        return _collect_pinned(args)
+    allowed_cpus = os.sched_getaffinity(0)
+    try:
+        return _collect_pinned(args)
+    finally:
+        os.sched_setaffinity(0, allowed_cpus)
 
 
 def load_dataset(artifact: Path) -> tuple[dict[str, object], dict[str, ModelBatch]]:
