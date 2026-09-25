@@ -48,6 +48,7 @@ _DATA_HEADER_OFFSET = 1024
 _AUX_BAD_FLAGS = 0x0F  # truncated, overwritten, partial, or collided
 _COUNTER_SIGNALS = ("instructions", "cycles", "ref_cycles")
 _MODALITIES = ("intel_pt", "memory_loads", "counters")
+_KERNEL_DECODE_CACHE: tuple[bytes, bytes, bytes, bytes] | None = None
 _SIDEBAND_SAMPLE_FIELDS = (1 << 1) | (1 << 2) | (1 << 7)  # TID, time, CPU.
 _PT_SIDEBAND_FLAGS = (
     (1 << 8)   # mmap
@@ -179,7 +180,9 @@ class HardwareMultimodalConfig:
     pid: int
     modalities: tuple[str, ...] = _MODALITIES
     pebs_period: int = 100_000
-    data_pages: int = 64
+    # Exact PT sideband includes mmap2 records.  A 256 KiB ring overflowed on
+    # the qualified 5,000-mmap fixture; 4 MiB retained all 5,001 records.
+    data_pages: int = 1024
     aux_pages: int = 2048
 
     def __post_init__(self) -> None:
@@ -697,16 +700,33 @@ def _module_build_ids() -> bytes:
     return json.dumps(modules, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _kernel_decode_state() -> tuple[bytes, bytes, bytes]:
+    """Reuse boot-static symbols while fail-closing on module-set changes."""
+    global _KERNEL_DECODE_CACHE
+
+    boot_id = _read_sideband_file(Path("/proc/sys/kernel/random/boot_id"))
+    modules = _read_sideband_file(Path("/proc/modules"))
+    if _KERNEL_DECODE_CACHE is not None:
+        cached_boot, cached_modules, symbols, build_ids = _KERNEL_DECODE_CACHE
+        if boot_id == cached_boot and modules == cached_modules:
+            return modules, symbols, build_ids
+    symbols = _read_sideband_file(Path("/proc/kallsyms"))
+    build_ids = _module_build_ids()
+    _KERNEL_DECODE_CACHE = (boot_id, modules, symbols, build_ids)
+    return modules, symbols, build_ids
+
+
 def _capture_decode_sideband(pid: int, pt_attribute: _PerfAttr) -> HardwareDecodeSideband:
     """Snapshot pre-existing decode state inside the open perf session."""
     before = time.clock_gettime_ns(_CLOCK_MONOTONIC_RAW)
+    modules, symbols, build_ids = _kernel_decode_state()
     return HardwareDecodeSideband(
         clock="CLOCK_MONOTONIC_RAW",
         captured_before_arm_ns=before,
         process_maps=_read_sideband_file(Path(f"/proc/{pid}/maps")),
-        kernel_modules=_read_sideband_file(Path("/proc/modules")),
-        kernel_symbols=_read_sideband_file(Path("/proc/kallsyms")),
-        module_build_ids_json=_module_build_ids(),
+        kernel_modules=modules,
+        kernel_symbols=symbols,
+        module_build_ids_json=build_ids,
         pt_attribute=ctypes.string_at(
             ctypes.addressof(pt_attribute), ctypes.sizeof(pt_attribute)
         ),

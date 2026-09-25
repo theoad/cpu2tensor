@@ -361,16 +361,19 @@ def _hardware_payload(batch: HardwareBatch | None) -> dict[str, object] | None:
 
 
 def _sideband_payload(sideband: HardwareDecodeSideband) -> dict[str, object]:
+    def owned_bytes(value: bytes) -> torch.Tensor:
+        if not value:
+            return torch.empty(0, dtype=torch.uint8)
+        return torch.frombuffer(bytearray(value), dtype=torch.uint8)
+
     return {
         "clock": sideband.clock,
         "captured_before_arm_ns": sideband.captured_before_arm_ns,
-        "process_maps": torch.tensor(list(sideband.process_maps), dtype=torch.uint8),
-        "kernel_modules": torch.tensor(list(sideband.kernel_modules), dtype=torch.uint8),
-        "kernel_symbols": torch.tensor(list(sideband.kernel_symbols), dtype=torch.uint8),
-        "module_build_ids_json": torch.tensor(
-            list(sideband.module_build_ids_json), dtype=torch.uint8
-        ),
-        "pt_attribute": torch.tensor(list(sideband.pt_attribute), dtype=torch.uint8),
+        "process_maps": owned_bytes(sideband.process_maps),
+        "kernel_modules": owned_bytes(sideband.kernel_modules),
+        "kernel_symbols": owned_bytes(sideband.kernel_symbols),
+        "module_build_ids_json": owned_bytes(sideband.module_build_ids_json),
+        "pt_attribute": owned_bytes(sideband.pt_attribute),
     }
 
 
@@ -1661,7 +1664,7 @@ def parser() -> argparse.ArgumentParser:
                         default=tuple(WORKLOAD_LOOPS))
     result.add_argument("--target-cpu", type=int, default=2)
     result.add_argument("--controller-cpu", type=int, default=3)
-    result.add_argument("--data-pages", type=int, default=64)
+    result.add_argument("--data-pages", type=int, default=1024)
     result.add_argument("--aux-pages", type=int, default=8192)
     result.add_argument("--timeout", type=float, default=30.0)
     result.add_argument("--capture-retries", type=int, default=2)
