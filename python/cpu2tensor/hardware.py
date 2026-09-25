@@ -676,10 +676,14 @@ def _module_build_ids() -> bytes:
     except OSError as error:
         raise HardwareCaptureError("Cannot enumerate loaded kernel modules") from error
     for root in roots:
+        # sysfs also exposes global module parameters as regular files below
+        # /sys/module (for example ``compression`` on Ubuntu).
+        if not root.is_dir():
+            continue
         note = root / "notes" / ".note.gnu.build-id"
         try:
             payload = note.read_bytes()
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             continue
         except OSError as error:
             raise HardwareCaptureError(
