@@ -19,7 +19,8 @@ small-transformer baselines on all of:
 
 - unfamiliar benign-family alert rate;
 - cross-modal matching and deliberately misaligned-modality detection;
-- blinded flow, memory, contention, and phase canaries;
+- kernel-only whole-family holdouts and process-scope flow, memory, contention,
+  and phase sensor canaries reported as separate gates;
 - localization of the responsible modality and time region;
 - a matched vulnerable/fixed by trigger/sibling CVE interaction, or a reproducible
   unresolved anomaly with independent semantic evidence.

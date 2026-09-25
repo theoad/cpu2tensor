@@ -103,3 +103,10 @@ synthetic fixture, whole-modality masking increased the modality-swap to clean
 score ratio from 6.74 to 10.83. That supports the architectural choice but is
 not evidence of hardware-signal learning. The real featurization and
 kernel-family experiment remain the next gate.
+
+With the accepted 24-feature PEBS and four-feature PMU schema, the same small
+configuration has 173,852 parameters. A repeated synthetic-shape scorer benchmark
+on `mac.local`, batch 128 and one lane, measured 1,022 executions/s on one CPU
+thread and 1,753 executions/s on MPS across ten full deterministic scoring calls.
+This is a component rate, not the end-to-end fuzzing rate, and remains far below
+the eventual 100,000-execution/s aggregate target.

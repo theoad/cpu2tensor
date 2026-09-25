@@ -1,6 +1,6 @@
 # Work board
 
-Updated 2026-09-11. This file owns work status. The first vertical slice is complete:
+Updated 2026-09-25. This file owns work status. The first vertical slice is complete:
 real observation, integration, packaging, and standard-IDE navigation checks pass.
 Core register and memory instrumentation is checked on ARM, x86 guests, CPU and
 MPS. Mixed frames, bounded multiworker collation and packed MPS uploads are now
@@ -61,6 +61,21 @@ The proposed [24-hour scale procedure](hardware-pretraining-scale.md) uses a
 capacity ladder, immutable shards, recurrent health checks, bounded adjustments,
 and final blinded evaluation; it is not authorized to launch until the PoC gates
 pass.
+
+Capture, scheduling evidence, and the real tensor seam now pass on one retained
+`trail-x86` boot. Across `openat`, `mmap`, and `socketpair`, PEBS period 10,000
+gave 8.31--11.36 samples per million PT bytes with exact outputs, no loss, and
+4.20--5.30% tri-modal overhead in the six-repeat matrix. A later pinned-PEBS replay
+proved nonzero equal perf scheduling times and an end-to-end live feature smoke
+produced finite `[1,1,16,256]` PT, `[1,1,16,24]` PEBS, and `[1,1,1,4]` PMU
+tensors. See [the measured results](hardware-pretraining-results.md).
+
+Current state: the real kernel-family collection/training runner is the active
+gate. The 24-hour campaign remains **NO-GO** until real fused learning beats
+marginal/PT-only baselines, frozen family holdouts meet their budget, and the
+same tri-modal qualification passes on the exact `c5.metal` collector for three
+sessions. P5 Spot replacement capacity also scored only 1/10 and cannot be
+assumed.
 
 ## Completed first iteration: AArch64 observation to MPS
 
