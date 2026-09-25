@@ -44,6 +44,24 @@ One minimal AWS bare-metal replication independently completed capture, offline
 fit, checkpoint reload, and frozen inference, while again rejecting unseen-family
 quality; its exact subject and rates are in the R2 results.
 
+### Active multimodal pretraining PoC
+
+Requested 2026-09-25. Within six hours, qualify simultaneous target-attributed
+Intel PT, PEBS, and sparse non-multiplexed PMU observation on one exact bare-metal
+subject; encode per-lane timing uncertainty without manufacturing total order;
+train and freeze a small masked cross-modal model; and run blinded flow, memory,
+contention, phase, swap, and timestamp canaries. Capture, model, and validation
+work proceed on disjoint branches against one coordinator-owned tensor contract.
+
+The accepted first model is a bidirectional masked predictor rather than a causal
+GPT: completed executions provide both contexts, reconstruction residuals support
+calibrated anomaly scores, and a first JEPA target would add collapse and teacher
+choices before the signal is qualified. The PCA remains the external baseline.
+The proposed [24-hour scale procedure](hardware-pretraining-scale.md) uses a
+capacity ladder, immutable shards, recurrent health checks, bounded adjustments,
+and final blinded evaluation; it is not authorized to launch until the PoC gates
+pass.
+
 ## Completed first iteration: AArch64 observation to MPS
 
 Demo: run an unmodified, benign AArch64 program on prescribed input in `trail-arm`;
