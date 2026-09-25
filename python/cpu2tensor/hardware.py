@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import platform
 import struct
+import time
 from typing import Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -33,8 +34,20 @@ _SAMPLE_ROW = struct.Struct("<QIIQQIIQ")
 _ENABLE = 0x2400
 _DISABLE = 0x2401
 _RESET = 0x2403
+_ID = 0x80082407
+_GROUP_FLAG = 1
+_FORMAT_TOTAL_TIME_ENABLED = 1 << 0
+_FORMAT_TOTAL_TIME_RUNNING = 1 << 1
+_FORMAT_ID = 1 << 2
+_FORMAT_GROUP = 1 << 3
+_GROUP_READ_FORMAT = (
+    _FORMAT_TOTAL_TIME_ENABLED | _FORMAT_TOTAL_TIME_RUNNING | _FORMAT_ID | _FORMAT_GROUP
+)
+_CLOCK_MONOTONIC_RAW = 4
 _DATA_HEADER_OFFSET = 1024
 _AUX_BAD_FLAGS = 0x0F  # truncated, overwritten, partial, or collided
+_COUNTER_SIGNALS = ("instructions", "cycles", "ref_cycles")
+_MODALITIES = ("intel_pt", "memory_loads", "counters")
 
 
 class HardwareCaptureError(RuntimeError):
@@ -108,6 +121,96 @@ class HardwareBatch:
     data_source: torch.Tensor
     exact_ip: torch.Tensor
     trace_bytes: torch.Tensor
+
+
+@dataclass(frozen=True)
+class HardwareMultimodalConfig:
+    """One finite process capture with independently owned hardware sources.
+
+    The target must be stopped at its READY gate before entering the capture.
+    ``modalities`` exists so matched perturbation arms can use the same seam;
+    the default requests simultaneous PT, PEBS memory loads, and non-sampling
+    boundary counter reads. New threads created after entry are not followed.
+    """
+
+    scope: Literal["process", "process_kernel"]
+    pid: int
+    modalities: tuple[str, ...] = _MODALITIES
+    pebs_period: int = 100_000
+    data_pages: int = 64
+    aux_pages: int = 2048
+
+    def __post_init__(self) -> None:
+        if self.scope not in ("process", "process_kernel"):
+            raise ValueError("Multimodal capture needs process or process_kernel scope")
+        if self.pid <= 0:
+            raise ValueError("Multimodal capture needs a positive pid")
+        if not self.modalities or len(set(self.modalities)) != len(self.modalities):
+            raise ValueError("modalities must be nonempty and distinct")
+        if any(modality not in _MODALITIES for modality in self.modalities):
+            raise ValueError("Unknown multimodal hardware source")
+        if self.pebs_period <= 0:
+            raise ValueError("pebs_period must be positive")
+        for name, pages in (("data_pages", self.data_pages), ("aux_pages", self.aux_pages)):
+            if pages <= 0 or pages & (pages - 1):
+                raise ValueError(f"{name} must be a positive power of two")
+
+
+@dataclass(frozen=True)
+class HardwareCaptureEnvelope:
+    """Clock brackets around sequential source enable and disable operations.
+
+    These bounds do not timestamp PT packets or impose an order across CPUs.
+    """
+
+    clock: str
+    arm_before_ns: int
+    arm_after_ns: int
+    stop_before_ns: int
+    stop_after_ns: int
+
+
+@dataclass(frozen=True)
+class HardwareSourceStatus:
+    """Availability and loss state for one requested source."""
+
+    signal: str
+    requested: bool
+    available: bool
+    lost: bool
+
+
+@dataclass(frozen=True)
+class HardwareCounterBatch:
+    """Non-sampling PMU deltas over the complete armed target interval."""
+
+    source: int
+    tid: int
+    cpu: int
+    names: tuple[str, ...]
+    values: torch.Tensor
+    time_enabled_ns: int
+    time_running_ns: int
+    available: bool
+    lost: bool
+
+
+@dataclass(frozen=True)
+class HardwareMultimodalBatch:
+    """PT, PEBS, and PMU observations for one explicitly identified thread.
+
+    ``cpu`` is ``-1`` for a task-following perf event. PEBS rows retain the CPU
+    reported for each sample. No CPU is inferred for PT bytes or counter deltas.
+    """
+
+    source: int
+    tid: int
+    cpu: int
+    envelope: HardwareCaptureEnvelope
+    status: tuple[HardwareSourceStatus, ...]
+    pt: HardwareBatch | None
+    pebs: HardwareBatch | None
+    counters: HardwareCounterBatch | None
 
 
 class _PerfAttr(ctypes.Structure):
@@ -185,19 +288,84 @@ def _attribute(config: HardwareConfig) -> _PerfAttr:
         attr.config = 1 | (1 << 13)
         attr.sample_type = 0
         attr.sample_period = 0
+    if config.signal != "intel_pt":
+        # A single explicit clock lets PEBS and generic samples share an
+        # envelope without pretending raw PT packets carry timestamps.
+        attr.flags |= 1 << 25  # use_clockid
+        attr.clockid = _CLOCK_MONOTONIC_RAW
     return attr
 
 
-def _open_event(attr: _PerfAttr, tid: int, cpu: int) -> int:
+def _counter_attribute(scope: str, signal: str, *, leader: bool) -> _PerfAttr:
+    configs = {"cycles": 0, "instructions": 1, "ref_cycles": 9}
+    try:
+        event = configs[signal]
+    except KeyError as error:
+        raise ValueError("Unknown boundary counter") from error
+    attr = _PerfAttr()
+    attr.type = 0  # PERF_TYPE_HARDWARE
+    attr.size = ctypes.sizeof(_PerfAttr)
+    attr.config = event
+    attr.read_format = _GROUP_READ_FORMAT
+    attr.flags = 1 | (1 << 6)  # disabled; exclude hypervisor
+    if leader:
+        # A pinned leader fails instead of silently time-sharing this group.
+        attr.flags |= 1 << 2
+    if scope == "process":
+        attr.flags |= 1 << 5
+    elif scope == "process_kernel":
+        attr.flags |= 1 << 4
+    else:
+        raise ValueError("Boundary counters need process or process_kernel scope")
+    return attr
+
+
+def _open_event(attr: _PerfAttr, tid: int, cpu: int, group_fd: int = -1) -> int:
     libc = ctypes.CDLL(None, use_errno=True)
     libc.syscall.restype = ctypes.c_long
-    fd = libc.syscall(_syscall_number(), ctypes.byref(attr), tid, cpu, -1, 0)
+    fd = libc.syscall(_syscall_number(), ctypes.byref(attr), tid, cpu, group_fd, 0)
     if fd < 0:
         code = ctypes.get_errno()
         raise HardwareCaptureError(
             f"perf_event_open failed for tid={tid}, cpu={cpu}: {os.strerror(code)}"
         )
     return int(fd)
+
+
+def _event_id(fd: int) -> int:
+    identifier = array("Q", (0,))
+    try:
+        fcntl.ioctl(fd, _ID, identifier, True)
+    except OSError as error:
+        raise HardwareCaptureError("Cannot identify a PMU group member") from error
+    if identifier[0] == 0:
+        raise HardwareCaptureError("Perf returned an invalid PMU event identifier")
+    return int(identifier[0])
+
+
+def _read_counter_group(fd: int, identifiers: tuple[int, ...]) -> tuple[tuple[int, ...], int, int]:
+    expected = 24 + 16 * len(identifiers)
+    try:
+        payload = os.read(fd, expected)
+    except OSError as error:
+        raise HardwareCaptureError("Cannot read the PMU counter group") from error
+    if len(payload) != expected:
+        # A pinned group that cannot be scheduled can return EOF.
+        raise HardwareCaptureError("Pinned PMU counter group did not produce a complete read")
+    count, enabled, running = struct.unpack_from("<QQQ", payload)
+    if count != len(identifiers):
+        raise HardwareCaptureError("PMU counter group member count changed")
+    observed: dict[int, int] = {}
+    position = 24
+    for _ in identifiers:
+        value, identifier = struct.unpack_from("<QQ", payload, position)
+        position += 16
+        if identifier in observed:
+            raise HardwareCaptureError("PMU counter group repeated an event identifier")
+        observed[identifier] = value
+    if set(observed) != set(identifiers):
+        raise HardwareCaptureError("PMU counter group identity changed")
+    return tuple(observed[identifier] for identifier in identifiers), enabled, running
 
 
 def _ring_bytes(mapping: mmap.mmap, head: int, tail: int, offset: int, size: int) -> bytes:
@@ -348,6 +516,305 @@ class PerfCapture:
             data.close()
             os.close(fd)
         self._events.clear()
+        self._running = False
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+@dataclass
+class _MultimodalSource:
+    tid: int
+    cpu: int = -1
+    pt_fd: int = -1
+    pt_data: mmap.mmap | None = None
+    pt_aux: mmap.mmap | None = None
+    pebs_fd: int = -1
+    pebs_data: mmap.mmap | None = None
+    counter_fds: tuple[int, ...] = ()
+    counter_ids: tuple[int, ...] = ()
+    counter_start: tuple[tuple[int, ...], int, int] | None = None
+
+
+def _map_data(fd: int, pages: int) -> mmap.mmap:
+    return mmap.mmap(
+        fd,
+        mmap.PAGESIZE * (1 + pages),
+        flags=mmap.MAP_SHARED,
+        prot=mmap.PROT_READ | mmap.PROT_WRITE,
+    )
+
+
+def _map_aux(fd: int, data: mmap.mmap, data_pages: int, aux_pages: int) -> mmap.mmap:
+    offset = mmap.PAGESIZE * (1 + data_pages)
+    size = mmap.PAGESIZE * aux_pages
+    struct.pack_into("<QQ", data, _DATA_HEADER_OFFSET + 48, offset, size)
+    return mmap.mmap(
+        fd,
+        size,
+        flags=mmap.MAP_SHARED,
+        prot=mmap.PROT_READ | mmap.PROT_WRITE,
+        offset=offset,
+    )
+
+
+def _read_mapped_batch(
+    data: mmap.mmap,
+    aux: mmap.mmap | None,
+    *,
+    data_pages: int,
+    signal: str,
+    source: int,
+) -> HardwareBatch:
+    head, tail, offset, size, aux_head, aux_tail, aux_offset, aux_size = struct.unpack_from(
+        "<8Q", data, _DATA_HEADER_OFFSET,
+    )
+    if offset < mmap.PAGESIZE or size != data_pages * mmap.PAGESIZE:
+        raise HardwareCaptureError("Unexpected perf ring layout")
+    records = _ring_bytes(data, head, tail, offset, size)
+    trace = b""
+    if aux is not None:
+        if aux_offset != mmap.PAGESIZE * (1 + data_pages) or aux_size != len(aux):
+            raise HardwareCaptureError("Unexpected perf AUX layout")
+        trace = _ring_bytes(aux, aux_head, aux_tail, 0, aux_size)
+    return _decode_records(records, signal, source, trace)
+
+
+def _counter_batch(
+    source: _MultimodalSource,
+    final: tuple[tuple[int, ...], int, int],
+) -> HardwareCounterBatch:
+    if source.counter_start is None:
+        raise HardwareCaptureError("PMU counter group has no boundary baseline")
+    start_values, start_enabled, start_running = source.counter_start
+    final_values, final_enabled, final_running = final
+    if (final_enabled < start_enabled or final_running < start_running or
+            any(end < start for start, end in zip(start_values, final_values))):
+        raise HardwareCaptureError("PMU counter group moved backwards")
+    enabled = final_enabled - start_enabled
+    running = final_running - start_running
+    if enabled == 0 or running == 0:
+        raise HardwareCaptureError("PMU counter group did not run")
+    if running != enabled:
+        raise HardwareCaptureError(
+            f"PMU counter group was multiplexed: enabled={enabled}, running={running}"
+        )
+    values = tuple(end - start for start, end in zip(start_values, final_values))
+    return HardwareCounterBatch(
+        source=source.tid,
+        tid=source.tid,
+        cpu=source.cpu,
+        names=_COUNTER_SIGNALS,
+        values=_tensor(array("q", values)),
+        time_enabled_ns=enabled,
+        time_running_ns=running,
+        available=True,
+        lost=False,
+    )
+
+
+class PerfMultimodalCapture:
+    """Finite simultaneous PT, PEBS, and boundary-counter capture.
+
+    Enter only after every target thread is stopped at a READY boundary. The
+    source descriptors are armed sequentially inside one CLOCK_MONOTONIC_RAW
+    bracket, after which the caller may release the target. ``stop`` is likewise
+    bracketed. The envelope is source-control timing, not PT packet timing.
+    """
+
+    def __init__(self, config: HardwareMultimodalConfig) -> None:
+        if platform.system() != "Linux":
+            raise HardwareCaptureError("perf capture requires Linux")
+        self.config = config
+        self._sources: list[_MultimodalSource] = []
+        self._running = False
+        self._stopped = False
+        self._arm_before_ns = 0
+        self._arm_after_ns = 0
+
+    def _hardware_config(self, signal: str) -> HardwareConfig:
+        return HardwareConfig(
+            self.config.scope,
+            pid=self.config.pid,
+            signal=signal,
+            period=self.config.pebs_period,
+            data_pages=self.config.data_pages,
+            aux_pages=self.config.aux_pages,
+        )
+
+    def _open_source(self, tid: int) -> _MultimodalSource:
+        source = _MultimodalSource(tid=tid)
+        self._sources.append(source)
+        if "intel_pt" in self.config.modalities:
+            source.pt_fd = _open_event(_attribute(self._hardware_config("intel_pt")), tid, -1)
+            source.pt_data = _map_data(source.pt_fd, self.config.data_pages)
+            try:
+                source.pt_aux = _map_aux(
+                    source.pt_fd, source.pt_data, self.config.data_pages, self.config.aux_pages
+                )
+            except BaseException:
+                source.pt_data.close()
+                source.pt_data = None
+                raise
+        if "memory_loads" in self.config.modalities:
+            source.pebs_fd = _open_event(
+                _attribute(self._hardware_config("memory_loads")), tid, -1
+            )
+            source.pebs_data = _map_data(source.pebs_fd, self.config.data_pages)
+        if "counters" in self.config.modalities:
+            fds = []
+            leader = -1
+            for index, signal in enumerate(_COUNTER_SIGNALS):
+                fd = _open_event(
+                    _counter_attribute(self.config.scope, signal, leader=index == 0),
+                    tid,
+                    -1,
+                    leader,
+                )
+                if index == 0:
+                    leader = fd
+                fds.append(fd)
+                source.counter_fds = tuple(fds)
+            source.counter_ids = tuple(_event_id(fd) for fd in fds)
+        return source
+
+    def __enter__(self) -> "PerfMultimodalCapture":
+        if self._running or self._stopped:
+            raise RuntimeError("Create a new PerfMultimodalCapture for each run")
+        try:
+            tids = sorted(int(name) for name in os.listdir(f"/proc/{self.config.pid}/task"))
+        except OSError as error:
+            raise HardwareCaptureError(
+                f"Cannot enumerate process {self.config.pid} threads"
+            ) from error
+        try:
+            for tid in tids:
+                self._open_source(tid)
+            self._arm_before_ns = time.clock_gettime_ns(_CLOCK_MONOTONIC_RAW)
+            for source in self._sources:
+                if source.pt_fd >= 0:
+                    fcntl.ioctl(source.pt_fd, _RESET, 0)
+                    fcntl.ioctl(source.pt_fd, _ENABLE, 0)
+                if source.pebs_fd >= 0:
+                    fcntl.ioctl(source.pebs_fd, _RESET, 0)
+                    fcntl.ioctl(source.pebs_fd, _ENABLE, 0)
+                if source.counter_fds:
+                    leader = source.counter_fds[0]
+                    fcntl.ioctl(leader, _RESET, _GROUP_FLAG)
+                    fcntl.ioctl(leader, _ENABLE, _GROUP_FLAG)
+            self._arm_after_ns = time.clock_gettime_ns(_CLOCK_MONOTONIC_RAW)
+            for source in self._sources:
+                if source.counter_fds:
+                    source.counter_start = _read_counter_group(
+                        source.counter_fds[0], source.counter_ids
+                    )
+            self._running = True
+            return self
+        except BaseException:
+            self.close()
+            raise
+
+    def stop(self) -> tuple[HardwareMultimodalBatch, ...]:
+        if not self._running or self._stopped:
+            raise RuntimeError("Capture must be running and stopped only once")
+        self._stopped = True
+        stop_before_ns = time.clock_gettime_ns(_CLOCK_MONOTONIC_RAW)
+        final_counters: dict[int, tuple[tuple[int, ...], int, int]] = {}
+        try:
+            for source in self._sources:
+                if source.counter_fds:
+                    final_counters[source.tid] = _read_counter_group(
+                        source.counter_fds[0], source.counter_ids
+                    )
+        finally:
+            for source in self._sources:
+                if source.counter_fds:
+                    fcntl.ioctl(source.counter_fds[0], _DISABLE, _GROUP_FLAG)
+                if source.pebs_fd >= 0:
+                    fcntl.ioctl(source.pebs_fd, _DISABLE, 0)
+                if source.pt_fd >= 0:
+                    fcntl.ioctl(source.pt_fd, _DISABLE, 0)
+            self._running = False
+        stop_after_ns = time.clock_gettime_ns(_CLOCK_MONOTONIC_RAW)
+        envelope = HardwareCaptureEnvelope(
+            clock="CLOCK_MONOTONIC_RAW",
+            arm_before_ns=self._arm_before_ns,
+            arm_after_ns=self._arm_after_ns,
+            stop_before_ns=stop_before_ns,
+            stop_after_ns=stop_after_ns,
+        )
+        batches = []
+        for source in self._sources:
+            pt = None
+            pebs = None
+            counters = None
+            if source.pt_data is not None:
+                pt = _read_mapped_batch(
+                    source.pt_data,
+                    source.pt_aux,
+                    data_pages=self.config.data_pages,
+                    signal="intel_pt",
+                    source=source.tid,
+                )
+            if source.pebs_data is not None:
+                pebs = _read_mapped_batch(
+                    source.pebs_data,
+                    None,
+                    data_pages=self.config.data_pages,
+                    signal="memory_loads",
+                    source=source.tid,
+                )
+            if source.counter_fds:
+                counters = _counter_batch(source, final_counters[source.tid])
+            status = tuple(
+                HardwareSourceStatus(
+                    signal=modality,
+                    requested=modality in self.config.modalities,
+                    available=(pt is not None if modality == "intel_pt" else
+                               pebs is not None if modality == "memory_loads" else
+                               counters is not None),
+                    lost=False,
+                )
+                for modality in _MODALITIES
+            )
+            batches.append(
+                HardwareMultimodalBatch(
+                    source=source.tid,
+                    tid=source.tid,
+                    cpu=source.cpu,
+                    envelope=envelope,
+                    status=status,
+                    pt=pt,
+                    pebs=pebs,
+                    counters=counters,
+                )
+            )
+        return tuple(batches)
+
+    def close(self) -> None:
+        for source in self._sources:
+            for fd in source.counter_fds:
+                try:
+                    fcntl.ioctl(fd, _DISABLE, _GROUP_FLAG)
+                except OSError:
+                    pass
+                os.close(fd)
+            for fd in (source.pebs_fd, source.pt_fd):
+                if fd >= 0:
+                    try:
+                        fcntl.ioctl(fd, _DISABLE, 0)
+                    except OSError:
+                        pass
+            if source.pebs_data is not None:
+                source.pebs_data.close()
+            if source.pt_aux is not None:
+                source.pt_aux.close()
+            if source.pt_data is not None:
+                source.pt_data.close()
+            for fd in (source.pebs_fd, source.pt_fd):
+                if fd >= 0:
+                    os.close(fd)
+        self._sources.clear()
         self._running = False
 
     def __exit__(self, *_: object) -> None:

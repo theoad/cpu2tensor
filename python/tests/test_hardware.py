@@ -11,8 +11,10 @@ from unittest import mock
 import torch
 
 from cpu2tensor.hardware import (
-    HardwareBatch, HardwareCaptureError, HardwareConfig, HardwareTraceLost,
-    PerfCapture, _PerfAttr, _attribute, _decode_records, _ring_bytes,
+    HardwareBatch, HardwareCaptureError, HardwareConfig, HardwareMultimodalConfig,
+    HardwareTraceLost, PerfCapture, PerfMultimodalCapture, _PerfAttr, _attribute,
+    _MultimodalSource, _counter_attribute, _counter_batch, _decode_records,
+    _event_id, _read_counter_group, _ring_bytes,
     _open_event, _source_value, _syscall_number, _tensor,
 )
 
@@ -27,6 +29,26 @@ def record(kind: int, payload: bytes = b"", *, misc: int = 0) -> bytes:
 
 
 class HardwareTests(unittest.TestCase):
+    def test_multimodal_config_requires_a_ready_process_and_known_sources(self) -> None:
+        config = HardwareMultimodalConfig("process_kernel", 7)
+        self.assertEqual(
+            config.modalities,
+            ("intel_pt", "memory_loads", "counters"),
+        )
+        invalid = (
+            dict(scope="kernel", pid=7),
+            dict(scope="process", pid=0),
+            dict(scope="process", pid=7, modalities=()),
+            dict(scope="process", pid=7, modalities=("counters", "counters")),
+            dict(scope="process", pid=7, modalities=("unknown",)),
+            dict(scope="process", pid=7, pebs_period=0),
+            dict(scope="process", pid=7, data_pages=3),
+            dict(scope="process", pid=7, aux_pages=0),
+        )
+        for options in invalid:
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                HardwareMultimodalConfig(**options)
+
     def test_config_rejects_ambiguous_scope_and_unbounded_sizes(self) -> None:
         invalid = (
             dict(scope="other"), dict(scope="process"), dict(scope="process", pid=-1),
@@ -59,6 +81,26 @@ class HardwareTests(unittest.TestCase):
         )
         self.assertEqual(kernel.flags & ((1 << 4) | (1 << 6)), (1 << 4) | (1 << 6))
         self.assertFalse(kernel.flags & (1 << 5))
+        for attr in (process, process_kernel, kernel):
+            self.assertTrue(attr.flags & (1 << 25))
+            self.assertEqual(attr.clockid, 4)
+
+    def test_boundary_counters_are_pinned_group_reads_not_samples(self) -> None:
+        leader = _counter_attribute("process_kernel", "instructions", leader=True)
+        member = _counter_attribute("process_kernel", "cycles", leader=False)
+        reference = _counter_attribute("process", "ref_cycles", leader=False)
+        self.assertEqual((leader.type, leader.config, leader.sample_period), (0, 1, 0))
+        self.assertEqual((member.type, member.config), (0, 0))
+        self.assertEqual(reference.config, 9)
+        self.assertEqual(leader.read_format, 15)
+        self.assertTrue(leader.flags & (1 << 2))
+        self.assertFalse(member.flags & (1 << 2))
+        self.assertTrue(leader.flags & (1 << 4))
+        self.assertTrue(reference.flags & (1 << 5))
+        with self.assertRaises(ValueError):
+            _counter_attribute("kernel", "cycles", leader=True)
+        with self.assertRaises(ValueError):
+            _counter_attribute("process", "branches", leader=True)
 
     def test_vendor_sources_are_probed_and_precise_memory_is_required(self) -> None:
         def read_text(path, *args, **kwargs):
@@ -113,6 +155,8 @@ class HardwareTests(unittest.TestCase):
         with mock.patch("cpu2tensor.hardware.platform.system", return_value="Darwin"):
             with self.assertRaises(HardwareCaptureError):
                 PerfCapture(HardwareConfig("kernel", cpus=(0,)))
+            with self.assertRaises(HardwareCaptureError):
+                PerfMultimodalCapture(HardwareMultimodalConfig("process", 7))
 
     def test_wrap_and_overflow_are_explicit(self) -> None:
         mapping = bytearray(b"abcd1234")
@@ -126,10 +170,42 @@ class HardwareTests(unittest.TestCase):
         with mock.patch("cpu2tensor.hardware.ctypes.CDLL", return_value=mock.Mock(syscall=syscall)), \
                 mock.patch("cpu2tensor.hardware.platform.machine", return_value="x86_64"):
             self.assertEqual(_open_event(_PerfAttr(), 3, -1), 17)
+            self.assertEqual(_open_event(_PerfAttr(), 3, 2, 9), 17)
             syscall.return_value = -1
             with mock.patch("cpu2tensor.hardware.ctypes.get_errno", return_value=1):
                 with self.assertRaisesRegex(HardwareCaptureError, "Operation not permitted"):
                     _open_event(_PerfAttr(), 3, -1)
+
+    def test_counter_group_reads_are_identity_checked(self) -> None:
+        payload = struct.pack("<QQQQQQQ", 2, 100, 100, 11, 31, 17, 29)
+        with mock.patch("cpu2tensor.hardware.os.read", return_value=payload):
+            values, enabled, running = _read_counter_group(7, (29, 31))
+        self.assertEqual((values, enabled, running), ((17, 11), 100, 100))
+        for bad in (
+            b"",
+            struct.pack("<QQQQQQQ", 1, 100, 100, 11, 31, 17, 29),
+            struct.pack("<QQQQQQQ", 2, 100, 100, 11, 31, 17, 31),
+            struct.pack("<QQQQQQQ", 2, 100, 100, 11, 41, 17, 29),
+        ):
+            with mock.patch("cpu2tensor.hardware.os.read", return_value=bad):
+                with self.subTest(payload=bad), self.assertRaises(HardwareCaptureError):
+                    _read_counter_group(7, (29, 31))
+        with mock.patch("cpu2tensor.hardware.os.read", side_effect=OSError("gone")):
+            with self.assertRaisesRegex(HardwareCaptureError, "read the PMU"):
+                _read_counter_group(7, (29, 31))
+
+    def test_counter_event_identity_is_explicit(self) -> None:
+        def identified(fd, command, identifier, mutate):
+            identifier[0] = 19
+
+        with mock.patch("cpu2tensor.hardware.fcntl.ioctl", side_effect=identified):
+            self.assertEqual(_event_id(7), 19)
+        with mock.patch("cpu2tensor.hardware.fcntl.ioctl", side_effect=OSError("gone")):
+            with self.assertRaisesRegex(HardwareCaptureError, "identify"):
+                _event_id(7)
+        with mock.patch("cpu2tensor.hardware.fcntl.ioctl"):
+            with self.assertRaisesRegex(HardwareCaptureError, "invalid"):
+                _event_id(7)
 
     def test_exact_sample_columns_and_owned_storage(self) -> None:
         sample = struct.pack("<QIIQQIIQQQ", 0xFFFFFFFFFFFFFFFF, 3, 4, 17,
@@ -234,6 +310,111 @@ class HardwareTests(unittest.TestCase):
                 missing = PerfCapture(config)
             with self.assertRaisesRegex(HardwareCaptureError, "enumerate process 43"):
                 missing.__enter__()
+
+    def test_multimodal_capture_owns_all_sources_and_one_clock_envelope(self) -> None:
+        page = mmap.PAGESIZE
+        pt_record = record(11, struct.pack("<QQQ", 0, 4, 0))
+        pt_data = FakeMapping(page * 2)
+        pt_aux = FakeMapping(page)
+        pt_aux[:4] = b"PT!!"
+        struct.pack_into(
+            "<8Q", pt_data, 1024,
+            len(pt_record), 0, page, page, 4, 0, page * 2, page,
+        )
+        pt_data[page:page + len(pt_record)] = pt_record
+
+        sample = struct.pack("<QIIQQIIQQQ", 0x123, 43, 43, 17, 0xABC, 2, 0, 100, 9, 7)
+        pebs_record = record(9, sample, misc=1 << 14)
+        pebs_data = FakeMapping(page * 2)
+        struct.pack_into(
+            "<8Q", pebs_data, 1024,
+            len(pebs_record), 0, page, page, 0, 0, 0, 0,
+        )
+        pebs_data[page:page + len(pebs_record)] = pebs_record
+
+        def counter_read(enabled, running, values):
+            fields = [3, enabled, running]
+            for value, identifier in zip(values, (101, 102, 103)):
+                fields.extend((value, identifier))
+            return struct.pack("<9Q", *fields)
+
+        counter_reads = [
+            counter_read(0, 0, (0, 0, 0)),
+            counter_read(50, 50, (11, 13, 17)),
+        ]
+        config = HardwareMultimodalConfig(
+            "process_kernel", 43, data_pages=1, aux_pages=1,
+        )
+        calls = []
+
+        def ioctl(fd, command, arg=0, mutate=False):
+            calls.append((fd, command, arg))
+
+        with mock.patch("cpu2tensor.hardware.platform.system", return_value="Linux"):
+            capture = PerfMultimodalCapture(config)
+        with mock.patch("cpu2tensor.hardware.os.listdir", return_value=["43"]), \
+                mock.patch("cpu2tensor.hardware._attribute", return_value=_PerfAttr()), \
+                mock.patch("cpu2tensor.hardware._open_event", side_effect=[10, 11, 12, 13, 14]), \
+                mock.patch("cpu2tensor.hardware._event_id", side_effect=[101, 102, 103]), \
+                mock.patch("cpu2tensor.hardware.mmap.mmap",
+                           side_effect=[pt_data, pt_aux, pebs_data]), \
+                mock.patch("cpu2tensor.hardware.time.clock_gettime_ns",
+                           side_effect=[100, 110, 200, 210]), \
+                mock.patch("cpu2tensor.hardware.os.read", side_effect=counter_reads), \
+                mock.patch("cpu2tensor.hardware.fcntl.ioctl", side_effect=ioctl), \
+                mock.patch("cpu2tensor.hardware.os.close") as close:
+            with capture:
+                batches = capture.stop()
+        self.assertEqual(len(batches), 1)
+        batch = batches[0]
+        self.assertEqual((batch.source, batch.tid, batch.cpu), (43, 43, -1))
+        self.assertEqual(
+            (batch.envelope.clock, batch.envelope.arm_before_ns,
+             batch.envelope.arm_after_ns, batch.envelope.stop_before_ns,
+             batch.envelope.stop_after_ns),
+            ("CLOCK_MONOTONIC_RAW", 100, 110, 200, 210),
+        )
+        self.assertEqual(batch.pt.trace_bytes.tolist(), list(b"PT!!"))
+        self.assertEqual(batch.pebs.address.tolist(), [0xABC])
+        self.assertEqual(batch.pebs.cpu.tolist(), [2])
+        self.assertEqual(batch.counters.names, ("instructions", "cycles", "ref_cycles"))
+        self.assertEqual(batch.counters.values.tolist(), [11, 13, 17])
+        self.assertEqual(
+            (batch.counters.time_enabled_ns, batch.counters.time_running_ns),
+            (50, 50),
+        )
+        self.assertTrue(all(row.requested and row.available and not row.lost
+                            for row in batch.status))
+        self.assertIn((12, 0x2400, 1), calls)
+        self.assertIn((12, 0x2401, 1), calls)
+        self.assertTrue(pt_data.closed)
+        self.assertTrue(pt_aux.closed)
+        self.assertTrue(pebs_data.closed)
+        self.assertEqual(close.call_count, 5)
+        with self.assertRaises(RuntimeError):
+            capture.__enter__()
+        with self.assertRaises(RuntimeError):
+            capture.stop()
+
+        with mock.patch("cpu2tensor.hardware.platform.system", return_value="Linux"):
+            missing = PerfMultimodalCapture(config)
+        with mock.patch("cpu2tensor.hardware.os.listdir", side_effect=OSError("gone")):
+            with self.assertRaisesRegex(HardwareCaptureError, "enumerate process 43"):
+                missing.__enter__()
+
+    def test_counter_delta_rejects_multiplexing_and_backward_values(self) -> None:
+        source = _MultimodalSource(
+            tid=7,
+            counter_start=((10, 20, 30), 100, 100),
+        )
+        with self.assertRaisesRegex(HardwareCaptureError, "multiplexed"):
+            _counter_batch(source, ((11, 21, 31), 200, 190))
+        with self.assertRaisesRegex(HardwareCaptureError, "moved backwards"):
+            _counter_batch(source, ((9, 21, 31), 200, 200))
+        with self.assertRaisesRegex(HardwareCaptureError, "did not run"):
+            _counter_batch(source, ((11, 21, 31), 100, 100))
+        with self.assertRaisesRegex(HardwareCaptureError, "no boundary baseline"):
+            _counter_batch(_MultimodalSource(tid=8), ((1, 2, 3), 10, 10))
 
     def test_mapping_failure_cleans_up_fd_and_mapping(self) -> None:
         page = mmap.PAGESIZE
