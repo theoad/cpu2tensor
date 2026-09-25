@@ -424,6 +424,13 @@ deleting non-sampled benign-pretraining raw files only after their derived file
 is sealed. This mode is for explicitly benign pretraining; prospective inference
 must score before retention and preserve every alert's original raw window.
 
+The first live bounded-retention smoke at commit `591d8b2` retained one
+preregistered raw execution out of 204 at fraction 0.01, all 204 derived tensors,
+and the complete manifest, report, and checkpoints in 7.1 MB. Collection and
+training completed with no retry or loss. Attempting to create an LLM bundle for
+a sampled-out execution failed explicitly with `raw evidence was not retained`;
+it did not fall back to replay or fabricate decoded evidence.
+
 ## Small-model control
 
 The initial masked bidirectional transformer has 171,143 parameters for four
