@@ -578,10 +578,33 @@ because systemd lacked Git's `SUDO_UID` for this verified user-owned checkout;
 `r2` passes only the checkout owner's UID in the unit environment, without a
 global Git trust exception.
 
-This run is collection only. No large-model result, known-CVE sensitivity, or
-24-hour GO is implied. The next gate is the sealed 102,000-execution manifest,
-loss/retry accounting, thermal/storage runway, verified off-host copy, then a
-same-data small-versus-larger model comparison.
+The run finished on 2026-09-26 at 01:12 IDT with all 102,000 executions in
+7,805.9 seconds (13.07/s on the named physical i7-10510U host). All were
+first-attempt, sampled-PEBS admissions; there were zero retries, rejected
+attempts, lost sources, missing sources, or multiplexed sources. The split is
+56,000 training, 21,000 calibration, 7,000 familiar validation, and 18,000
+whole-family holdout. It captured 120,337,763,440 PT bytes and 105,724,981
+PEBS samples, of which 30 samples were censored. The package was 48 C at the
+completion check, with 7 GiB disk free. The source remained `6609a30` and the
+exact boot, kernel, and no-turbo CPU policy remained unchanged.
+
+The sealed manifest file SHA-256 is
+`0cf77ff5c64106598e20873cede98401fd7293ab6a59b295b15633389616b37d`;
+its canonical content SHA-256 is
+`429d2d28c4852338321e2256c1e5b33f983ce027a88dd8bbf48e1bdf74712559`.
+An off-host archive on `mac.local` contains the complete retained dataset. Its
+uncompressed tar SHA-256, independently calculated on the host and Mac, is
+`d92da53e98cb2401ad334e5e8f056bca2085dc50931614aa564ea78f5c58cb7d`;
+the compressed archive SHA-256 is
+`ba3d52e0f4b9bcadd1f4c3bb3896d8f856cbe427d42de47de1a12ce498fe120f`.
+The extracted copy passed the manifest-content check plus all 102,000 derived
+tensor hashes and all 525 retained-raw hashes. The host copy remains intact.
+
+The attempted one-Spot-H100 trainer in `us-east-2` was rejected by AWS with
+`MaxSpotInstanceCountExceeded` before an instance was created. Its unused SSH
+key and security group were removed; no instance was billed. The same-data
+small-versus-larger model comparison therefore uses the local Mac GPU. No
+large-model result, known-CVE sensitivity, or 24-hour GO is implied yet.
 
 The full 278-test local suite passed with 75 platform skips before the
 decode-generation change; its focused 31-test suite passed afterward. The
