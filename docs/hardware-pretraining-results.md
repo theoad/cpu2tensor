@@ -500,22 +500,26 @@ fused checkpoint, SHA-256
 Its 1,008-execution calibration is only a pilot, not evidence for an operational
 1,000-per-million review rate.
 
-The blinded vulnerable Dirty Pipe canary then completed 12 effect and 12
-neutral executions, each on its first attempt without trace loss. Every effect
-execution manifested all 20 requested page-cache mutations. The frozen model
-scored before labels were unblinded, but achieved only AUROC 0.6319 and 8/12
-paired effect wins; at its pilot threshold it alerted on 4/12 effect and 2/12
-neutral executions. The content-hashed report is
+The first blinded vulnerable Dirty Pipe canary completed 12 effect and 12
+nominally neutral executions, each on its first attempt without trace loss.
+Every effect execution manifested all 20 requested page-cache mutations. Its
+nominal separation was AUROC 0.6319 and 8/12 paired effect wins; at the pilot
+threshold it alerted on 4/12 effect and 2/12 nominal neutral executions. The
+content-hashed report is
 `83c638c4246f403fbf13ca40a5694209e39ddeabfaab9c56980efc207a80bc18`.
-This proves the controlled vulnerable behavior and the end-to-end validation
-path, **not** useful anomaly sensitivity or a review-rate claim. All 24 raw
-captures and their exact decode state remain preserved for diagnosis.
+Source review subsequently found that the nominal neutral arm also used the
+splice/write path, merely writing bytes already present in the file. It could
+exercise the same unauthorized page-cache write without an observable content
+change. Thus this AUC is **not a valid vulnerable-versus-lawful comparison**.
+The corrected neutral arm uses an ordinary read before writing to the pipe.
+All 24 original raw captures and their exact decode state remain preserved as
+invalid-control evidence; no sensitivity or review-rate claim follows from them.
 
 The full 278-test local suite passed with 75 platform skips before the
 decode-generation change; its focused 31-test suite passed afterward. The
-24-hour campaign remains **NO-GO** pending materially better known-CVE
-sensitivity, independent calibration, and semantic Intel PT packet/address
-decoding from the preserved same-session sideband.
+24-hour campaign remains **NO-GO** pending a rerun with the corrected lawful
+control, independent calibration, and semantic Intel PT packet/address decoding
+from the preserved same-session sideband.
 
 ## Small-model control
 

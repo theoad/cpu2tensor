@@ -128,8 +128,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 except (HardwareCaptureError, HardwareFeatureError):
                     if attempt == args.capture_retries:
                         raise
-            mutations = _parse_output(captured.output, arm, args.loops)
             evidence = multimodal_anomaly_evidence(model, batch)
+            # Read the observable canary result only after the frozen scorer
+            # has produced its evidence for this execution.
+            mutations = _parse_output(captured.output, arm, args.loops)
             state_id = captured.decode_sideband.kernel_state_sha256
             kernel_decode_state = kernel_decode_states.get(state_id)
             if kernel_decode_state is None:

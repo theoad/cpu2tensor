@@ -95,12 +95,14 @@ mutation, as expected, but an intentionally tiny smoke model could not separate
 effect from neutral inputs. The archived vulnerable Ubuntu `5.13.0-30.33`
 subject is now reachable over Wi-Fi and USB Ethernet. It completed 3,060 benign
 tri-modal captures and subject-matched frozen training. A blind 12+12 Dirty
-Pipe validation manifested all effect mutations, but fused-model separation
-was weak (AUROC 0.6319; 4/12 effect alerts versus 2/12 neutral). Next:
-diagnose the retained raw effect/sibling pairs and improve generic
-invariant-bearing observation before scaling the campaign; wire semantic Intel
-PT decode over the complete same-session sideband. The 24-hour campaign
-remains **NO-GO**.
+Pipe validation manifested all effect mutations, but its supposed neutral arm
+also executed the vulnerable splice/write path with unchanged bytes. Its AUROC
+0.6319 is therefore invalid as a lawful-counterfactual metric. The control is
+now corrected to use an ordinary read before writing to the pipe. Next: rerun
+the blind effect/lawful-sibling comparison; then decide whether generic
+invariant-bearing observation must improve before scaling. Semantic Intel PT
+decode over the complete same-session sideband also remains open. The 24-hour
+campaign remains **NO-GO**.
 
 ## Completed first iteration: AArch64 observation to MPS
 
