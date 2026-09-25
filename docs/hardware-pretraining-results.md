@@ -606,6 +606,21 @@ key and security group were removed; no instance was billed. The same-data
 small-versus-larger model comparison therefore uses the local Mac GPU. No
 large-model result, known-CVE sensitivity, or 24-hour GO is implied yet.
 
+The first capacity-ladder control used $d=128$, 8 heads, FFN 512, two local
+and two cross-CPU layers, 500 steps, batch 64, and MPS on `mac.local`. Its
+report SHA-256 is
+`f6433c3e1715d7fa7c646c4c6fbd419bc3736b0836f10497f4a6c450f7a4b59a`.
+The fused checkpoint reloaded bit-exactly and its loss fell from 0.477 to
+0.087, but this did not yield a useful benign holdout alert rate: 65/7,000
+familiar and 2,073/18,000 whole-family holdout executions exceeded the
+21,000-row calibration threshold. The span-only variant alerted on 89/7,000
+and 454/18,000 respectively. The marginal baseline alerted on 75/7,000 and
+15/18,000; PT-only PCA on 69/7,000 and 8,150/18,000. These are matched-data
+comparisons, not evidence of vulnerability sensitivity. The preregistered
+$d=512$, 7-local-layer, 2-cross-CPU-layer, 500-step comparison is running on
+the same Mac dataset; both frozen checkpoint files exist, but its full report
+is not yet sealed. No Dirty Pipe canary has been run on those new checkpoints.
+
 The full 278-test local suite passed with 75 platform skips before the
 decode-generation change; its focused 31-test suite passed afterward. The
 24-hour campaign remains **NO-GO** pending a better invariant-bearing signal,
