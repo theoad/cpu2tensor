@@ -228,6 +228,19 @@ class HardwareMultimodalFeatureTests(unittest.TestCase):
         )
         self.assertEqual(float(result.batch.timing_quality[0, 0, 16 + first]), 1.0)
 
+    def test_phase_timing_sink_does_not_change_features(self) -> None:
+        raw = (_lane(10, cpu=3), _lane(20, cpu=7))
+        expected = featurize_hardware_capture(raw)
+        phases: dict[str, int] = {}
+
+        observed = featurize_hardware_capture(raw, phase_costs_ns=phases)
+
+        _assert_batches_equal(self, observed.batch, expected.batch)
+        self.assertEqual(observed.lanes, expected.lanes)
+        self.assertEqual(set(phases), {"pt_histogram", "pebs_pmu_features"})
+        self.assertGreater(phases["pt_histogram"], 0)
+        self.assertGreater(phases["pebs_pmu_features"], 0)
+
     def test_absolute_time_address_cpu_and_input_order_do_not_enter_model(self) -> None:
         lane = _lane(10, cpu=3)
         expected = featurize_hardware_capture((lane,))

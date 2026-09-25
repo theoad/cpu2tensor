@@ -39,6 +39,24 @@ boundary PMU values and scheduling times, status, and capture envelopes. A final
 manifest is published only after all shards are fsynced and hashed. Lost or
 multiplexed captures are rejected and may be retried; they never enter training.
 
+Admission does not require a positive PEBS sample. A zero-sample execution is
+retained only when the PEBS event was requested, available, scheduled for a
+nonzero interval without multiplexing, and the gated target's scheduler affinity
+was exactly the requested target CPU before release. Its PEBS tokens remain
+explicitly unavailable. When samples are present, every one must retain exact-IP,
+a nonzero address, and the requested CPU. The manifest distinguishes sampled and
+zero-sample admissions and counts every retry reason; it therefore does not hide
+the sampling distribution by retrying until PEBS happens to fire.
+
+Per-execution monotonic phase costs separate launch through `READY`, event open
+and arm, workload execution, stop/drain/decode, PT histogram construction,
+combined PEBS and PMU feature construction, raw serialization/fsync/hash, and
+derived sealing. The collection summary reports total, median, and maximum time
+for the same phases, plus wall time not covered by them (including capture
+context close and loop/manifest overhead). These timers diagnose the finite
+evidence runner; they do not change the perf capture envelope or imply a
+high-rate production data path.
+
 ## Transfer and train on macOS
 
 Copy the entire artifact directory with a hash-preserving tool, then run:

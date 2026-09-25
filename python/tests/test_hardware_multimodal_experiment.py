@@ -143,8 +143,11 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
     def test_capture_is_kernel_only_pinned_raw_pt_and_period_10000(self) -> None:
         execution = experiment.PlannedExecution("mmap-00000", "mmap", 0, "training")
         with mock.patch.object(experiment.subprocess, "Popen", return_value=_Process()) as popen, \
-                mock.patch.object(experiment, "PerfMultimodalCapture", _Capture):
-            batches, output, elapsed, counts = experiment.capture_execution(
+                mock.patch.object(experiment, "PerfMultimodalCapture", _Capture), \
+                mock.patch.object(
+                    experiment.os, "sched_getaffinity", create=True, return_value={2}
+                ):
+            captured = experiment.capture_execution(
                 Path("/tmp/workload"), execution, loops=5_000, target_cpu=2,
                 data_pages=64, aux_pages=2048, timeout=1.0,
             )
@@ -153,12 +156,17 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
         self.assertEqual(_Capture.config.scope, "process_kernel")
         self.assertEqual(_Capture.config.pebs_period, 10_000)
         self.assertEqual(_Capture.config.modalities, experiment.MODALITIES)
-        self.assertEqual(output, b"42\n")
-        self.assertGreater(elapsed, 0)
-        self.assertEqual(counts["pt_bytes"], 2)
-        self.assertEqual(counts["pebs_exact_ip"], 1)
-        self.assertEqual(counts["pebs_nonzero_address"], 1)
-        self.assertEqual(len(batches), 1)
+        self.assertEqual(captured.output, b"42\n")
+        self.assertGreater(captured.elapsed_ns, 0)
+        self.assertEqual(captured.counts["pt_bytes"], 2)
+        self.assertEqual(captured.counts["pebs_exact_ip"], 1)
+        self.assertEqual(captured.counts["pebs_nonzero_address"], 1)
+        self.assertEqual(captured.target_affinity, (2,))
+        self.assertEqual(
+            set(captured.phases_ns),
+            {"launch_ready", "event_open_arm", "workload", "stop_drain_decode"},
+        )
+        self.assertEqual(len(captured.batches), 1)
 
     def test_capture_rejects_unqualified_pebs_rows_and_lanes(self) -> None:
         batch = _capture_batch()
@@ -167,28 +175,157 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
             replace(batch.pebs, exact_ip=torch.tensor([False])),
             replace(batch.pebs, address=torch.tensor([0], dtype=torch.int64)),
             replace(batch.pebs, cpu=torch.tensor([3], dtype=torch.int32)),
-            replace(
-                batch.pebs,
-                ip=torch.empty(0, dtype=torch.int64),
-                exact_ip=torch.empty(0, dtype=torch.bool),
-                address=torch.empty(0, dtype=torch.int64),
-                cpu=torch.empty(0, dtype=torch.int32),
-            ),
         )
         for pebs in invalid:
             with self.subTest(pebs=pebs):
                 with self.assertRaisesRegex(
-                    experiment.HardwareCaptureError, "PEBS|pilot"
+                    experiment.HardwareCaptureError, "PEBS"
                 ):
                     experiment._validate_capture((replace(batch, pebs=pebs),), 77, 2)
 
-        lane = argparse.Namespace(
+        sampled_lane = argparse.Namespace(
             tid=77, observed_cpu=3, migration_verified=True, pebs_samples=1
         )
         with self.assertRaisesRegex(
-            experiment.HardwareCaptureError, "migration evidence"
+            experiment.HardwareCaptureError, "target-CPU"
         ):
-            experiment._validate_lanes((lane,), 2)
+            experiment._validate_lanes((sampled_lane,), 2, (2,))
+        sampled_lane.observed_cpu = 2
+        self.assertEqual(
+            experiment._validate_lanes((sampled_lane,), 2, (2,)),
+            {"sampled_pebs_lanes": 1, "zero_sample_pebs_lanes": 0},
+        )
+
+    def test_zero_sample_pebs_is_admitted_only_with_exact_affinity(self) -> None:
+        batch = _capture_batch()
+        assert batch.pebs is not None
+        empty = torch.empty(0, dtype=torch.int64)
+        zero_pebs = replace(
+            batch.pebs,
+            ip=empty,
+            pid=empty,
+            tid=empty,
+            time=empty,
+            cpu=empty,
+            period=empty,
+            address=empty,
+            weight=empty,
+            data_source=empty,
+            exact_ip=empty,
+        )
+        counts = experiment._validate_capture((replace(batch, pebs=zero_pebs),), 77, 2)
+        self.assertEqual(counts["pebs_samples"], 0)
+        zero_lane = argparse.Namespace(
+            tid=77, observed_cpu=None, migration_verified=False, pebs_samples=0
+        )
+        self.assertEqual(
+            experiment._validate_lanes((zero_lane,), 2, (2,)),
+            {"sampled_pebs_lanes": 0, "zero_sample_pebs_lanes": 1},
+        )
+        with self.assertRaisesRegex(
+            experiment.CaptureAdmissionError, "exact target CPU affinity"
+        ):
+            experiment._validate_lanes((zero_lane,), 2, (2, 3))
+
+    def test_collection_accounts_for_retry_reasons_and_phase_costs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "hardware_kernel_workload"
+            binary.write_bytes(b"fixture")
+            execution = experiment.PlannedExecution(
+                "getpid-00000", "getpid", 0, "training"
+            )
+            captured = experiment.CapturedExecution(
+                batches=(_capture_batch(),),
+                output=b"42\n",
+                elapsed_ns=10,
+                counts={
+                    "pt_bytes": 2,
+                    "pebs_samples": 1,
+                    "pebs_exact_ip": 1,
+                    "pebs_nonzero_address": 1,
+                    "lost_sources": 0,
+                    "missing_sources": 0,
+                    "multiplexed_sources": 0,
+                },
+                target_affinity=(2,),
+                phases_ns={
+                    "launch_ready": 1,
+                    "event_open_arm": 2,
+                    "workload": 3,
+                    "stop_drain_decode": 4,
+                },
+            )
+            lane = argparse.Namespace(
+                tid=77, observed_cpu=2, migration_verified=True, pebs_samples=1
+            )
+
+            def featurize(unused_batches, phases):
+                del unused_batches
+                phases.update(pt_histogram=5, pebs_pmu_features=6)
+                return _model_row(1.0), (lane,)
+
+            args = argparse.Namespace(
+                binary=binary,
+                target_cpu=2,
+                controller_cpu=3,
+                families=("getpid", "openat"),
+                repetitions=3,
+                training_rows=1,
+                calibration_rows=1,
+                heldout_family_count=1,
+                seed=4,
+                data_pages=64,
+                aux_pages=2048,
+                artifact=root / "artifact",
+                loop_scale=1,
+                capture_retries=2,
+                timeout=1.0,
+            )
+            with mock.patch.object(experiment.platform, "system", return_value="Linux"), \
+                    mock.patch.object(
+                        experiment.os, "sched_getaffinity", create=True,
+                        return_value={2, 3},
+                    ), mock.patch.object(
+                        experiment.os, "sched_setaffinity", create=True,
+                    ), mock.patch.object(
+                        experiment, "make_plan", return_value=((execution,), ("openat",)),
+                    ), mock.patch.object(
+                        experiment, "subject_manifest", return_value={
+                            "identity_sha256": "identity",
+                            "subject": {}, "build": {}, "event": {},
+                        },
+                    ), mock.patch.object(
+                        experiment, "capture_execution", side_effect=(
+                            experiment.CaptureAdmissionError("empty_pt", "empty"),
+                            experiment.CaptureAdmissionError(
+                                "source_reported_loss", "lost"
+                            ),
+                            captured,
+                        ),
+                    ), mock.patch.object(
+                        experiment, "_featurize_capture", side_effect=featurize,
+                    ):
+                manifest = experiment.collect(args)
+
+        admission = manifest["collection"]["admission"]
+        self.assertEqual(admission["total_attempts"], 3)
+        self.assertEqual(
+            admission["rejected"], {"empty_pt": 1, "source_reported_loss": 1}
+        )
+        self.assertEqual(admission["admitted"], {"sampled_pebs": 1})
+        self.assertEqual(manifest["collection"]["loss_count"], 1)
+        self.assertGreaterEqual(manifest["collection"]["unaccounted_wall_ns"], 0)
+        self.assertEqual(manifest["entries"][0]["admission"]["attempt"], 3)
+        self.assertEqual(manifest["entries"][0]["phases_ns"]["pt_histogram"], 5)
+        self.assertEqual(
+            set(manifest["collection"]["phase_costs_ns"]),
+            {
+                "launch_ready", "event_open_arm", "workload",
+                "stop_drain_decode", "pt_histogram", "pebs_pmu_features",
+                "raw_serialization_fsync_hash", "derived_sealing",
+            },
+        )
 
     def test_swaps_and_misalignment_preserve_sparse_availability(self) -> None:
         batch = experiment._concatenate((_model_row(1.0), _model_row(2.0)))

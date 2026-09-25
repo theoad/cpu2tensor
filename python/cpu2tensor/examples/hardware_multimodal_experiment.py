@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import Counter
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -19,6 +20,7 @@ from pathlib import Path
 import platform
 import random
 import re
+import statistics
 import subprocess
 import time
 from typing import Sequence
@@ -36,6 +38,7 @@ from cpu2tensor.examples.hardware_multimodal import (
     save_frozen_multimodal_model,
     train_masked_model,
 )
+from cpu2tensor.examples.hardware_multimodal_features import HardwareFeatureError
 from cpu2tensor.hardware import (
     HardwareBatch,
     HardwareCounterBatch,
@@ -84,6 +87,24 @@ class PlannedExecution:
     family: str
     repetition: int
     partition: str
+
+
+@dataclass(frozen=True)
+class CapturedExecution:
+    batches: tuple[HardwareMultimodalBatch, ...]
+    output: bytes
+    elapsed_ns: int
+    counts: dict[str, int]
+    target_affinity: tuple[int, ...]
+    phases_ns: dict[str, int]
+
+
+class CaptureAdmissionError(HardwareCaptureError):
+    """A finite capture is complete but does not satisfy corpus admission."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _sha256(path: Path) -> str:
@@ -482,13 +503,16 @@ class PtPcaBaseline:
 
 def _featurize_capture(
     batches: Sequence[HardwareMultimodalBatch],
+    phase_costs_ns: dict[str, int] | None = None,
 ) -> tuple[ModelBatch, tuple[object, ...]]:
     # Imported lazily so custody and train-only inspection remain usable on a
     # checkout made before the independently developed featurizer is integrated.
     from cpu2tensor.examples.hardware_multimodal_features import (
         featurize_hardware_capture,
     )
-    features = featurize_hardware_capture(batches)
+    features = featurize_hardware_capture(
+        batches, phase_costs_ns=phase_costs_ns
+    )
     return features.batch, features.lanes
 
 
@@ -496,18 +520,36 @@ def _validate_capture(
     batches: Sequence[HardwareMultimodalBatch], target_pid: int, target_cpu: int,
 ) -> dict[str, int]:
     if not batches or any(batch.tid != batch.source for batch in batches):
-        raise HardwareCaptureError("capture returned an invalid source identity")
+        raise CaptureAdmissionError(
+            "source_identity", "capture returned an invalid source identity"
+        )
     if target_pid not in {batch.tid for batch in batches}:
-        raise HardwareCaptureError("capture omitted the gated target thread")
+        raise CaptureAdmissionError(
+            "target_thread_missing", "capture omitted the gated target thread"
+        )
     counts = {"pt_bytes": 0, "pebs_samples": 0, "pebs_exact_ip": 0,
               "pebs_nonzero_address": 0, "lost_sources": 0,
               "missing_sources": 0, "multiplexed_sources": 0}
     for batch in batches:
+        status_by_signal = {status.signal: status for status in batch.status}
+        if (set(status_by_signal) != set(MODALITIES) or
+                any(not status_by_signal[name].requested for name in MODALITIES)):
+            raise CaptureAdmissionError(
+                "requested_source_contract",
+                "kernel multimodal admission requires every frozen source",
+            )
         requested = [status for status in batch.status if status.requested]
         counts["lost_sources"] += sum(status.lost for status in requested)
         counts["missing_sources"] += sum(not status.available for status in requested)
-        if any(status.lost or not status.available for status in requested):
-            raise HardwareCaptureError("requested hardware modality was lost or unavailable")
+        if any(status.lost for status in requested):
+            raise CaptureAdmissionError(
+                "source_reported_loss", "requested hardware modality reported loss"
+            )
+        if any(not status.available for status in requested):
+            raise CaptureAdmissionError(
+                "requested_source_unavailable",
+                "requested hardware modality was unavailable",
+            )
         for status in requested:
             if status.signal in ("memory_loads", "counters"):
                 multiplexed = (
@@ -516,7 +558,8 @@ def _validate_capture(
                 )
                 counts["multiplexed_sources"] += int(multiplexed)
                 if multiplexed:
-                    raise HardwareCaptureError(
+                    raise CaptureAdmissionError(
+                        "source_empty_or_multiplexed",
                         f"{status.signal} source was empty or multiplexed"
                     )
         if batch.pt is not None:
@@ -529,18 +572,20 @@ def _validate_capture(
             if (samples and (not bool(batch.pebs.exact_ip.all()) or
                              not bool((batch.pebs.address != 0).all()) or
                              set(batch.pebs.cpu.tolist()) != {target_cpu})):
-                raise HardwareCaptureError(
+                raise CaptureAdmissionError(
+                    "pebs_sample_quality",
                     "PEBS samples must be exact-IP, nonzero-address, and target-CPU attributed"
                 )
         if batch.counters is not None:
             multiplexed = batch.counters.time_enabled_ns != batch.counters.time_running_ns
             counts["multiplexed_sources"] += int(multiplexed)
             if multiplexed:
-                raise HardwareCaptureError("boundary PMU counter group was multiplexed")
+                raise CaptureAdmissionError(
+                    "counter_group_multiplexed",
+                    "boundary PMU counter group was multiplexed",
+                )
     if counts["pt_bytes"] == 0:
-        raise HardwareCaptureError("raw Intel PT capture was empty")
-    if counts["pebs_samples"] == 0:
-        raise HardwareCaptureError("the pilot requires at least one PEBS sample per execution")
+        raise CaptureAdmissionError("empty_pt", "raw Intel PT capture was empty")
     return counts
 
 
@@ -553,7 +598,8 @@ def capture_execution(
     data_pages: int,
     aux_pages: int,
     timeout: float,
-) -> tuple[tuple[HardwareMultimodalBatch, ...], bytes, int, dict[str, int]]:
+) -> CapturedExecution:
+    launch_started_ns = time.perf_counter_ns()
     process = subprocess.Popen(
         ("taskset", "-c", str(target_cpu), str(binary), execution.family, str(loops)),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -564,6 +610,7 @@ def capture_execution(
         raise RuntimeError(
             f"{execution.execution_id} did not reach READY: stdout={output!r}, stderr={error!r}"
         )
+    launch_ready_ns = time.perf_counter_ns() - launch_started_ns
     config = HardwareMultimodalConfig(
         SCOPE,
         process.pid,
@@ -573,11 +620,23 @@ def capture_execution(
         aux_pages=aux_pages,
     )
     try:
+        arm_started_ns = time.perf_counter_ns()
         with PerfMultimodalCapture(config) as capture:
+            target_affinity = tuple(sorted(os.sched_getaffinity(process.pid)))
+            if target_affinity != (target_cpu,):
+                raise CaptureAdmissionError(
+                    "target_affinity_mismatch",
+                    f"target affinity {target_affinity} is not exactly CPU {target_cpu}",
+                )
+            event_open_arm_ns = time.perf_counter_ns() - arm_started_ns
+            workload_started_ns = time.perf_counter_ns()
             started_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
             output, error = process.communicate(b"x", timeout=timeout)
             elapsed_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW) - started_ns
+            workload_ns = time.perf_counter_ns() - workload_started_ns
+            stop_started_ns = time.perf_counter_ns()
             batches = capture.stop()
+            stop_drain_decode_ns = time.perf_counter_ns() - stop_started_ns
     except BaseException:
         process.kill()
         process.communicate()
@@ -588,7 +647,19 @@ def capture_execution(
             f"stdout={output!r}, stderr={error!r}"
         )
     counts = _validate_capture(batches, process.pid, target_cpu)
-    return batches, output, elapsed_ns, counts
+    return CapturedExecution(
+        batches=batches,
+        output=output,
+        elapsed_ns=elapsed_ns,
+        counts=counts,
+        target_affinity=target_affinity,
+        phases_ns={
+            "launch_ready": launch_ready_ns,
+            "event_open_arm": event_open_arm_ns,
+            "workload": workload_ns,
+            "stop_drain_decode": stop_drain_decode_ns,
+        },
+    )
 
 
 def _lane_payload(lane: object) -> dict[str, object]:
@@ -600,16 +671,69 @@ def _lane_payload(lane: object) -> dict[str, object]:
     }
 
 
-def _validate_lanes(lanes: Sequence[object], target_cpu: int) -> None:
+def _validate_lanes(
+    lanes: Sequence[object], target_cpu: int, target_affinity: Sequence[int],
+) -> dict[str, int]:
     if not lanes:
-        raise HardwareCaptureError("featurizer returned no execution lanes")
+        raise CaptureAdmissionError("lane_missing", "featurizer returned no execution lanes")
+    if tuple(target_affinity) != (target_cpu,):
+        raise CaptureAdmissionError(
+            "target_affinity_mismatch",
+            "zero-sample admission requires exact target CPU affinity",
+        )
+    sampled = 0
+    zero_sample = 0
     for lane in lanes:
-        if (not bool(getattr(lane, "migration_verified")) or
-                getattr(lane, "observed_cpu") != target_cpu or
-                int(getattr(lane, "pebs_samples")) <= 0):
-            raise HardwareCaptureError(
-                "every admitted lane needs target-CPU PEBS migration evidence"
+        samples = int(getattr(lane, "pebs_samples"))
+        observed_cpu = getattr(lane, "observed_cpu")
+        migration_verified = bool(getattr(lane, "migration_verified"))
+        if samples == 0:
+            if observed_cpu is not None or migration_verified:
+                raise CaptureAdmissionError(
+                    "zero_sample_lane_inconsistent",
+                    "zero-sample PEBS lanes must not claim observed CPU evidence",
+                )
+            zero_sample += 1
+        elif not migration_verified or observed_cpu != target_cpu:
+            raise CaptureAdmissionError(
+                "sampled_lane_cpu_mismatch",
+                "sampled PEBS lanes need target-CPU migration evidence",
             )
+        else:
+            sampled += 1
+    return {"sampled_pebs_lanes": sampled, "zero_sample_pebs_lanes": zero_sample}
+
+
+def _rejection_reason(error: BaseException) -> str:
+    if isinstance(error, CaptureAdmissionError):
+        return error.reason
+    if isinstance(error, HardwareTraceLost):
+        return "hardware_trace_lost"
+    if isinstance(error, HardwareCaptureError):
+        return "hardware_capture_error"
+    return "hardware_feature_error"
+
+
+def _phase_summary(entries: Sequence[dict[str, object]]) -> dict[str, object]:
+    names = (
+        "launch_ready",
+        "event_open_arm",
+        "workload",
+        "stop_drain_decode",
+        "pt_histogram",
+        "pebs_pmu_features",
+        "raw_serialization_fsync_hash",
+        "derived_sealing",
+    )
+    result = {}
+    for name in names:
+        values = [int(entry["phases_ns"][name]) for entry in entries]
+        result[name] = {
+            "total_ns": sum(values),
+            "median_ns": statistics.median(values),
+            "maximum_ns": max(values),
+        }
+    return result
 
 
 def collect(args: argparse.Namespace) -> dict[str, object]:
@@ -650,35 +774,52 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
     feature_seconds = 0.0
     total_pt_bytes = 0
     total_pebs_samples = 0
-    rejected_capture_attempts = 0
-    loss_rejections = 0
+    rejected_reasons: Counter[str] = Counter()
+    admitted_reasons: Counter[str] = Counter()
+    total_attempts = 0
     missing_modalities = {"pt": 0, "pebs": 0, "pmu": 0}
     censored_tokens = {"pt": 0, "pebs": 0, "pmu": 0}
     for execution in plan:
         loops = WORKLOAD_LOOPS[execution.family] * args.loop_scale
         for attempt in range(args.capture_retries + 1):
+            total_attempts += 1
             try:
-                batches, output, elapsed_ns, counts = capture_execution(
+                captured = capture_execution(
                     binary, execution, loops=loops, target_cpu=args.target_cpu,
                     data_pages=args.data_pages, aux_pages=args.aux_pages,
                     timeout=args.timeout,
                 )
+                feature_phases_ns: dict[str, int] = {}
+                feature_started = time.perf_counter()
+                model_batch, lanes = _featurize_capture(
+                    captured.batches, feature_phases_ns
+                )
+                feature_seconds += time.perf_counter() - feature_started
+                lane_counts = _validate_lanes(
+                    lanes, args.target_cpu, captured.target_affinity
+                )
                 break
-            except HardwareCaptureError as error:
-                rejected_capture_attempts += 1
-                loss_rejections += int(isinstance(error, HardwareTraceLost))
+            except (HardwareCaptureError, HardwareFeatureError) as error:
+                rejected_reasons[_rejection_reason(error)] += 1
                 if attempt == args.capture_retries:
                     raise
-        feature_started = time.perf_counter()
-        model_batch, lanes = _featurize_capture(batches)
-        feature_seconds += time.perf_counter() - feature_started
-        _validate_lanes(lanes, args.target_cpu)
+        admission_reason = (
+            "sampled_pebs" if captured.counts["pebs_samples"] else
+            "zero_pebs_with_exact_affinity"
+        )
+        admitted_reasons[admission_reason] += 1
+        phases_ns = {**captured.phases_ns, **feature_phases_ns}
         raw_path = artifact / "raw" / f"{execution.execution_id}.pt"
+        raw_started_ns = time.perf_counter_ns()
         raw_hash = _atomic_torch_save(raw_path, raw_capture_payload(
-            batches, execution=execution, loops=loops, stdout=output,
-            elapsed_ns=elapsed_ns,
+            captured.batches, execution=execution, loops=loops,
+            stdout=captured.output, elapsed_ns=captured.elapsed_ns,
         ))
+        phases_ns["raw_serialization_fsync_hash"] = (
+            time.perf_counter_ns() - raw_started_ns
+        )
         derived_path = artifact / "derived" / f"{execution.execution_id}.pt"
+        derived_started_ns = time.perf_counter_ns()
         derived_hash = _atomic_torch_save(derived_path, {
             "schema": DERIVED_SCHEMA,
             "execution": asdict(execution),
@@ -686,6 +827,7 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
             "batch": _model_payload(model_batch),
             "lanes": [_lane_payload(lane) for lane in lanes],
         })
+        phases_ns["derived_sealing"] = time.perf_counter_ns() - derived_started_ns
         availability = {
             "pt": model_batch.pt_available,
             "pebs": model_batch.pebs_available,
@@ -694,8 +836,8 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         for name, available in availability.items():
             missing_modalities[name] += int(not bool(available.any()))
             censored_tokens[name] += int((~available).sum())
-        total_pt_bytes += counts["pt_bytes"]
-        total_pebs_samples += counts["pebs_samples"]
+        total_pt_bytes += captured.counts["pt_bytes"]
+        total_pebs_samples += captured.counts["pebs_samples"]
         entries.append({
             **asdict(execution),
             "loops": loops,
@@ -703,13 +845,25 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
             "raw_sha256": raw_hash,
             "derived_path": str(derived_path.relative_to(artifact)),
             "derived_sha256": derived_hash,
-            "stdout_base64": base64.b64encode(output).decode("ascii"),
-            "stdout_sha256": hashlib.sha256(output).hexdigest(),
-            "elapsed_ns": elapsed_ns,
-            "capture": counts,
+            "stdout_base64": base64.b64encode(captured.output).decode("ascii"),
+            "stdout_sha256": hashlib.sha256(captured.output).hexdigest(),
+            "elapsed_ns": captured.elapsed_ns,
+            "capture": captured.counts,
+            "admission": {
+                "reason": admission_reason,
+                "attempt": attempt + 1,
+                "target_affinity": list(captured.target_affinity),
+                **lane_counts,
+            },
+            "phases_ns": phases_ns,
             "lanes": [_lane_payload(lane) for lane in lanes],
         })
     collection_seconds = time.perf_counter() - collection_started
+    phase_costs_ns = _phase_summary(entries)
+    accounted_phase_ns = sum(
+        int(summary["total_ns"]) for summary in phase_costs_ns.values()
+    )
+    collection_wall_ns = int(collection_seconds * 1_000_000_000)
     manifest = {
         "schema": SCHEMA,
         **identity,
@@ -730,8 +884,18 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
             "total_pt_bytes": total_pt_bytes,
             "pt_bytes_per_second": total_pt_bytes / collection_seconds,
             "total_pebs_samples": total_pebs_samples,
-            "loss_count": loss_rejections,
-            "rejected_capture_attempts": rejected_capture_attempts,
+            "loss_count": (
+                rejected_reasons["hardware_trace_lost"]
+                + rejected_reasons["source_reported_loss"]
+            ),
+            "admission": {
+                "total_attempts": total_attempts,
+                "admitted": dict(sorted(admitted_reasons.items())),
+                "rejected": dict(sorted(rejected_reasons.items())),
+                "rejected_attempts": sum(rejected_reasons.values()),
+            },
+            "phase_costs_ns": phase_costs_ns,
+            "unaccounted_wall_ns": max(0, collection_wall_ns - accounted_phase_ns),
             "missing_modality_executions": missing_modalities,
             "censored_tokens": censored_tokens,
         },

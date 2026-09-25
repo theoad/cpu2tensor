@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 import math
+import time
 from typing import Any, Sequence
 
 import torch
@@ -423,6 +424,8 @@ def _pmu_features(
 
 def featurize_hardware_capture(
     batches: Sequence[CaptureHardwareMultimodalBatch],
+    *,
+    phase_costs_ns: dict[str, int] | None = None,
 ) -> HardwareCaptureFeatures:
     """Convert one ``PerfMultimodalCapture.stop`` result to a model batch.
 
@@ -456,7 +459,13 @@ def featurize_hardware_capture(
             assert batch.pt is not None
             if batch.pt.source != batch.tid:
                 raise HardwareFeatureError("PT source escaped its thread lane")
+            started_ns = time.perf_counter_ns()
             pt, pt_available = _pt_features(batch.pt)
+            if phase_costs_ns is not None:
+                phase_costs_ns["pt_histogram"] = (
+                    phase_costs_ns.get("pt_histogram", 0)
+                    + time.perf_counter_ns() - started_ns
+                )
 
         pebs = torch.zeros((SEGMENTS, len(PEBS_FEATURES)), dtype=torch.float32)
         pebs_available = torch.zeros(SEGMENTS, dtype=torch.bool)
@@ -464,12 +473,18 @@ def featurize_hardware_capture(
         observed_cpu = None
         if actual["memory_loads"]:
             assert batch.pebs is not None
+            started_ns = time.perf_counter_ns()
             pebs, pebs_available, pebs_time_bounds, observed_cpu = _pebs_features(
                 batch.pebs,
                 tid=batch.tid,
                 outer_start_ns=outer_start,
                 outer_stop_ns=outer_stop,
             )
+            if phase_costs_ns is not None:
+                phase_costs_ns["pebs_pmu_features"] = (
+                    phase_costs_ns.get("pebs_pmu_features", 0)
+                    + time.perf_counter_ns() - started_ns
+                )
         if batch.cpu >= 0 and observed_cpu is not None and batch.cpu != observed_cpu:
             raise HardwareFeatureError("PEBS CPU disagrees with its capture lane")
 
@@ -477,7 +492,13 @@ def featurize_hardware_capture(
         pmu_available = torch.zeros(1, dtype=torch.bool)
         if actual["counters"]:
             assert batch.counters is not None
+            started_ns = time.perf_counter_ns()
             pmu = _pmu_features(batch.counters, tid=batch.tid, cpu=batch.cpu)
+            if phase_costs_ns is not None:
+                phase_costs_ns["pebs_pmu_features"] = (
+                    phase_costs_ns.get("pebs_pmu_features", 0)
+                    + time.perf_counter_ns() - started_ns
+                )
             pmu_available.fill_(True)
 
         if not bool(pt_available.any() or pebs_available.any() or pmu_available.any()):
