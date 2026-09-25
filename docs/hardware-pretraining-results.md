@@ -93,6 +93,76 @@ This proves that the accepted capture object reaches the accepted tensor seam on
 real hardware. It does not yet prove that training learns useful relationships;
 that is the kernel-family experiment gate.
 
+## Kernel-family training gate
+
+Commit `4c0c71d` collected and sealed 204 executions of all 17 gated kernel
+workload families on the same exact subject. Each workload used five times its
+base loop count so that light syscall families could produce PEBS evidence at
+the frozen period of 10,000. The manifest SHA-256 is
+`f8e9b77a77aa8820e715e952cdc8e04ba7df97d2aa1b3aef4787404f5429cd59`;
+the 1.7 GiB artifact is cached as
+`~/.cache/cpu2tensor/multimodal-poc/kernel-multimodal-r1-full-scale5/`.
+Its frozen training report SHA-256 is
+`3121644d8c22f3b552ca3ef608c54e2a7e6be346bfcf120c2c3458b06e03659d`.
+The split used 84 training executions, 42 calibration executions, 42 familiar
+validation executions, and 36 executions from the wholly held-out `dup`,
+`memfd`, and `pipe` families.
+
+Collection retained 1,728,624,992 raw PT bytes and 16,960 exact-IP PEBS
+samples in 190.78 seconds. All 204 admitted executions had PT, PEBS, and PMU
+evidence with target-CPU attribution, equal nonzero enabled/running times, no
+loss, no migration, and no output failure. Nine attempts were rejected and
+retried before admission. The current manifest counts rejections but does not
+retain their reason categories; that is an observability gap. Finite capture
+plus Python featurization achieved only 1.069 admitted executions/s and 1.210
+featurized executions/s, so this runner is evidence machinery rather than the
+eventual high-rate data plane.
+
+The 173,852-parameter fused and span-only models trained for 300 steps on MPS.
+All model and baseline checkpoints reloaded bit-for-bit. The table reports
+mean corrupted-to-clean anomaly-score ratios over the 78 validation executions:
+
+| Model | Familiar alerts | Held-out alerts | PEBS swap | PMU swap | PT swap | PEBS-bound reversal | Score rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Marginal features | 0/42 | 12/36 | 1.000 | 1.000 | 1.000 | 1.000 | 99,675/s |
+| PT-only PCA | 1/42 | 13/36 | 1.000 | 1.000 | 1.000 | 1.000 | 115,157/s |
+| Span-only transformer | 1/42 | 13/36 | 1.290 | 1.264 | 1.264 | 1.004 | 853/s |
+| Fused whole-modality transformer | 1/42 | 14/36 | 1.449 | 1.279 | 1.391 | 0.996 | 290/s |
+
+This is the first real evidence that the model learns relationships between raw
+PT, PEBS, and PMU observations that independent marginals and PT-only PCA cannot
+represent. Paired fused-score increases occurred on 67/78 PEBS swaps, 59/78 PMU
+swaps, and 53/78 PT swaps. Whole-modality masking strengthens all three mean swap
+residuals relative to span-only training. This result still needs a stricter
+control: 74/78 row rotations cross workload families, so the model may chiefly
+learn family or intensity compatibility rather than a microarchitectural
+invariant.
+
+The run does **not** yet establish useful anomaly detection. All 12 benign
+held-out `memfd` executions alert under every method; they are also the dominant
+intensity family at roughly 30 MB PT, 312 PEBS samples, and 170 ms per execution.
+Whole-modality masking does not improve held-out alert count, and the timestamp
+corruption is effectively invisible. The 42-row calibration partition is too
+small for an operational reviews-per-million claim and provides no session or
+boot holdout. Scaling the current objective for 24 hours is therefore **NO-GO**
+until trace magnitude is treated as a nuisance/conditioning variable, timing is
+directly predicted from real timing evidence, and benign-family generalization
+improves on a fresh multi-session retained split.
+
+The timing failure is structural. Timing is presently an encoder input, but no
+loss or anomaly residual predicts it; PEBS token position also already names its
+coarse time bin. The reported bound reversal changes bounds without moving the
+corresponding PEBS values, so it is a bookkeeping diagnostic rather than a
+physical corruption. A read-only follow-up on the retained corpus found a median
+of 16 available PEBS bins and all 16 bins in 120/204 executions, ruling out simple
+sparsity as the cause. Coherent one-, four-, and eight-bin PEBS feature rotations
+and reversal on the 48 fully populated validation traces also stayed at roughly
+0.999--1.000 times clean. A held-out-family ridge probe could not predict relative
+time bin from PEBS features ($R^2=-0.0089$, correlation $-0.0076$). The smallest
+next test is therefore an explicit within-lane temporal-consistency energy trained
+with coherent timestamp-shift negatives re-featurized from retained raw samples;
+it must not manufacture order across CPU lanes.
+
 ## Small-model control
 
 The initial masked bidirectional transformer has 171,143 parameters for four
@@ -101,8 +171,8 @@ on one CPU thread and 1,996 executions/s on MPS for batch 128 and one CPU lane.
 Checkpoint reload reproduced scores bit-for-bit. On a deliberately correlated
 synthetic fixture, whole-modality masking increased the modality-swap to clean
 score ratio from 6.74 to 10.83. That supports the architectural choice but is
-not evidence of hardware-signal learning. The real featurization and
-kernel-family experiment remain the next gate.
+not evidence of hardware-signal learning. The real kernel-family result above
+now supplies the first hardware-signal evidence, with the stated limits.
 
 With the accepted 24-feature PEBS and four-feature PMU schema, the same small
 configuration has 173,852 parameters. A repeated synthetic-shape scorer benchmark

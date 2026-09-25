@@ -118,6 +118,13 @@ address material is encrypted and access controlled.
 
 ## Health and adjustment loop
 
+`cpu2tensor.examples.hardware_pretraining_health` implements the version-1
+record validator and pure bounded decision policy described here. Its decision
+function has no cloud, checkpoint, provisioning, or background side effects;
+the campaign runner remains responsible for producing records and executing the
+returned action. Tested policy code is necessary procedure machinery, not proof
+that a campaign is healthy.
+
 Append a versioned JSONL record with `run_id`, subject hash, lineage, UTC time,
 cadence, status, reasons, and the cadence-specific scalars below:
 
@@ -173,14 +180,19 @@ conditions. Preserve suspicious raw trajectories before teardown.
 
 ## Recommendation gate
 
-Proceed only if the six-hour PoC demonstrates all three modalities with acceptable
+Proceed only if the PoC demonstrates all three modalities with acceptable
 perturbation, explicit timing uncertainty, deterministic checkpoint reload,
 useful cross-modal prediction beyond marginal baselines, and a frozen threshold
-that meets the familiar-benign alert budget. Then repeat the tri-modal gate for
-at least three randomized sessions on the exact `c5.metal` boot: zero PT/AUX or
+that meets the familiar-benign alert budget. The September 25 kernel-family run
+passes capture integrity, checkpoint determinism, and cross-modal swap learning,
+but fails timing sensitivity and unfamiliar-benign generalization; its finite
+data path also reaches only 1.069 executions/s. The campaign is therefore
+**NO-GO** in its current form. First fix those measured blockers and reproduce
+the result on a fresh whole-family split. Then repeat the tri-modal gate for at
+least three randomized sessions on the exact `c5.metal` boot: zero PT/AUX or
 PEBS loss, nonzero equal PEBS and PMU running/enabled times, exact-IP nonzero
 PEBS addresses, stable attribution, and recorded AMI/kernel/microcode/topology/
-capture hashes. The current `trail-x86` result does not qualify AWS. Otherwise
-spend the 24 hours fixing the measured blocker rather than scaling it.
+capture hashes. The current `trail-x86` result does not qualify AWS. Spend the
+24 hours fixing a failed gate rather than scaling it.
 
 AWS instance specifications: [P5 instances](https://aws.amazon.com/ec2/instance-types/p5/).

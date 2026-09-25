@@ -70,12 +70,19 @@ proved nonzero equal perf scheduling times and an end-to-end live feature smoke
 produced finite `[1,1,16,256]` PT, `[1,1,16,24]` PEBS, and `[1,1,1,4]` PMU
 tensors. See [the measured results](hardware-pretraining-results.md).
 
-Current state: the real kernel-family collection/training runner is the active
-gate. The 24-hour campaign remains **NO-GO** until real fused learning beats
-marginal/PT-only baselines, frozen family holdouts meet their budget, and the
-same tri-modal qualification passes on the exact `c5.metal` collector for three
-sessions. P5 Spot replacement capacity also scored only 1/10 and cannot be
-assumed.
+Current state: the real 204-execution kernel-family gate is complete. The fused
+model learned cross-modal mismatch residuals absent from marginal and PT-only
+controls: mean PEBS, PMU, and PT swap scores rose 1.449, 1.279, and 1.391 times
+over clean evidence. Whole-modality masking beat span-only on every swap. The
+gate also found two decisive blockers: PEBS timestamp permutation stayed at
+0.996 times clean, and 14/36 unseen benign executions alerted, including every
+held-out `memfd` execution. Finite capture plus Python featurization reached only
+1.069 executions/s. The 24-hour campaign remains **NO-GO** until timing learning,
+benign-family generalization, and the data path improve on a fresh retained split,
+then the same tri-modal qualification must pass on the exact `c5.metal` collector
+for three sessions. P5 Spot replacement capacity also scored only 1/10 and cannot
+be assumed. The deterministic health schema and bounded adjustment policy are
+implemented and tested; they are procedure machinery, not launch qualification.
 
 ## Completed first iteration: AArch64 observation to MPS
 

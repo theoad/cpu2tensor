@@ -59,7 +59,9 @@ PT-only PCA baselines use the same partitions and frozen calibration rule.
 `report.json` records losses, collection, featurization, training and scoring throughput, bit-exact
 checkpoint reload, familiar and held-out-family alert rates, worst familiar and
 held-out families, clean-versus-modality-swap and PEBS-timestamp-misalignment
-sensitivity, and loss/missing/censored counts. The default threshold and tiny
+sensitivity, and loss/missing/censored counts. The current timestamp diagnostic
+reverses input bounds without moving PEBS values; it is intentionally retained
+as a negative control and is not a physical timing canary. The default threshold and tiny
 calibration partition are **pilot-only**. They must not be reported as a
 prospective operational false-alert rate. In particular, a 1,000-per-million
 claim requires at least 100,000 independent calibration executions and a separate
