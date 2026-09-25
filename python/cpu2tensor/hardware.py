@@ -178,6 +178,8 @@ class HardwareSourceStatus:
     requested: bool
     available: bool
     lost: bool
+    time_enabled_ns: int | None = None
+    time_running_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -271,7 +273,10 @@ def _attribute(config: HardwareConfig) -> _PerfAttr:
             raise HardwareCaptureError("Unsupported precise memory-load PMU encoding")
         attr.config = 0x1CD
         attr.config1 = int(alias.split("ldlat=", 1)[1], 0)
-        attr.flags |= 2 << 15  # request zero-skid precise IP (PEBS on supported Intel CPUs)
+        # Fail instead of silently time-sharing the precise event with the PMU
+        # boundary group. The read-format times are checked after disable.
+        attr.flags |= (2 << 15) | (1 << 2)
+        attr.read_format = _FORMAT_TOTAL_TIME_ENABLED | _FORMAT_TOTAL_TIME_RUNNING
     else:
         root = "/sys/bus/event_source/devices/intel_pt"
         attr.type = _source_value(root + "/type")
@@ -366,6 +371,24 @@ def _read_counter_group(fd: int, identifiers: tuple[int, ...]) -> tuple[tuple[in
     if set(observed) != set(identifiers):
         raise HardwareCaptureError("PMU counter group identity changed")
     return tuple(observed[identifier] for identifier in identifiers), enabled, running
+
+
+def _read_sampled_event(fd: int) -> tuple[int, int, int]:
+    """Read one sampled event's count and scheduling times after disable."""
+    try:
+        payload = os.read(fd, 24)
+    except OSError as error:
+        raise HardwareCaptureError("Cannot read the PEBS scheduling status") from error
+    if len(payload) != 24:
+        raise HardwareCaptureError("Pinned PEBS event did not produce a complete read")
+    value, enabled, running = struct.unpack("<QQQ", payload)
+    if enabled == 0 or running == 0:
+        raise HardwareCaptureError("Pinned PEBS event did not run")
+    if running != enabled:
+        raise HardwareCaptureError(
+            f"PEBS event was multiplexed: enabled={enabled}, running={running}"
+        )
+    return value, enabled, running
 
 
 def _ring_bytes(mapping: mmap.mmap, head: int, tail: int, offset: int, size: int) -> bytes:
@@ -531,6 +554,9 @@ class _MultimodalSource:
     pt_aux: mmap.mmap | None = None
     pebs_fd: int = -1
     pebs_data: mmap.mmap | None = None
+    pebs_count: int = 0
+    pebs_time_enabled_ns: int = 0
+    pebs_time_running_ns: int = 0
     counter_fds: tuple[int, ...] = ()
     counter_ids: tuple[int, ...] = ()
     counter_start: tuple[tuple[int, ...], int, int] | None = None
@@ -732,6 +758,8 @@ class PerfMultimodalCapture:
                     fcntl.ioctl(source.counter_fds[0], _DISABLE, _GROUP_FLAG)
                 if source.pebs_fd >= 0:
                     fcntl.ioctl(source.pebs_fd, _DISABLE, 0)
+                    (source.pebs_count, source.pebs_time_enabled_ns,
+                     source.pebs_time_running_ns) = _read_sampled_event(source.pebs_fd)
                 if source.pt_fd >= 0:
                     fcntl.ioctl(source.pt_fd, _DISABLE, 0)
             self._running = False
@@ -774,6 +802,20 @@ class PerfMultimodalCapture:
                                pebs is not None if modality == "memory_loads" else
                                counters is not None),
                     lost=False,
+                    time_enabled_ns=(
+                        source.pebs_time_enabled_ns
+                        if modality == "memory_loads" and pebs is not None
+                        else counters.time_enabled_ns
+                        if modality == "counters" and counters is not None
+                        else None
+                    ),
+                    time_running_ns=(
+                        source.pebs_time_running_ns
+                        if modality == "memory_loads" and pebs is not None
+                        else counters.time_running_ns
+                        if modality == "counters" and counters is not None
+                        else None
+                    ),
                 )
                 for modality in _MODALITIES
             )

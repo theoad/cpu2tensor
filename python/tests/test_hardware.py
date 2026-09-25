@@ -15,7 +15,7 @@ from cpu2tensor.hardware import (
     HardwareTraceLost, PerfCapture, PerfMultimodalCapture, _PerfAttr, _attribute,
     _MultimodalSource, _counter_attribute, _counter_batch, _decode_records,
     _event_id, _read_counter_group, _ring_bytes,
-    _open_event, _source_value, _syscall_number, _tensor,
+    _open_event, _read_sampled_event, _source_value, _syscall_number, _tensor,
 )
 
 
@@ -120,6 +120,8 @@ class HardwareTests(unittest.TestCase):
             pt = _attribute(HardwareConfig("process", pid=7, signal="intel_pt"))
         self.assertEqual((memory.type, memory.config, memory.config1), (11, 0x1CD, 3))
         self.assertEqual((memory.flags >> 15) & 3, 2)
+        self.assertTrue(memory.flags & (1 << 2))
+        self.assertEqual(memory.read_format, 3)
         self.assertEqual((pt.type, pt.config, pt.sample_type, pt.sample_period), (11, 8193, 0, 0))
         with mock.patch("pathlib.Path.read_text", return_value="not-an-int"):
             with self.assertRaises(HardwareCaptureError):
@@ -193,6 +195,25 @@ class HardwareTests(unittest.TestCase):
         with mock.patch("cpu2tensor.hardware.os.read", side_effect=OSError("gone")):
             with self.assertRaisesRegex(HardwareCaptureError, "read the PMU"):
                 _read_counter_group(7, (29, 31))
+
+    def test_sampled_event_scheduling_is_complete_and_not_multiplexed(self) -> None:
+        with mock.patch(
+            "cpu2tensor.hardware.os.read",
+            return_value=struct.pack("<QQQ", 17, 100, 100),
+        ):
+            self.assertEqual(_read_sampled_event(7), (17, 100, 100))
+        for payload, message in (
+            (b"", "complete"),
+            (struct.pack("<QQQ", 0, 0, 0), "did not run"),
+            (struct.pack("<QQQ", 17, 100, 90), "multiplexed"),
+        ):
+            with mock.patch("cpu2tensor.hardware.os.read", return_value=payload), \
+                    self.subTest(payload=payload), \
+                    self.assertRaisesRegex(HardwareCaptureError, message):
+                _read_sampled_event(7)
+        with mock.patch("cpu2tensor.hardware.os.read", side_effect=OSError("gone")):
+            with self.assertRaisesRegex(HardwareCaptureError, "PEBS scheduling"):
+                _read_sampled_event(7)
 
     def test_counter_event_identity_is_explicit(self) -> None:
         def identified(fd, command, identifier, mutate):
@@ -341,6 +362,7 @@ class HardwareTests(unittest.TestCase):
         counter_reads = [
             counter_read(0, 0, (0, 0, 0)),
             counter_read(50, 50, (11, 13, 17)),
+            struct.pack("<QQQ", 101, 50, 50),
         ]
         config = HardwareMultimodalConfig(
             "process_kernel", 43, data_pages=1, aux_pages=1,
@@ -385,6 +407,11 @@ class HardwareTests(unittest.TestCase):
         )
         self.assertTrue(all(row.requested and row.available and not row.lost
                             for row in batch.status))
+        pebs_status = next(row for row in batch.status if row.signal == "memory_loads")
+        self.assertEqual(
+            (pebs_status.time_enabled_ns, pebs_status.time_running_ns),
+            (50, 50),
+        )
         self.assertIn((12, 0x2400, 1), calls)
         self.assertIn((12, 0x2401, 1), calls)
         self.assertTrue(pt_data.closed)

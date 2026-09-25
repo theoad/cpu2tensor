@@ -138,6 +138,8 @@ def _run_target(args: argparse.Namespace, arm: str) -> dict[str, object]:
         "pebs_tids": [],
         "pebs_exact_ip_all": False,
         "pebs_nonzero_addresses": 0,
+        "pebs_time_enabled_ns": 0,
+        "pebs_time_running_ns": 0,
         "pmu": {},
         "pmu_time_enabled_ns": 0,
         "pmu_time_running_ns": 0,
@@ -170,6 +172,11 @@ def _run_target(args: argparse.Namespace, arm: str) -> dict[str, object]:
             batch.envelope.stop_after_ns - batch.envelope.stop_before_ns
         )
         row["status"] = [status.__dict__ for status in batch.status]
+        pebs_status = next(
+            status for status in batch.status if status.signal == "memory_loads"
+        )
+        row["pebs_time_enabled_ns"] = pebs_status.time_enabled_ns or 0
+        row["pebs_time_running_ns"] = pebs_status.time_running_ns or 0
         row["envelope"] = batch.envelope.__dict__
     return row
 
@@ -201,6 +208,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         statuses = [status for status in row["status"] if status["requested"]]
         if not statuses or any(not status["available"] or status["lost"] for status in statuses):
             raise RuntimeError("a requested hardware source was unavailable or lost")
+        if row["pebs_samples"] and (
+            not row["pebs_exact_ip_all"]
+            or row["pebs_nonzero_addresses"] != row["pebs_samples"]
+            or row["pebs_time_enabled_ns"] != row["pebs_time_running_ns"]
+            or row["pebs_time_running_ns"] == 0
+        ):
+            raise RuntimeError("PEBS precision, address, or scheduling contract failed")
         if row["pmu"] and row["pmu_time_enabled_ns"] != row["pmu_time_running_ns"]:
             raise RuntimeError("PMU group was multiplexed")
     elapsed = {
