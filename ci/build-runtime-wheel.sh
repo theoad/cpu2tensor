@@ -8,6 +8,7 @@ readonly source_sha="${CPU2TENSOR_SOURCE_SHA:?Set CPU2TENSOR_SOURCE_SHA to the t
 readonly builder_image_id="${CPU2TENSOR_BUILDER_IMAGE_ID:?Set CPU2TENSOR_BUILDER_IMAGE_ID.}"
 readonly torch_version="2.13.0"
 readonly torch_index="https://download.pytorch.org/whl/cpu"
+readonly numpy_version="2.5.3"
 readonly bundle_name="cpu2tensor-runtime-cp312-linux-x86_64"
 readonly work="$(mktemp -d /tmp/cpu2tensor-runtime.XXXXXX)"
 trap 'rm -rf "$work"' EXIT
@@ -31,6 +32,8 @@ mkdir -p "$wheels" "$output"
 python -m pip wheel --no-deps --wheel-dir "$wheels" "$root"
 python -m pip download --only-binary=:all: --dest "$wheels" \
     --index-url "$torch_index" "torch==$torch_version"
+python -m pip download --only-binary=:all: --dest "$wheels" \
+    "numpy==$numpy_version"
 
 cat > "$bundle/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
@@ -57,7 +60,7 @@ if [[ ${#cpu2tensor_wheels[@]} -ne 1 || ! -f "${cpu2tensor_wheels[0]}" ]]; then
 fi
 python3.12 -m venv "$1"
 "$1/bin/python" -m pip install --no-index --find-links "$bundle/wheels" \
-    "torch==2.13.0" "${cpu2tensor_wheels[0]}"
+    "numpy==2.5.3" "torch==2.13.0" "${cpu2tensor_wheels[0]}"
 INSTALL
 chmod 0755 "$bundle/install.sh"
 
@@ -71,14 +74,26 @@ import importlib.metadata
 import os
 import platform
 
+import numpy
 import torch
 from cpu2tensor import _native
+from cpu2tensor.examples.hardware_triage import (
+    RawTraceSketchConfig,
+    raw_trace_sketch,
+)
 
 assert platform.machine() == "x86_64"
 assert importlib.metadata.version("cpu2tensor") == os.environ["EXPECTED_VERSION"]
+assert numpy.__version__ == "2.5.3"
 assert torch.__version__.startswith("2.13.0")
 assert torch.arange(4, dtype=torch.int64).sum().item() == 6
 assert _native.new_stream() is not None
+features = raw_trace_sketch(
+    torch.tensor([1, 2, 3, 4], dtype=torch.uint8),
+    torch.tensor([0, 4], dtype=torch.int64),
+    RawTraceSketchConfig(segments=2, pair_bins=0, include_length=False),
+)
+assert features.shape == (1, 512)
 PY
 )
 
@@ -87,7 +102,7 @@ PY
     sha256sum -- * | LC_ALL=C sort > "$bundle/SHA256SUMS"
 )
 
-ROOT="$root" BUNDLE="$bundle" SOURCE_SHA="$source_sha" \
+ROOT="$root" BUNDLE="$bundle" SOURCE_SHA="$source_sha" NUMPY_VERSION="$numpy_version" \
 BUILDER_IMAGE_ID="$builder_image_id" TORCH_INDEX="$torch_index" \
 TORCH_VERSION="$torch_version" python - <<'PY'
 import hashlib
@@ -145,12 +160,16 @@ manifest = {
         "requirement": f"torch=={os.environ['TORCH_VERSION']}",
         "index": os.environ["TORCH_INDEX"],
     },
+    "numpy": {
+        "requirement": f"numpy=={os.environ['NUMPY_VERSION']}",
+    },
     "files": [record(path) for path in sorted((bundle / "wheels").iterdir())],
     "install_script": record(bundle / "install.sh"),
     "validation": {
         "offline_fresh_venv_install": True,
         "cpu_tensor_smoke": True,
         "native_extension_smoke": True,
+        "native_raw_trace_reducer_smoke": True,
     },
 }
 (bundle / "runtime-manifest.json").write_text(
