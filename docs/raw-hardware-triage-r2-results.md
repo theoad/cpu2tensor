@@ -80,6 +80,40 @@ one PyTorch thread. These component rates exceed the initial 1,000/s/core target
 Finite perf setup remains the end-to-end bottleneck at 286--296 captures/s, so
 long-lived AUX draining and execution-boundary offsets are still required.
 
+## Minimal AWS replication
+
+Commit `22041af` was deployed without AlphaFlow, QEMU, a GPU, or an online
+controller to one temporary `c5.metal` host in `us-east-1a`. The host exposed an
+Intel Xeon Platinum 8275CL, Intel PT PMU type 11, Linux `7.0.0-1012-aws`, boot ID
+`3d93e746-92f8-4bde-af6b-580ff378957d`, and microcode `0x5003901`. The instance
+had an encrypted disposable 80 GiB root disk, terminate-on-shutdown behavior, and
+a four-hour guest hard stop.
+
+The same 17-family, 8,704-execution protocol collected 364,021,232 undecoded PT
+bytes in 34.88 seconds, or 249.53 finite captures per second. The frozen model
+admitted 1/4,480 familiar validation traces, or 223.21 reviews per million, and
+none of the three fixed `epoll`, `memfd`, and `fork` holdouts. Checkpoint reload
+produced bit-identical validation scores. Leave-one-family-out remained a NO-GO:
+every `openat`, `readlink`, and `yield` trace and 509/512 `socketpair` traces were
+admitted. This independently confirms the deployment mechanics and familiar-tail
+calibration while again rejecting unseen-family quality.
+
+On one pinned core of that named host, the exact corpus reducer processed 3,640.13
+executions/s or 152.24 MB/s and the frozen scorer processed 170,116.94
+executions/s. Peak process RSS while loading and reducing the retained corpus was
+729,980 KiB. These are component rates; finite event creation still limits the
+complete path to 249.53 executions/s.
+
+Evidence identities are:
+
+- report: `edd7622cb597e31a9802a09906e7d6156b1cbeb5ef92e724eecfae261dc0f149`;
+- checkpoint: `d9e4a1f9b192e9a559501aa901773f83caf16760d66f2404c452b81fcd359cca`;
+- corpus: `56e7de2aa0b3d1ab9ffc6c4adfbc93d8fd3befe502e6e66eb2c8612e496fe978`.
+
+The clean deployment also exposed that the native reducer's Torch-to-buffer path
+requires NumPy although it was not declared. [Issue 26](https://github.com/theoad/cpu2tensor/issues/26)
+records the failure; the package now declares NumPy explicitly.
+
 ## Decision
 
 Retain target-attributed kernel PT, the preserved raw-corpus contract, four ordered

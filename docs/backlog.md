@@ -40,6 +40,9 @@ reached 3,290 executions/s and the frozen scorer 247,907/s on one pinned
 `readlink` and `yield` were still wholly anomalous when hidden. Next: label-hidden
 known-vulnerability sensitivity on an exact vulnerable kernel and continuous AUX
 draining; larger models are not justified by benign reconstruction alone.
+One minimal AWS bare-metal replication independently completed capture, offline
+fit, checkpoint reload, and frozen inference, while again rejecting unseen-family
+quality; its exact subject and rates are in the R2 results.
 
 ## Completed first iteration: AArch64 observation to MPS
 
