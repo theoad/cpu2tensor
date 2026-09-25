@@ -18,5 +18,9 @@ kernel guest. See [kernel instructions](../../../docs/kernel-examples.md).
 `hardware_triage` is the first frozen, undecoded Intel PT anomaly baseline. Its
 [experimental contract](../../../docs/raw-hardware-triage.md) records the sustained
 capture and review-budget gates that are still open.
+`hardware_triage_benchmark` runs the family-partitioned benign calibration gate
+on a Linux Intel PT host without decoding trace packets. Its checkpoint reloads
+with `load_frozen_raw_trace_pca` for ordinary frozen inference; scoring never
+updates the fitted model.
 
 - [Context-only blocks](../../../docs/context-only.md): compact paging state and vectorized block association.

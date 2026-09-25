@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 
 import torch
@@ -20,16 +21,21 @@ class RawTraceSketchConfig:
 
     segments: int = 8
     pair_bins: int = 1024
+    include_length: bool = True
 
     def __post_init__(self) -> None:
         if self.segments <= 0:
             raise ValueError("segments must be positive")
-        if self.pair_bins <= 0 or self.pair_bins & (self.pair_bins - 1):
-            raise ValueError("pair_bins must be a positive power of two")
+        if not isinstance(self.include_length, bool):
+            raise ValueError("include_length must be a boolean")
+        if self.pair_bins < 0 or (
+            self.pair_bins != 0 and self.pair_bins & (self.pair_bins - 1)
+        ):
+            raise ValueError("pair_bins must be zero or a positive power of two")
 
     @property
     def feature_dimensions(self) -> int:
-        return self.segments * 256 + self.pair_bins + 1
+        return self.segments * 256 + self.pair_bins + int(self.include_length)
 
 
 def pack_raw_traces(traces: Iterable[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -76,6 +82,7 @@ def raw_trace_sketch(
             offsets.contiguous().numpy(),
             config.segments,
             config.pair_bins,
+            config.include_length,
         )
         return torch.frombuffer(result, dtype=torch.float32).reshape(
             lengths.numel(), config.feature_dimensions
@@ -107,20 +114,25 @@ def raw_trace_sketch(
     ).reshape(batch, config.segments).clamp_min(1).to(torch.float32)
     features[:, :byte_dimensions] /= segment_counts.repeat_interleave(256, dim=1)
 
-    pair_positions = positions + 1 < repeated_lengths
-    current = trace_bytes[pair_positions].to(torch.int64)
-    pair_indices = torch.nonzero(pair_positions, as_tuple=False).flatten()
-    next_bytes = trace_bytes[pair_indices + 1].to(torch.int64)
-    pair_key = (current << 8) | next_bytes
-    pair_hash = (pair_key ^ (pair_key >> 7) ^ (pair_key >> 3)) & (config.pair_bins - 1)
-    pair_trace = trace_index[pair_positions]
-    pair_bins = pair_trace * feature_dimensions + byte_dimensions + pair_hash
-    features += torch.bincount(
-        pair_bins,
-        minlength=batch * feature_dimensions,
-    ).reshape(batch, feature_dimensions).to(torch.float32)
-    features[:, byte_dimensions:-1] /= (lengths - 1).clamp_min(1).to(torch.float32)[:, None]
-    features[:, -1] = torch.log1p(lengths.to(torch.float32)) / 16.0
+    pair_stop = byte_dimensions + config.pair_bins
+    if config.pair_bins:
+        pair_positions = positions + 1 < repeated_lengths
+        current = trace_bytes[pair_positions].to(torch.int64)
+        pair_indices = torch.nonzero(pair_positions, as_tuple=False).flatten()
+        next_bytes = trace_bytes[pair_indices + 1].to(torch.int64)
+        pair_key = (current << 8) | next_bytes
+        pair_hash = (pair_key ^ (pair_key >> 7) ^ (pair_key >> 3)) & (config.pair_bins - 1)
+        pair_trace = trace_index[pair_positions]
+        pair_indices = pair_trace * feature_dimensions + byte_dimensions + pair_hash
+        features += torch.bincount(
+            pair_indices,
+            minlength=batch * feature_dimensions,
+        ).reshape(batch, feature_dimensions).to(torch.float32)
+        features[:, byte_dimensions:pair_stop] /= (
+            (lengths - 1).clamp_min(1).to(torch.float32)[:, None]
+        )
+    if config.include_length:
+        features[:, pair_stop] = torch.log1p(lengths.to(torch.float32)) / 16.0
     return features
 
 
@@ -170,6 +182,43 @@ class FrozenRawTracePCA:
         latent = standardized @ self.components
         residual_energy = standardized.square().sum(1) - latent.square().sum(1)
         return residual_energy.clamp_min(0) / standardized.shape[1]
+
+
+def load_frozen_raw_trace_pca(
+    path: str | Path,
+    *,
+    device: str | torch.device = "cpu",
+) -> tuple[FrozenRawTracePCA, float]:
+    """Load the immutable inference state and its calibrated review threshold."""
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
+    try:
+        sketch = checkpoint["sketch"]
+        config = RawTraceSketchConfig(
+            segments=sketch["segments"],
+            pair_bins=sketch["pair_bins"],
+            include_length=sketch["include_length"],
+        )
+        model = FrozenRawTracePCA(
+            checkpoint["mean"],
+            checkpoint["scale"],
+            checkpoint["components"],
+            config,
+        )
+        threshold = float(checkpoint["threshold"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Invalid raw trace triage checkpoint") from error
+    if (
+        model.mean.dtype != torch.float32
+        or model.scale.dtype != torch.float32
+        or model.components.dtype != torch.float32
+        or model.mean.ndim != 1
+        or model.scale.shape != model.mean.shape
+        or model.components.ndim != 2
+        or model.components.shape[0] != model.mean.numel()
+        or model.mean.numel() != config.feature_dimensions
+    ):
+        raise ValueError("Invalid raw trace triage checkpoint tensors")
+    return model, threshold
 
 
 def fit_raw_trace_pca(

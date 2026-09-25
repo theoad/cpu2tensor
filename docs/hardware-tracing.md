@@ -28,8 +28,10 @@ for batch in batches:
     print(batch.source, batch.ip.shape, batch.address.shape)
 ```
 
-`scope="process"` attaches to threads present at entry. New threads and child
-processes are not followed. Start the capture while the target is waiting if
+`scope="process"` attaches to threads present at entry and excludes kernel code.
+`scope="process_kernel"` attaches in the same way but excludes user code, retaining
+only kernel execution attributed to those threads. New threads and child processes
+are not followed in either mode. Start capture while the target is waiting if
 startup events matter. `scope="kernel"` uses `cpus=(...)` and samples the **host**
 kernel on those CPUs, including other processes that run there. It does not by
 itself expose a VM guest's kernel. The caller controls target lifetime and must
