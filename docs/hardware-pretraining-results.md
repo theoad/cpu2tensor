@@ -431,6 +431,66 @@ training completed with no retry or loss. Attempting to create an LLM bundle for
 a sampled-out execution failed explicitly with `raw evidence was not retained`;
 it did not fall back to replay or fabricate decoded evidence.
 
+## Prospective custody and production-kernel control
+
+Commits `42bbfe4` through `52326fa` close the prospective alert-custody gap.
+Each Intel PT batch now retains the exact perf data-ring records that describe
+its AUX bytes. Before arming the event, the collector captures process maps,
+the exact perf attributes, and root-authorized kernel symbols, modules, module
+build IDs, namespaces, build IDs, ksymbols, BPF events, text patches, context
+switches, and clock-identifying sideband. Boot-static kernel evidence is sealed
+once and content-addressed; each execution retains its dynamic sideband and a
+hash-verified reference to that exact-boot state.
+
+Enabling the complete sideband immediately found two real collector defects.
+`/sys/module/compression` is a regular file rather than a module directory, and
+5,001 `PERF_RECORD_MMAP2` records overflowed the original 256 KiB data ring.
+The collector now ignores non-module sysfs entries and uses a 4 MiB data ring for
+this path. A fresh nine-execution physical-host run then admitted 9/9 captures
+without loss or retry. One mmap-heavy execution retained 520,288 bytes of perf
+records, including all 5,001 mmap2 records.
+
+Prospective scoring at commit `52326fa` completed 9/9 physical executions at
+13.96 sealed-and-scored executions/s. Every execution was scored before any raw
+eviction: three model alerts retained their complete original evidence, while
+six below-threshold rows were deleted only after the custody decision. Median
+frozen-model scoring was 9.82 ms, median raw sealing was 7.23 ms, and steady
+event-open/arm time was 5.13 ms after the exact-boot cache was populated. The
+single deduplicated kernel decode state is 18,376,993 bytes; retained raw mmap
+executions are about 4.0--4.14 MB each instead of repeating roughly 18 MB of
+kernel metadata. Root-visible kallsyms contain real nonzero addresses and every
+retained alert contains nonempty original perf records. This proves decision
+ordering and custody, not the final aggregate inference rate.
+
+A blind fixed-arm Dirty Pipe control then ran on the same unchanged signed
+Ubuntu `7.0.0-31-generic` subject. All eight effect inputs and eight lawful
+neutral siblings completed on their first attempt, with zero page-cache mutation
+in the effect arm as expected for a fixed kernel. The report content SHA-256 is
+`8b2abe383460cbf065d436f3c5d04f99ee5ea6ec39d31a90bbe73d74290dddd9`.
+The intentionally tiny custody-smoke model alerted on all 16 rows and ranked the
+effect below the sibling control (AUROC 0.3594); it was trained on only nine
+unrelated `getpid`, `mmap`, and `openat` executions and is not a sensitivity
+model. This is useful negative evidence: trigger novelty alone is not a
+vulnerability detector, and each production-kernel arm needs a subject-matched
+benign corpus and frozen calibration.
+
+The vulnerable production arm selected official Ubuntu Impish
+`5.13.0-30.33`, below Ubuntu's documented `5.13.0-35.40` Dirty Pipe fix. The
+signed image and base module package were installed without changing the
+permanent GRUB default. Their SHA-256 values are
+`a822bd320e16ced00ed434793dd33f6799016862c0294a46f5ec3314eed01b75` and
+`4262902743dffc76f510d924dc8f2c2a295bb18d2e3e3bee7ba54b616d569997`.
+The generated initramfs contains the laptop's NVMe and `e1000e` drivers and the
+package database is clean. A one-shot boot did not regain network presence,
+however, so this package is currently rejected as a runnable subject rather than
+treated as missing data. No vulnerable-arm or CVE-sensitivity claim is made.
+
+The full 278-test local suite passes with 75 platform skips at commit `ad17739`.
+The 24-hour campaign remains **NO-GO** pending a bootable archived vulnerable
+production kernel, subject-matched training and blinded trigger/sibling
+validation, and semantic Intel PT packet/address decoding from the preserved
+same-session sideband.
+
 ## Small-model control
 
 The initial masked bidirectional transformer has 171,143 parameters for four

@@ -86,6 +86,19 @@ plus accelerator batching, and label-hidden validation on archived production
 kernel packages. The 24-hour campaign remains **NO-GO** until those gates pass.
 The prior isolated temporal R1 remains preserved by tag for provenance.
 
+Prospective custody now scores before eviction and preserves every alert with
+the original PT AUX bytes, perf records, dynamic maps, and a hash-verified
+deduplicated exact-boot decode state. A nine-execution physical smoke retained
+all three alerts and safely evicted six below-threshold rows after scoring. A
+blind 8+8 Dirty Pipe control on the fixed production kernel manifested no
+mutation, as expected, but an intentionally tiny smoke model could not separate
+effect from neutral inputs. The first archived vulnerable production candidate,
+Ubuntu `5.13.0-30.33`, passed package, initramfs, and driver preflight but failed
+to return on a one-shot physical boot and is not accepted as validation data.
+Next: recover the host, qualify a bootable archived vendor kernel, train and
+calibrate independently on that exact subject, run the still-blind matched arm,
+and wire semantic Intel PT decode over the now-complete original sideband.
+
 ## Completed first iteration: AArch64 observation to MPS
 
 Demo: run an unmodified, benign AArch64 program on prescribed input in `trail-arm`;
