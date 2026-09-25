@@ -115,7 +115,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             raw_hash = _atomic_torch_save(
                 raw_path,
                 raw_capture_payload(
-                    captured.batches, execution=execution, loops=args.loops,
+                    captured.batches, decode_sideband=captured.decode_sideband,
+                    execution=execution, loops=args.loops,
                     stdout=captured.output, elapsed_ns=captured.elapsed_ns,
                 ),
             )

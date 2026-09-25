@@ -701,6 +701,8 @@ def save_frozen_multimodal_model(
     path: str | Path,
     model: MaskedHardwareModel,
     threshold: float,
+    *,
+    metadata: dict[str, object] | None = None,
 ) -> None:
     if model.training or any(parameter.requires_grad for parameter in model.parameters()):
         raise RuntimeError("only a frozen model can be saved for inference")
@@ -718,7 +720,17 @@ def save_frozen_multimodal_model(
             # the thread count as part of the frozen inference contract.
             "cpu_threads": torch.get_num_threads() if device_type == "cpu" else None,
         },
+        "metadata": {} if metadata is None else metadata,
     }, path)
+
+
+def frozen_multimodal_metadata(path: str | Path) -> dict[str, object]:
+    """Return immutable checkpoint provenance without constructing the model."""
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    metadata = checkpoint.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("invalid frozen multimodal checkpoint metadata")
+    return metadata
 
 
 def load_frozen_multimodal_model(

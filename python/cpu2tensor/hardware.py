@@ -48,6 +48,23 @@ _DATA_HEADER_OFFSET = 1024
 _AUX_BAD_FLAGS = 0x0F  # truncated, overwritten, partial, or collided
 _COUNTER_SIGNALS = ("instructions", "cycles", "ref_cycles")
 _MODALITIES = ("intel_pt", "memory_loads", "counters")
+_SIDEBAND_SAMPLE_FIELDS = (1 << 1) | (1 << 2) | (1 << 7)  # TID, time, CPU.
+_PT_SIDEBAND_FLAGS = (
+    (1 << 8)   # mmap
+    | (1 << 9)  # comm
+    | (1 << 13)  # task
+    | (1 << 17)  # mmap_data
+    | (1 << 18)  # sample_id_all
+    | (1 << 23)  # mmap2
+    | (1 << 24)  # comm_exec
+    | (1 << 25)  # use_clockid
+    | (1 << 26)  # context_switch
+    | (1 << 28)  # namespaces
+    | (1 << 29)  # ksymbol
+    | (1 << 30)  # bpf_event
+    | (1 << 33)  # text_poke
+    | (1 << 34)  # build_id
+)
 
 
 class HardwareCaptureError(RuntimeError):
@@ -126,6 +143,26 @@ class HardwareBatch:
     data_source: torch.Tensor
     exact_ip: torch.Tensor
     trace_bytes: torch.Tensor
+    perf_records: torch.Tensor | None = None
+
+
+@dataclass(frozen=True)
+class HardwareDecodeSideband:
+    """Static decode state sampled after opening, but before arming, PT events.
+
+    ``perf_records`` on each :class:`HardwareBatch` carries changes emitted while
+    the window runs.  These snapshots cover mappings that already existed when
+    the event was opened.  They belong to the exact capture session; a later
+    replay is not an acceptable substitute.
+    """
+
+    clock: str
+    captured_before_arm_ns: int
+    process_maps: bytes
+    kernel_modules: bytes
+    kernel_symbols: bytes
+    module_build_ids_json: bytes
+    pt_attribute: bytes
 
 
 @dataclass(frozen=True)
@@ -304,8 +341,13 @@ def _attribute(config: HardwareConfig) -> _PerfAttr:
         # separately with bit 13. Without it, a nonempty AUX buffer can still
         # contain only context packets and falsely look like a branch trace.
         attr.config = 1 | (1 << 13)
-        attr.sample_type = 0
+        # Preserve the exact sideband needed to interpret the AUX bytes.  The
+        # kernel reports changes during the armed interval in the data ring;
+        # existing mappings are snapshotted after the fd opens and before arm.
+        attr.sample_type = _SIDEBAND_SAMPLE_FIELDS
         attr.sample_period = 0
+        attr.flags |= _PT_SIDEBAND_FLAGS
+        attr.clockid = _CLOCK_MONOTONIC_RAW
     if config.signal != "intel_pt":
         # A single explicit clock lets PEBS and generic samples share an
         # envelope without pretending raw PT packets carry timestamps.
@@ -468,7 +510,13 @@ def _decode_records(
         position += size
     if signal == "intel_pt" and aux_position != trace_offset + len(trace):
         raise HardwareTraceLost("Intel PT bytes have no matching AUX record")
-    return HardwareBatch(source, signal, *(_tensor(columns[name]) for name in names), _tensor(bytearray(trace)))
+    return HardwareBatch(
+        source,
+        signal,
+        *(_tensor(columns[name]) for name in names),
+        _tensor(bytearray(trace)),
+        _tensor(bytearray(data)),
+    )
 
 
 class PerfCapture:
@@ -609,6 +657,54 @@ def _map_aux(fd: int, data: mmap.mmap, data_pages: int, aux_pages: int) -> mmap.
     )
 
 
+def _read_sideband_file(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError as error:
+        raise HardwareCaptureError(
+            f"Cannot retain required PT decode sideband: {path}"
+        ) from error
+
+
+def _module_build_ids() -> bytes:
+    """Return stable JSON bytes for every loaded module build-ID note."""
+    import json
+
+    modules = {}
+    try:
+        roots = sorted(Path("/sys/module").iterdir())
+    except OSError as error:
+        raise HardwareCaptureError("Cannot enumerate loaded kernel modules") from error
+    for root in roots:
+        note = root / "notes" / ".note.gnu.build-id"
+        try:
+            payload = note.read_bytes()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise HardwareCaptureError(
+                f"Cannot read kernel module build ID: {note}"
+            ) from error
+        modules[root.name] = payload.hex()
+    return json.dumps(modules, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _capture_decode_sideband(pid: int, pt_attribute: _PerfAttr) -> HardwareDecodeSideband:
+    """Snapshot pre-existing decode state inside the open perf session."""
+    before = time.clock_gettime_ns(_CLOCK_MONOTONIC_RAW)
+    return HardwareDecodeSideband(
+        clock="CLOCK_MONOTONIC_RAW",
+        captured_before_arm_ns=before,
+        process_maps=_read_sideband_file(Path(f"/proc/{pid}/maps")),
+        kernel_modules=_read_sideband_file(Path("/proc/modules")),
+        kernel_symbols=_read_sideband_file(Path("/proc/kallsyms")),
+        module_build_ids_json=_module_build_ids(),
+        pt_attribute=ctypes.string_at(
+            ctypes.addressof(pt_attribute), ctypes.sizeof(pt_attribute)
+        ),
+    )
+
+
 def _read_mapped_batch(
     data: mmap.mmap,
     aux: mmap.mmap | None,
@@ -696,6 +792,13 @@ class PerfMultimodalCapture:
         self._stopped = False
         self._arm_before_ns = 0
         self._arm_after_ns = 0
+        self._decode_sideband: HardwareDecodeSideband | None = None
+
+    @property
+    def decode_sideband(self) -> HardwareDecodeSideband:
+        if self._decode_sideband is None:
+            raise RuntimeError("PT decode sideband is unavailable before capture entry")
+        return self._decode_sideband
 
     def _hardware_config(self, signal: str) -> HardwareConfig:
         return HardwareConfig(
@@ -798,6 +901,10 @@ class PerfMultimodalCapture:
             raise RuntimeError("Create a new PerfMultimodalCapture for each run")
         try:
             self._open_sources()
+            if "intel_pt" in self.config.modalities:
+                self._decode_sideband = _capture_decode_sideband(
+                    self.config.pid, _attribute(self._hardware_config("intel_pt"))
+                )
             self._start_window(require_empty=False)
             return self
         except BaseException:
@@ -951,6 +1058,10 @@ class PerfMultimodalSession(PerfMultimodalCapture):
         try:
             self._open_sources()
             self._assert_empty_rings()
+            if "intel_pt" in self.config.modalities:
+                self._decode_sideband = _capture_decode_sideband(
+                    self.config.pid, _attribute(self._hardware_config("intel_pt"))
+                )
             self._entered = True
             return self
         except BaseException:

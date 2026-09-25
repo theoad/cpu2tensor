@@ -19,6 +19,7 @@ from cpu2tensor.hardware import (
     HardwareBatch,
     HardwareCaptureEnvelope,
     HardwareCounterBatch,
+    HardwareDecodeSideband,
     HardwareMultimodalBatch,
     HardwareSourceStatus,
 )
@@ -101,6 +102,10 @@ class _Capture:
         type(self).config = config
 
     def __enter__(self):
+        self.decode_sideband = HardwareDecodeSideband(
+            "CLOCK_MONOTONIC_RAW", 9, b"maps", b"modules", b"symbols",
+            b"{}", b"attr",
+        )
         return self
 
     def __exit__(self, *unused) -> None:
@@ -128,6 +133,30 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
             experiment.retain_raw_execution(
                 "dataset", "execution", seed=7, fraction=1.1,
             )
+        self.assertEqual(
+            experiment.prospective_retention_decision(
+                3.0, 2.0, audit_selected=False
+            ),
+            (True, "model_alert"),
+        )
+        self.assertEqual(
+            experiment.prospective_retention_decision(
+                1.0, 2.0, audit_selected=True
+            ),
+            (True, "preregistered_audit"),
+        )
+        self.assertEqual(
+            experiment.prospective_retention_decision(
+                1.0, 2.0, audit_selected=False
+            ),
+            (False, "below_threshold"),
+        )
+        self.assertEqual(
+            experiment.prospective_retention_decision(
+                float("nan"), 2.0, audit_selected=False
+            ),
+            (True, "nonfinite_score"),
+        )
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -278,6 +307,10 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
             )
             captured = experiment.CapturedExecution(
                 batches=(_capture_batch(),),
+                decode_sideband=HardwareDecodeSideband(
+                    "CLOCK_MONOTONIC_RAW", 9, b"maps", b"modules", b"symbols",
+                    b"{}", b"attr",
+                ),
                 output=b"42\n",
                 elapsed_ns=10,
                 counts={
@@ -376,6 +409,9 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
             "retained_executions": 0,
             "discarded_executions": 1,
             "decision_independent_of_trace_and_model": True,
+            "prospective_checkpoint_sha256": None,
+            "all_model_alerts_retained": False,
+            "scoring_precedes_eviction": False,
         })
         self.assertEqual(manifest["entries"][0]["phases_ns"]["pt_histogram"], 5)
         self.assertEqual(
@@ -384,6 +420,7 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                 "launch_ready", "event_open_arm", "workload",
                 "stop_drain_decode", "pt_histogram", "pebs_pmu_features",
                 "raw_serialization_fsync_hash", "derived_sealing",
+                "prospective_scoring",
             },
         )
 

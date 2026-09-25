@@ -33,6 +33,7 @@ from cpu2tensor.examples.hardware_multimodal import (
     MultimodalConfig,
     calibrate_multimodal_threshold,
     freeze_multimodal_model,
+    frozen_multimodal_metadata,
     load_frozen_multimodal_model,
     multimodal_anomaly_score,
     save_frozen_multimodal_model,
@@ -45,6 +46,7 @@ from cpu2tensor.examples.hardware_multimodal_features import (
 from cpu2tensor.hardware import (
     HardwareBatch,
     HardwareCounterBatch,
+    HardwareDecodeSideband,
     HardwareMultimodalBatch,
     HardwareMultimodalConfig,
     HardwareCaptureError,
@@ -95,6 +97,7 @@ class PlannedExecution:
 @dataclass(frozen=True)
 class CapturedExecution:
     batches: tuple[HardwareMultimodalBatch, ...]
+    decode_sideband: HardwareDecodeSideband
     output: bytes
     elapsed_ns: int
     counts: dict[str, int]
@@ -250,6 +253,8 @@ def subject_manifest(binary: Path, *, target_cpu: int, controller_cpu: int,
         "aux_pages": aux_pages,
     }
     manifest = {"subject": subject, "build": build, "event": event}
+    manifest["subject_identity_sha256"] = _json_hash(subject)
+    manifest["event_identity_sha256"] = _json_hash(event)
     manifest["identity_sha256"] = _json_hash(manifest)
     return manifest
 
@@ -322,6 +327,22 @@ def retain_raw_execution(
     return draw < fraction
 
 
+def prospective_retention_decision(
+    score: float,
+    threshold: float,
+    *,
+    audit_selected: bool,
+) -> tuple[bool, str]:
+    """Decide custody only after frozen inference has scored the owned window."""
+    if not torch.isfinite(torch.tensor((score, threshold))).all():
+        return True, "nonfinite_score"
+    if score > threshold:
+        return True, "model_alert"
+    if audit_selected:
+        return True, "preregistered_audit"
+    return False, "below_threshold"
+
+
 def _hardware_payload(batch: HardwareBatch | None) -> dict[str, object] | None:
     if batch is None:
         return None
@@ -332,6 +353,24 @@ def _hardware_payload(batch: HardwareBatch | None) -> dict[str, object] | None:
             "ip", "pid", "tid", "time", "cpu", "period", "address", "weight",
             "data_source", "exact_ip", "trace_bytes",
         )},
+        "perf_records": (
+            torch.empty(0, dtype=torch.uint8)
+            if batch.perf_records is None else batch.perf_records.cpu()
+        ),
+    }
+
+
+def _sideband_payload(sideband: HardwareDecodeSideband) -> dict[str, object]:
+    return {
+        "clock": sideband.clock,
+        "captured_before_arm_ns": sideband.captured_before_arm_ns,
+        "process_maps": torch.tensor(list(sideband.process_maps), dtype=torch.uint8),
+        "kernel_modules": torch.tensor(list(sideband.kernel_modules), dtype=torch.uint8),
+        "kernel_symbols": torch.tensor(list(sideband.kernel_symbols), dtype=torch.uint8),
+        "module_build_ids_json": torch.tensor(
+            list(sideband.module_build_ids_json), dtype=torch.uint8
+        ),
+        "pt_attribute": torch.tensor(list(sideband.pt_attribute), dtype=torch.uint8),
     }
 
 
@@ -354,6 +393,7 @@ def _counter_payload(batch: HardwareCounterBatch | None) -> dict[str, object] | 
 def raw_capture_payload(
     batches: Sequence[HardwareMultimodalBatch],
     *,
+    decode_sideband: HardwareDecodeSideband,
     execution: PlannedExecution,
     loops: int,
     stdout: bytes,
@@ -369,6 +409,7 @@ def raw_capture_payload(
         },
         "stdout": torch.tensor(list(stdout), dtype=torch.uint8),
         "elapsed_ns": elapsed_ns,
+        "decode_sideband": _sideband_payload(decode_sideband),
         "batches": [{
             "source": batch.source,
             "tid": batch.tid,
@@ -676,6 +717,7 @@ def capture_execution(
     try:
         arm_started_ns = time.perf_counter_ns()
         with PerfMultimodalCapture(config) as capture:
+            decode_sideband = capture.decode_sideband
             target_affinity = tuple(sorted(os.sched_getaffinity(process.pid)))
             if target_affinity != (target_cpu,):
                 raise CaptureAdmissionError(
@@ -703,6 +745,7 @@ def capture_execution(
     counts = _validate_capture(batches, process.pid, target_cpu)
     return CapturedExecution(
         batches=batches,
+        decode_sideband=decode_sideband,
         output=output,
         elapsed_ns=elapsed_ns,
         counts=counts,
@@ -778,10 +821,11 @@ def _phase_summary(entries: Sequence[dict[str, object]]) -> dict[str, object]:
         "pebs_pmu_features",
         "raw_serialization_fsync_hash",
         "derived_sealing",
+        "prospective_scoring",
     )
     result = {}
     for name in names:
-        values = [int(entry["phases_ns"][name]) for entry in entries]
+        values = [int(entry["phases_ns"].get(name, 0)) for entry in entries]
         result[name] = {
             "total_ns": sum(values),
             "median_ns": statistics.median(values),
@@ -822,6 +866,26 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
         data_pages=args.data_pages,
         aux_pages=args.aux_pages,
     )
+    prospective_checkpoint = getattr(args, "prospective_checkpoint", None)
+    prospective_model = None
+    prospective_threshold = None
+    if prospective_checkpoint is not None:
+        prospective_checkpoint = Path(prospective_checkpoint).resolve()
+        metadata = frozen_multimodal_metadata(prospective_checkpoint)
+        if (
+            metadata.get("schema") != "cpu2tensor-frozen-hardware-subject-v1"
+            or metadata.get("subject_identity_sha256")
+            != identity["subject_identity_sha256"]
+            or metadata.get("event_identity_sha256")
+            != identity["event_identity_sha256"]
+            or metadata.get("feature_schema") != MULTIMODAL_FEATURE_SCHEMA
+        ):
+            raise ValueError(
+                "prospective checkpoint differs from the exact subject or event contract"
+            )
+        prospective_model, prospective_threshold = load_frozen_multimodal_model(
+            prospective_checkpoint, device="cpu"
+        )
     raw_retention_fraction = float(getattr(args, "retain_raw_fraction", 1.0))
     if not 0.0 <= raw_retention_fraction <= 1.0:
         raise ValueError("raw retention fraction must be between zero and one")
@@ -884,10 +948,39 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
         )
         admitted_reasons[admission_reason] += 1
         phases_ns = {**captured.phases_ns, **feature_phases_ns}
+        audit_selected = retain_raw_execution(
+            identity["identity_sha256"], execution.execution_id,
+            seed=args.seed, fraction=raw_retention_fraction,
+        )
+        prospective = None
+        if prospective_model is not None:
+            score_started_ns = time.perf_counter_ns()
+            score = float(multimodal_anomaly_score(prospective_model, model_batch)[0])
+            phases_ns["prospective_scoring"] = time.perf_counter_ns() - score_started_ns
+            assert prospective_threshold is not None
+            raw_retained, retention_reason = prospective_retention_decision(
+                score, prospective_threshold, audit_selected=audit_selected
+            )
+            prospective = {
+                "checkpoint_sha256": _sha256(prospective_checkpoint),
+                "score": score,
+                "threshold": prospective_threshold,
+                "alert": score > prospective_threshold,
+                "retention_reason": retention_reason,
+                "scored_before_raw_eviction": True,
+            }
+        else:
+            raw_retained = audit_selected
+            retention_reason = (
+                "preregistered_benign_sample" if raw_retained
+                else "unselected_benign_pretraining"
+            )
+            phases_ns["prospective_scoring"] = 0
         raw_path = artifact / "raw" / f"{execution.execution_id}.pt"
         raw_started_ns = time.perf_counter_ns()
         raw_hash = _atomic_torch_save(raw_path, raw_capture_payload(
-            captured.batches, execution=execution, loops=loops,
+            captured.batches, decode_sideband=captured.decode_sideband,
+            execution=execution, loops=loops,
             stdout=captured.output, elapsed_ns=captured.elapsed_ns,
         ))
         phases_ns["raw_serialization_fsync_hash"] = (
@@ -902,12 +995,9 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             "raw_sha256": raw_hash,
             "batch": _model_payload(model_batch),
             "lanes": [_lane_payload(lane) for lane in lanes],
+            "prospective": prospective,
         })
         phases_ns["derived_sealing"] = time.perf_counter_ns() - derived_started_ns
-        raw_retained = retain_raw_execution(
-            identity["identity_sha256"], execution.execution_id,
-            seed=args.seed, fraction=raw_retention_fraction,
-        )
         if not raw_retained:
             raw_path.unlink()
         availability = {
@@ -928,6 +1018,7 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             "raw_path": str(raw_path.relative_to(artifact)),
             "raw_sha256": raw_hash,
             "raw_retained": raw_retained,
+            "raw_retention_reason": retention_reason,
             "derived_path": str(derived_path.relative_to(artifact)),
             "derived_sha256": derived_hash,
             "stdout_base64": base64.b64encode(captured.output).decode("ascii"),
@@ -942,6 +1033,7 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             },
             "phases_ns": phases_ns,
             "lanes": [_lane_payload(lane) for lane in lanes],
+            "prospective": prospective,
         })
     collection_seconds = time.perf_counter() - collection_started
     phase_costs_ns = _phase_summary(entries)
@@ -987,7 +1079,11 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             "missing_modality_executions": missing_modalities,
             "censored_tokens": censored_tokens,
             "raw_retention": {
-                "method": "sha256_dataset_seed_execution_prefix_v1",
+                "method": (
+                    "frozen_score_then_preregistered_audit_v1"
+                    if prospective_model is not None
+                    else "sha256_dataset_seed_execution_prefix_v1"
+                ),
                 "fraction": raw_retention_fraction,
                 "retained_executions": sum(
                     bool(entry["raw_retained"]) for entry in entries
@@ -995,7 +1091,13 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
                 "discarded_executions": sum(
                     not bool(entry["raw_retained"]) for entry in entries
                 ),
-                "decision_independent_of_trace_and_model": True,
+                "decision_independent_of_trace_and_model": prospective_model is None,
+                "prospective_checkpoint_sha256": (
+                    None if prospective_checkpoint is None
+                    else _sha256(prospective_checkpoint)
+                ),
+                "all_model_alerts_retained": prospective_model is not None,
+                "scoring_precedes_eviction": prospective_model is not None,
             },
         },
         "entries": entries,
@@ -1318,6 +1420,7 @@ def _train_one(
     args: argparse.Namespace,
     artifact: Path,
     whole_modality_probability: float,
+    checkpoint_metadata: dict[str, object],
 ) -> tuple[MaskedHardwareModel, float, dict[str, object]]:
     torch.manual_seed(args.model_seed)
     model = MaskedHardwareModel(MultimodalConfig(
@@ -1343,7 +1446,9 @@ def _train_one(
     )
     checkpoint = artifact / f"{name}.pt"
     temporary = checkpoint.with_name(checkpoint.name + ".partial")
-    save_frozen_multimodal_model(temporary, model, threshold)
+    save_frozen_multimodal_model(
+        temporary, model, threshold, metadata=checkpoint_metadata
+    )
     with temporary.open("rb") as stream:
         os.fsync(stream.fileno())
     temporary.replace(checkpoint)
@@ -1448,6 +1553,13 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
         model, threshold, model_report = _train_one(
             name, training, calibration, args=args, artifact=artifact,
             whole_modality_probability=whole_probability,
+            checkpoint_metadata={
+                "schema": "cpu2tensor-frozen-hardware-subject-v1",
+                "dataset_identity_sha256": manifest["identity_sha256"],
+                "subject_identity_sha256": manifest.get("subject_identity_sha256"),
+                "event_identity_sha256": manifest.get("event_identity_sha256"),
+                "feature_schema": MULTIMODAL_FEATURE_SCHEMA,
+            },
         )
         scoring_started = time.perf_counter()
         familiar_scores = multimodal_anomaly_score(model, familiar)
@@ -1557,6 +1669,11 @@ def parser() -> argparse.ArgumentParser:
         "--retain-raw-fraction", type=float, default=1.0,
         help=("preregistered fraction of benign pretraining raw captures to keep; "
               "derived tensors and custody hashes are always retained"),
+    )
+    result.add_argument(
+        "--prospective-checkpoint", type=Path,
+        help=("frozen exact-subject model used to score each owned raw window before "
+              "eviction; every alert and the preregistered audit sample are retained"),
     )
     result.add_argument("--loop-scale", type=int, default=1)
     result.add_argument("--seed", type=int, default=20260925)

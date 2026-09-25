@@ -105,6 +105,7 @@ _HARDWARE_BATCH_FIELDS = (
     "data_source",
     "exact_ip",
     "trace_bytes",
+    "perf_records",
 )
 
 
@@ -253,9 +254,13 @@ def _validate_hardware_batch(
         batch.data_source,
         batch.exact_ip,
     )
-    for name, tensor in zip(_HARDWARE_BATCH_FIELDS[2:-1], columns):
+    for name, tensor in zip(_HARDWARE_BATCH_FIELDS[2:12], columns):
         _validate_cpu_tensor(tensor, f"{signal}.{name}", dtype=torch.int64)
     _validate_cpu_tensor(batch.trace_bytes, f"{signal}.trace_bytes", dtype=torch.uint8)
+    if batch.perf_records is not None:
+        _validate_cpu_tensor(
+            batch.perf_records, f"{signal}.perf_records", dtype=torch.uint8
+        )
     rows = batch.ip.numel()
     if any(tensor.numel() != rows for tensor in columns):
         raise HardwareFeatureError(f"{signal} columns have different lengths")

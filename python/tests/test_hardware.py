@@ -11,7 +11,8 @@ from unittest import mock
 import torch
 
 from cpu2tensor.hardware import (
-    HardwareBatch, HardwareCaptureError, HardwareConfig, HardwareMultimodalConfig,
+    HardwareBatch, HardwareCaptureError, HardwareConfig, HardwareDecodeSideband,
+    HardwareMultimodalConfig,
     HardwareTraceLost, PerfCapture, PerfMultimodalCapture, PerfMultimodalSession,
     _PerfAttr, _attribute,
     _MultimodalSource, _counter_attribute, _counter_batch, _decode_records,
@@ -127,7 +128,10 @@ class HardwareTests(unittest.TestCase):
         self.assertEqual((memory.flags >> 15) & 3, 2)
         self.assertTrue(memory.flags & (1 << 2))
         self.assertEqual(memory.read_format, 3)
-        self.assertEqual((pt.type, pt.config, pt.sample_type, pt.sample_period), (11, 8193, 0, 0))
+        self.assertEqual((pt.type, pt.config, pt.sample_type, pt.sample_period), (11, 8193, 134, 0))
+        for bit in (8, 9, 13, 17, 18, 23, 24, 25, 26, 28, 29, 30, 33, 34):
+            self.assertTrue(pt.flags & (1 << bit))
+        self.assertEqual(pt.clockid, 4)
         with mock.patch("pathlib.Path.read_text", return_value="not-an-int"):
             with self.assertRaises(HardwareCaptureError):
                 _source_value("missing")
@@ -254,6 +258,7 @@ class HardwareTests(unittest.TestCase):
         self.assertEqual(result.data_source.tolist(), [9])
         self.assertEqual(result.exact_ip.tolist(), [1])
         self.assertEqual(result.trace_bytes.numel(), 0)
+        self.assertEqual(result.perf_records.tolist(), list(data))
         self.assertEqual(_tensor(array("q")).dtype, torch.int64)
         self.assertEqual(_tensor(bytearray()).dtype, torch.uint8)
         stores = _decode_records(data, "memory_stores", 2, b"")
@@ -396,7 +401,14 @@ class HardwareTests(unittest.TestCase):
                            side_effect=[100, 110, 200, 210]), \
                 mock.patch("cpu2tensor.hardware.os.read", side_effect=counter_reads), \
                 mock.patch("cpu2tensor.hardware.fcntl.ioctl", side_effect=ioctl), \
-                mock.patch("cpu2tensor.hardware.os.close") as close:
+                mock.patch("cpu2tensor.hardware.os.close") as close, \
+                mock.patch(
+                    "cpu2tensor.hardware._capture_decode_sideband",
+                    return_value=HardwareDecodeSideband(
+                        "CLOCK_MONOTONIC_RAW", 90, b"maps", b"modules",
+                        b"symbols", b"{}", b"attr",
+                    ),
+                ):
             with capture:
                 batches = capture.stop()
         self.assertEqual(len(batches), 1)
@@ -482,7 +494,14 @@ class HardwareTests(unittest.TestCase):
                            side_effect=range(100, 180, 10)), \
                 mock.patch("cpu2tensor.hardware.os.read", side_effect=reads), \
                 mock.patch("cpu2tensor.hardware.fcntl.ioctl"), \
-                mock.patch("cpu2tensor.hardware.os.close") as close:
+                mock.patch("cpu2tensor.hardware.os.close") as close, \
+                mock.patch(
+                    "cpu2tensor.hardware._capture_decode_sideband",
+                    return_value=HardwareDecodeSideband(
+                        "CLOCK_MONOTONIC_RAW", 90, b"maps", b"modules",
+                        b"symbols", b"{}", b"attr",
+                    ),
+                ):
             with session:
                 results = []
                 for window in range(2):
