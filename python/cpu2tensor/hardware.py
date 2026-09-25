@@ -6,6 +6,7 @@ from __future__ import annotations
 from array import array
 import ctypes
 from dataclasses import dataclass
+import hashlib
 import mmap
 import os
 from pathlib import Path
@@ -48,7 +49,7 @@ _DATA_HEADER_OFFSET = 1024
 _AUX_BAD_FLAGS = 0x0F  # truncated, overwritten, partial, or collided
 _COUNTER_SIGNALS = ("instructions", "cycles", "ref_cycles")
 _MODALITIES = ("intel_pt", "memory_loads", "counters")
-_KERNEL_DECODE_CACHE: tuple[bytes, bytes, bytes, bytes] | None = None
+_KERNEL_DECODE_CACHE: tuple[bytes, bytes, bytes, bytes, str] | None = None
 _SIDEBAND_SAMPLE_FIELDS = (1 << 1) | (1 << 2) | (1 << 7)  # TID, time, CPU.
 _PT_SIDEBAND_FLAGS = (
     (1 << 8)   # mmap
@@ -164,6 +165,7 @@ class HardwareDecodeSideband:
     kernel_symbols: bytes
     module_build_ids_json: bytes
     pt_attribute: bytes
+    kernel_state_sha256: str
 
 
 @dataclass(frozen=True)
@@ -700,26 +702,31 @@ def _module_build_ids() -> bytes:
     return json.dumps(modules, sort_keys=True, separators=(",", ":")).encode()
 
 
-def _kernel_decode_state() -> tuple[bytes, bytes, bytes]:
+def _kernel_decode_state() -> tuple[bytes, bytes, bytes, str]:
     """Reuse boot-static symbols while fail-closing on module-set changes."""
     global _KERNEL_DECODE_CACHE
 
     boot_id = _read_sideband_file(Path("/proc/sys/kernel/random/boot_id"))
     modules = _read_sideband_file(Path("/proc/modules"))
     if _KERNEL_DECODE_CACHE is not None:
-        cached_boot, cached_modules, symbols, build_ids = _KERNEL_DECODE_CACHE
+        cached_boot, cached_modules, symbols, build_ids, identity = _KERNEL_DECODE_CACHE
         if boot_id == cached_boot and modules == cached_modules:
-            return modules, symbols, build_ids
+            return modules, symbols, build_ids, identity
     symbols = _read_sideband_file(Path("/proc/kallsyms"))
     build_ids = _module_build_ids()
-    _KERNEL_DECODE_CACHE = (boot_id, modules, symbols, build_ids)
-    return modules, symbols, build_ids
+    digest = hashlib.sha256()
+    for value in (boot_id, modules, symbols, build_ids):
+        digest.update(len(value).to_bytes(8, "little"))
+        digest.update(value)
+    identity = digest.hexdigest()
+    _KERNEL_DECODE_CACHE = (boot_id, modules, symbols, build_ids, identity)
+    return modules, symbols, build_ids, identity
 
 
 def _capture_decode_sideband(pid: int, pt_attribute: _PerfAttr) -> HardwareDecodeSideband:
     """Snapshot pre-existing decode state inside the open perf session."""
     before = time.clock_gettime_ns(_CLOCK_MONOTONIC_RAW)
-    modules, symbols, build_ids = _kernel_decode_state()
+    modules, symbols, build_ids, identity = _kernel_decode_state()
     return HardwareDecodeSideband(
         clock="CLOCK_MONOTONIC_RAW",
         captured_before_arm_ns=before,
@@ -730,6 +737,7 @@ def _capture_decode_sideband(pid: int, pt_attribute: _PerfAttr) -> HardwareDecod
         pt_attribute=ctypes.string_at(
             ctypes.addressof(pt_attribute), ctypes.sizeof(pt_attribute)
         ),
+        kernel_state_sha256=identity,
     )
 
 

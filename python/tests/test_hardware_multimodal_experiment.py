@@ -104,7 +104,7 @@ class _Capture:
     def __enter__(self):
         self.decode_sideband = HardwareDecodeSideband(
             "CLOCK_MONOTONIC_RAW", 9, b"maps", b"modules", b"symbols",
-            b"{}", b"attr",
+            b"{}", b"attr", "state",
         )
         return self
 
@@ -309,7 +309,7 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                 batches=(_capture_batch(),),
                 decode_sideband=HardwareDecodeSideband(
                     "CLOCK_MONOTONIC_RAW", 9, b"maps", b"modules", b"symbols",
-                    b"{}", b"attr",
+                    b"{}", b"attr", "state",
                 ),
                 output=b"42\n",
                 elapsed_ns=10,

@@ -406,7 +406,7 @@ class HardwareTests(unittest.TestCase):
                     "cpu2tensor.hardware._capture_decode_sideband",
                     return_value=HardwareDecodeSideband(
                         "CLOCK_MONOTONIC_RAW", 90, b"maps", b"modules",
-                        b"symbols", b"{}", b"attr",
+                        b"symbols", b"{}", b"attr", "state",
                     ),
                 ):
             with capture:
@@ -499,7 +499,7 @@ class HardwareTests(unittest.TestCase):
                     "cpu2tensor.hardware._capture_decode_sideband",
                     return_value=HardwareDecodeSideband(
                         "CLOCK_MONOTONIC_RAW", 90, b"maps", b"modules",
-                        b"symbols", b"{}", b"attr",
+                        b"symbols", b"{}", b"attr", "state",
                     ),
                 ):
             with session:

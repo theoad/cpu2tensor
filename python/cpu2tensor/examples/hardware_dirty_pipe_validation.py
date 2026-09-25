@@ -29,6 +29,7 @@ from cpu2tensor.examples.hardware_multimodal_experiment import (
     _sha256,
     capture_execution,
     raw_capture_payload,
+    seal_kernel_decode_state,
     subject_manifest,
 )
 from cpu2tensor.examples.hardware_multimodal_features import HardwareFeatureError
@@ -86,6 +87,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     ]
     random.Random(args.seed).shuffle(schedule)
     rows = []
+    kernel_decode_state = None
     try:
         for pair, arm in schedule:
             execution = PlannedExecution(
@@ -111,11 +113,21 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                         raise
             mutations = _parse_output(captured.output, arm, args.loops)
             evidence = multimodal_anomaly_evidence(model, batch)
+            if kernel_decode_state is None:
+                kernel_decode_state = seal_kernel_decode_state(
+                    artifact, captured.decode_sideband
+                )
+            elif (
+                kernel_decode_state["kernel_state_sha256"]
+                != captured.decode_sideband.kernel_state_sha256
+            ):
+                raise RuntimeError("kernel decode state changed during validation")
             raw_path = artifact / "raw" / f"{execution.execution_id}.pt"
             raw_hash = _atomic_torch_save(
                 raw_path,
                 raw_capture_payload(
                     captured.batches, decode_sideband=captured.decode_sideband,
+                    kernel_decode_state=kernel_decode_state,
                     execution=execution, loops=args.loops,
                     stdout=captured.output, elapsed_ns=captured.elapsed_ns,
                 ),
@@ -178,6 +190,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "sha256": _sha256(checkpoint),
             "threshold": threshold,
         },
+        "kernel_decode_state": kernel_decode_state,
         "protocol": {
             "seed": args.seed,
             "runs_per_arm": args.runs,

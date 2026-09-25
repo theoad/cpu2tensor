@@ -35,7 +35,10 @@ from cpu2tensor.examples.hardware_multimodal_features import (
 
 
 ANOMALY_BUNDLE_SCHEMA = "cpu2tensor-hardware-anomaly-bundle-v3"
-_LEGACY_RAW_SCHEMA = "cpu2tensor-kernel-multimodal-raw-v1"
+_LEGACY_RAW_SCHEMAS = {
+    "cpu2tensor-kernel-multimodal-raw-v1",
+    "cpu2tensor-kernel-multimodal-raw-v2",
+}
 _SEGMENTS = 16
 
 _BIT_FIELDS = {
@@ -269,8 +272,26 @@ def build_bundle(artifact: Path, execution_id: str, checkpoint: Path,
         )
     raw_path = artifact / entry["raw_path"]
     raw = torch.load(raw_path, map_location="cpu", weights_only=True)
-    if raw.get("schema") not in (RAW_SCHEMA, _LEGACY_RAW_SCHEMA):
+    if raw.get("schema") != RAW_SCHEMA and raw.get("schema") not in _LEGACY_RAW_SCHEMAS:
         raise ValueError("unsupported raw capture schema")
+    kernel_decode_source = None
+    if raw.get("schema") == RAW_SCHEMA:
+        try:
+            kernel_decode_source = raw["decode_sideband"]["kernel_decode_state"]
+            kernel_decode_path = artifact / kernel_decode_source["path"]
+        except (KeyError, TypeError) as error:
+            raise ValueError("raw capture omitted exact-session decode state") from error
+        if _sha256(kernel_decode_path) != kernel_decode_source.get("sha256"):
+            raise ValueError("kernel decode state custody hash mismatch")
+        kernel_decode = torch.load(
+            kernel_decode_path, map_location="cpu", weights_only=True
+        )
+        if (
+            kernel_decode.get("schema") != "cpu2tensor-kernel-decode-state-v1"
+            or kernel_decode.get("kernel_state_sha256")
+            != kernel_decode_source.get("kernel_state_sha256")
+        ):
+            raise ValueError("kernel decode state identity mismatch")
     if raw.get("execution") != {
         name: entry[name] for name in (
             "execution_id", "family", "repetition", "partition"
@@ -307,6 +328,7 @@ def build_bundle(artifact: Path, execution_id: str, checkpoint: Path,
             "raw_sha256": entry["raw_sha256"],
             "derived_path": entry["derived_path"],
             "derived_sha256": entry["derived_sha256"],
+            "kernel_decode_state": kernel_decode_source,
         },
         "execution": {
             "id": execution_id,

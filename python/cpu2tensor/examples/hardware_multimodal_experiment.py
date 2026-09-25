@@ -56,7 +56,7 @@ from cpu2tensor.hardware import (
 
 
 SCHEMA = "cpu2tensor-kernel-multimodal-experiment-v1"
-RAW_SCHEMA = "cpu2tensor-kernel-multimodal-raw-v2"
+RAW_SCHEMA = "cpu2tensor-kernel-multimodal-raw-v3"
 DERIVED_SCHEMA = "cpu2tensor-kernel-multimodal-derived-v1"
 SCOPE = "process_kernel"
 PEBS_PERIOD = 10_000
@@ -360,20 +360,50 @@ def _hardware_payload(batch: HardwareBatch | None) -> dict[str, object] | None:
     }
 
 
-def _sideband_payload(sideband: HardwareDecodeSideband) -> dict[str, object]:
-    def owned_bytes(value: bytes) -> torch.Tensor:
-        if not value:
-            return torch.empty(0, dtype=torch.uint8)
-        return torch.frombuffer(bytearray(value), dtype=torch.uint8)
+def _owned_bytes(value: bytes) -> torch.Tensor:
+    if not value:
+        return torch.empty(0, dtype=torch.uint8)
+    return torch.frombuffer(bytearray(value), dtype=torch.uint8)
+
+
+def seal_kernel_decode_state(
+    artifact: Path, sideband: HardwareDecodeSideband,
+) -> dict[str, str]:
+    """Seal boot-static decode state once; individual windows reference it."""
+    path = artifact / "decode" / f"kernel-{sideband.kernel_state_sha256}.pt"
+    if path.exists():
+        sha256 = _sha256(path)
+    else:
+        sha256 = _atomic_torch_save(path, {
+            "schema": "cpu2tensor-kernel-decode-state-v1",
+            "kernel_state_sha256": sideband.kernel_state_sha256,
+            "kernel_modules": _owned_bytes(sideband.kernel_modules),
+            "kernel_symbols": _owned_bytes(sideband.kernel_symbols),
+            "module_build_ids_json": _owned_bytes(sideband.module_build_ids_json),
+        })
+    return {
+        "path": str(path.relative_to(artifact)),
+        "sha256": sha256,
+        "kernel_state_sha256": sideband.kernel_state_sha256,
+    }
+
+
+def _sideband_payload(
+    sideband: HardwareDecodeSideband,
+    kernel_decode_state: dict[str, str],
+) -> dict[str, object]:
+    if (
+        kernel_decode_state.get("kernel_state_sha256")
+        != sideband.kernel_state_sha256
+    ):
+        raise HardwareCaptureError("kernel decode state changed during collection")
 
     return {
         "clock": sideband.clock,
         "captured_before_arm_ns": sideband.captured_before_arm_ns,
-        "process_maps": owned_bytes(sideband.process_maps),
-        "kernel_modules": owned_bytes(sideband.kernel_modules),
-        "kernel_symbols": owned_bytes(sideband.kernel_symbols),
-        "module_build_ids_json": owned_bytes(sideband.module_build_ids_json),
-        "pt_attribute": owned_bytes(sideband.pt_attribute),
+        "process_maps": _owned_bytes(sideband.process_maps),
+        "pt_attribute": _owned_bytes(sideband.pt_attribute),
+        "kernel_decode_state": dict(kernel_decode_state),
     }
 
 
@@ -397,6 +427,7 @@ def raw_capture_payload(
     batches: Sequence[HardwareMultimodalBatch],
     *,
     decode_sideband: HardwareDecodeSideband,
+    kernel_decode_state: dict[str, str],
     execution: PlannedExecution,
     loops: int,
     stdout: bytes,
@@ -412,7 +443,9 @@ def raw_capture_payload(
         },
         "stdout": torch.tensor(list(stdout), dtype=torch.uint8),
         "elapsed_ns": elapsed_ns,
-        "decode_sideband": _sideband_payload(decode_sideband),
+        "decode_sideband": _sideband_payload(
+            decode_sideband, kernel_decode_state
+        ),
         "batches": [{
             "source": batch.source,
             "tid": batch.tid,
@@ -908,6 +941,7 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
     total_attempts = 0
     missing_modalities = {"pt": 0, "pebs": 0, "pmu": 0}
     censored_tokens = {"pt": 0, "pebs": 0, "pmu": 0}
+    kernel_decode_state = None
     for execution in plan:
         loops = WORKLOAD_LOOPS[execution.family] * args.loop_scale
         for attempt in range(args.capture_retries + 1):
@@ -950,6 +984,15 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             "zero_pebs_with_exact_affinity"
         )
         admitted_reasons[admission_reason] += 1
+        if kernel_decode_state is None:
+            kernel_decode_state = seal_kernel_decode_state(
+                artifact, captured.decode_sideband
+            )
+        elif (
+            kernel_decode_state["kernel_state_sha256"]
+            != captured.decode_sideband.kernel_state_sha256
+        ):
+            raise RuntimeError("kernel decode state changed during collection")
         phases_ns = {**captured.phases_ns, **feature_phases_ns}
         audit_selected = retain_raw_execution(
             identity["identity_sha256"], execution.execution_id,
@@ -983,6 +1026,7 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
         raw_started_ns = time.perf_counter_ns()
         raw_hash = _atomic_torch_save(raw_path, raw_capture_payload(
             captured.batches, decode_sideband=captured.decode_sideband,
+            kernel_decode_state=kernel_decode_state,
             execution=execution, loops=loops,
             stdout=captured.output, elapsed_ns=captured.elapsed_ns,
         ))
@@ -1103,6 +1147,7 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
                 "scoring_precedes_eviction": prospective_model is not None,
             },
         },
+        "kernel_decode_state": kernel_decode_state,
         "entries": entries,
     }
     manifest["manifest_content_sha256"] = _json_hash(manifest)
