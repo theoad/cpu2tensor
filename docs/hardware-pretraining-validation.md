@@ -146,22 +146,35 @@ requires independent review.
 
 ## Later CVE gates
 
-Each known-vulnerability experiment is a blinded $2 \times 2$ factorial:
+Each known-vulnerability experiment is a blinded $2 \times 2$ factorial over
+two unmodified production distribution packages from the same series and
+flavor:
 
 | | Lawful matched sibling | Exact trigger |
 | --- | --- | --- |
 | Fixed build | expected negative | trigger-novelty control |
 | Vulnerable build | workload control | candidate manifestation |
 
-Build the pair from one source tree, configuration, compiler, and boot manifest,
-changing only the security fix. Include lawful siblings from both builds in benign
-training so build identity is not the anomaly. Freeze the model and threshold
-before revealing outcomes. The primary effect is
+Do not rebuild either kernel for validation. Cryptographically identify its
+shipped binary, modules, initramfs, config, command line, and microcode, and
+reject diagnostic flavors. Because the project learns one executable on one
+hardware configuration, train and calibrate a separate model on benign workloads
+from each exact boot manifest. Never ask one model to normalize build identity.
+Freeze both models and thresholds before revealing the hidden trigger labels.
+Compare empirical calibration-tail probabilities, or scores standardized only
+against their own build's held-out benign calibration distribution. The primary
+effect is then the difference between the two within-build trigger effects:
 
 $$
-(s_{\mathrm{vulnerable,trigger}}-s_{\mathrm{vulnerable,sibling}})
--(s_{\mathrm{fixed,trigger}}-s_{\mathrm{fixed,sibling}}).
+(z_{\mathrm{vulnerable,trigger}}-z_{\mathrm{vulnerable,sibling}})
+-(z_{\mathrm{fixed,trigger}}-z_{\mathrm{fixed,sibling}}),
 $$
+
+where each $z$ is calibrated only on its own exact production subject. Archived
+packages can contain unrelated vendor changes, so the fixed arm is a secondary
+lawful counterfactual rather than proof that every score difference is caused by
+one source patch. Package provenance and the actual backported fix commit must be
+verified independently.
 
 If both trigger cells score highly, the model recognized an unusual syscall
 sequence rather than the defect. For probabilistic races, record an additional

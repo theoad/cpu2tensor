@@ -233,7 +233,9 @@ class HardwareMultimodalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "multimodal.pt"
             save_frozen_multimodal_model(path, model, threshold)
+            torch.set_num_threads(2)
             restored, restored_threshold = load_frozen_multimodal_model(path)
+            self.assertEqual(torch.get_num_threads(), 1)
             restored_scores = multimodal_anomaly_score(restored, training)
 
         self.assertEqual(restored_threshold, threshold)

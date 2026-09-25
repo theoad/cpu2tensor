@@ -35,10 +35,13 @@ does not, provided its checkpoint and input manifests are durable.
 
 Preferred topology:
 
-1. One on-demand `c5.metal` collector in `us-east-1a`, with the exact qualified
-   AMI, kernel, CPU topology, and capture revision. Spot is inappropriate for the
-   collector unless a reboot is explicitly admitted as a separate subject.
-2. One Spot `p5.4xlarge` trainer in the same Availability Zone. AWS documents one
+1. The controlled physical `trail-x86` machine is the only collector. Use its
+   unmodified signed production kernel, fixed boot, microcode, CPU topology,
+   frequency policy, and capture revision. A cloud bare-metal machine is not a
+   substitute: its platform, firmware, interrupts, NUMA layout, and devices are
+   a different learned subject even if it exposes Intel PT and PEBS.
+2. One Spot `p5.4xlarge` trainer may consume immutable shards without ever
+   contributing traces. AWS documents one
    NVIDIA H100 with 80 GiB HBM3, 16 vCPUs, 256 GiB host RAM, and 3.84 TB local
    NVMe for this type. The current account has 16 P-Spot vCPUs, exactly one such
    instance, while P on-demand quota is zero.
@@ -48,8 +51,7 @@ Preferred topology:
    unrelated bucket is insufficient. NVMe is a cache, never the sole copy.
 
 As observed through the AWS APIs on 2026-09-25, `p5.4xlarge` Spot was about
-$2.60/hour and shared-tenancy Linux `c5.metal` on demand was $4.08/hour in
-`us-east-1`. That is approximately $160.24 for 24 hours of compute, or $173.59
+$2.60/hour in `us-east-1`. That is approximately $62.40 for 24 hours, or $67.60
 at the 26-hour hard stop, before block/object storage and taxes. Prices and Spot
 capacity are not a launch guarantee. Query price, quota, capacity, and storage
 rates again before approval, and require a separately approved campaign ceiling.
@@ -59,14 +61,12 @@ approximately $51.80. Use a provisional $250 campaign ceiling, excluding taxes
 and longer retention, only after explicit approval. Spot placement scored 1/10
 in every offered `us-east-1` P5 Availability Zone during the audit, so replacement
 capacity cannot be assumed.
-The local `trail-x86` collector is preferable only if a 1 GiB
-transfer probe sustains twice the measured producer rate and the host can remain
-powered, thermally stable, and uncontended for 24 hours.
-
-Normal EC2 virtual machines are not collector substitutes unless Intel PT, real
-PEBS, non-multiplexed PMUs, target attribution, clock conversion, and CPU pinning
-all pass on that exact instance. Even then they define a different virtualized
-subject.
+Before a 24-hour launch, `trail-x86` still needs a 1 GiB transfer probe above
+twice the bounded producer rate, a rolling-retention path that fits its limited
+local disk, and a demonstrated powered, thermally stable, uncontended day. If
+those fail, the campaign pauses; it does not move collection into AWS. Normal or
+bare-metal EC2 machines may be separate subjects for separate studies, never
+proxies for the physical host distribution learned here.
 
 ## Data and capacity ladder
 

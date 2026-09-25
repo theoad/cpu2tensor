@@ -271,7 +271,7 @@ denser PEBS replay.
 ## Bare-metal 5.16.10 and Dirty Pipe boundary
 
 The first known-CVE hardware validation ran on an AWS `c5.metal` host with an
-optimized upstream `5.16.10-cpu2tensor-dirtypipe` kernel, boot
+instrumented upstream `5.16.10-cpu2tensor-dirtypipe` kernel, boot
 `56bee244-ea31-4b36-b7ce-773b09d34ffd`. A fresh broad pretraining corpus retained
 204/204 first-attempt executions, 320,535,776 PT bytes, and 2,942 exact usable
 PEBS load samples with no censored sample. Its manifest, fused checkpoint, and
@@ -296,6 +296,40 @@ linear probe trained on a separate session also failed to generalize, reaching
 20-loop and 200-loop report SHA-256 values are
 `2d6296dfe62f394f123b9c653b0e4abbde7a5ca4d97993c10fdcf1faf0779372`
 and `11990552e48990d21a7a7fdfc6538fd816ba4c10cf6d06435df4c2f696feb96c`.
+
+This first subject is not a production release subject: its inherited
+configuration includes
+`CONFIG_UBSAN=y`, `CONFIG_DEBUG_KERNEL=y`, `CONFIG_SLUB_DEBUG=y`, and related
+diagnostic behavior. The campaign attempted to establish a lawful fixed-arm
+comparison by building upstream 5.16.10 and 5.16.11 with one compiler and
+otherwise matched normalized configurations, disabling UBSAN, KASAN, KCSAN,
+KCOV, SLUB debugging, lockdep, proving locks, and debug info. The vulnerable
+kernel, config, and normalized-config SHA-256 values are
+`be1a7e7aa5151f1e0c377e52b98ce21cd9a53b9aef25b53f196c09a28c72478e`,
+`6c6452e32362272ff33f409fd0649e46144b666ef3d6f017d9b56b9654146a25`,
+and `2f7c7026b447e8a128da45a9709a470bc9b0ce625871ed1e4660d40714ffbc55`.
+The fixed values are
+`200146b5bffb59f518e33b15ecf89e7947a67efb665607049fef86f17f3f9268`,
+`bcc27601bdd8209b98a0a116234b5b8f35de7457782fb27411ad423177f4531d`,
+and `112a332d19911d857b21e3e18876214b7c5ce748f1cdf360c618bc9668636954`.
+The normalized configs differ only in the generated version comment and an
+obsolete 5.16.10-only `IWLWIFI_BCAST_FILTERING` symbol. `CONFIG_DEBUG_KERNEL`
+remains selected indirectly with diagnostic facilities. These images are
+therefore rejected as validation subjects; being less instrumented is not the
+same as being production-equivalent.
+
+The learned subject and every validation arm must instead use an unmodified,
+cryptographically identified production distribution kernel binary, modules,
+initramfs, command line, microcode, and configuration. Collection may use
+privileged hardware perf facilities, but it must not rebuild, patch, or enable
+debug behavior in that subject. Before admission, audit the shipped config and
+runtime command line for sanitizers, KCOV, lock debugging, slab debugging,
+assertion-heavy modes, and diagnostic-only allocators; if a vendor flavor
+enables them, choose a normal production flavor that does not. Known-CVE
+validation should use archived vulnerable and fixed production packages from
+the same distribution series and flavor. Each arm must boot, expose the
+expected canary outcome, and produce comparable PT, PEBS, and PMU custody before
+the matched-CVE gate can pass.
 
 This is an expected sensor boundary, not a detected vulnerability. Both canary
 arms execute the vulnerable splice/write path; one writes different bytes while

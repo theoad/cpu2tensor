@@ -706,10 +706,18 @@ def save_frozen_multimodal_model(
         raise RuntimeError("only a frozen model can be saved for inference")
     if not torch.isfinite(torch.tensor(threshold)):
         raise ValueError("threshold must be finite")
+    device_type = next(model.parameters()).device.type
     torch.save({
         "config": asdict(model.config),
         "state": model.state_dict(),
         "threshold": float(threshold),
+        "inference": {
+            # CPU reductions can change by one or more ULPs when Torch changes
+            # its intra-op partition. At a calibrated threshold, that is enough
+            # to turn a retained calibration row into a false alert. Preserve
+            # the thread count as part of the frozen inference contract.
+            "cpu_threads": torch.get_num_threads() if device_type == "cpu" else None,
+        },
     }, path)
 
 
@@ -720,6 +728,14 @@ def load_frozen_multimodal_model(
 ) -> tuple[MaskedHardwareModel, float]:
     checkpoint = torch.load(path, map_location=device, weights_only=True)
     try:
+        inference = checkpoint.get("inference", {})
+        cpu_threads = inference.get("cpu_threads")
+        if cpu_threads is not None:
+            if (not isinstance(cpu_threads, int) or isinstance(cpu_threads, bool)
+                    or cpu_threads <= 0):
+                raise ValueError("invalid frozen CPU thread count")
+            if torch.device(device).type == "cpu":
+                torch.set_num_threads(cpu_threads)
         model = MaskedHardwareModel(MultimodalConfig(**checkpoint["config"])).to(device)
         model.load_state_dict(checkpoint["state"])
         threshold = float(checkpoint["threshold"])
