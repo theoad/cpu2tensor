@@ -402,6 +402,7 @@ def _sideband_payload(
         "clock": sideband.clock,
         "captured_before_arm_ns": sideband.captured_before_arm_ns,
         "process_maps": _owned_bytes(sideband.process_maps),
+        "kernel_modules": _owned_bytes(sideband.kernel_modules),
         "pt_attribute": _owned_bytes(sideband.pt_attribute),
         "kernel_decode_state": dict(kernel_decode_state),
     }
@@ -941,7 +942,7 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
     total_attempts = 0
     missing_modalities = {"pt": 0, "pebs": 0, "pmu": 0}
     censored_tokens = {"pt": 0, "pebs": 0, "pmu": 0}
-    kernel_decode_state = None
+    kernel_decode_states: dict[str, dict[str, str]] = {}
     for execution in plan:
         loops = WORKLOAD_LOOPS[execution.family] * args.loop_scale
         for attempt in range(args.capture_retries + 1):
@@ -984,15 +985,13 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             "zero_pebs_with_exact_affinity"
         )
         admitted_reasons[admission_reason] += 1
+        state_id = captured.decode_sideband.kernel_state_sha256
+        kernel_decode_state = kernel_decode_states.get(state_id)
         if kernel_decode_state is None:
             kernel_decode_state = seal_kernel_decode_state(
                 artifact, captured.decode_sideband
             )
-        elif (
-            kernel_decode_state["kernel_state_sha256"]
-            != captured.decode_sideband.kernel_state_sha256
-        ):
-            raise RuntimeError("kernel decode state changed during collection")
+            kernel_decode_states[state_id] = kernel_decode_state
         phases_ns = {**captured.phases_ns, **feature_phases_ns}
         audit_selected = retain_raw_execution(
             identity["identity_sha256"], execution.execution_id,
@@ -1147,7 +1146,11 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
                 "scoring_precedes_eviction": prospective_model is not None,
             },
         },
-        "kernel_decode_state": kernel_decode_state,
+        "kernel_decode_state": (
+            next(iter(kernel_decode_states.values()))
+            if len(kernel_decode_states) == 1 else None
+        ),
+        "kernel_decode_states": list(kernel_decode_states.values()),
         "entries": entries,
     }
     manifest["manifest_content_sha256"] = _json_hash(manifest)

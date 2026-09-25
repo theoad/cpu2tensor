@@ -104,7 +104,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     ]
     random.Random(args.seed).shuffle(schedule)
     rows = []
-    kernel_decode_state = None
+    kernel_decode_states: dict[str, dict[str, str]] = {}
     try:
         for pair, arm in schedule:
             execution = PlannedExecution(
@@ -130,15 +130,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                         raise
             mutations = _parse_output(captured.output, arm, args.loops)
             evidence = multimodal_anomaly_evidence(model, batch)
+            state_id = captured.decode_sideband.kernel_state_sha256
+            kernel_decode_state = kernel_decode_states.get(state_id)
             if kernel_decode_state is None:
                 kernel_decode_state = seal_kernel_decode_state(
                     artifact, captured.decode_sideband
                 )
-            elif (
-                kernel_decode_state["kernel_state_sha256"]
-                != captured.decode_sideband.kernel_state_sha256
-            ):
-                raise RuntimeError("kernel decode state changed during validation")
+                kernel_decode_states[state_id] = kernel_decode_state
             raw_path = artifact / "raw" / f"{execution.execution_id}.pt"
             raw_hash = _atomic_torch_save(
                 raw_path,
@@ -216,7 +214,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "sha256": _sha256(checkpoint),
             "threshold": threshold,
         },
-        "kernel_decode_state": kernel_decode_state,
+        "kernel_decode_state": (
+            next(iter(kernel_decode_states.values()))
+            if len(kernel_decode_states) == 1 else None
+        ),
+        "kernel_decode_states": list(kernel_decode_states.values()),
         "protocol": {
             "seed": args.seed,
             "runs_per_arm": args.runs,

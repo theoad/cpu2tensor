@@ -110,6 +110,14 @@ and a measured perturbation baseline still need a physical Windows host.
 
 ## Evidence and next work
 
+The local `HWTracing` project is a possible future collector for this same
+physical host. It aims to configure PT, PEBS, and PMU capture before the OS
+starts and record boot execution independently of Linux perf. Its removable
+media currently supplies the next workload; the host's USB Ethernet connection
+could later support trace transfer and episode control. This has not been
+integrated or measured here. The current kernel pretraining subject uses perf's
+mapping and symbol sideband for running-kernel evidence.
+
 On 2026-09-24, the `trail-x86` Linux x86-64 host exposed `cpu` and `intel_pt`
 PMUs and an Intel `mem-loads` alias. Real bounded user-process captures
 returned cycle samples, instruction samples, precise memory-load samples, and

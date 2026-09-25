@@ -10,6 +10,7 @@ from unittest import mock
 
 import torch
 
+from cpu2tensor import hardware
 from cpu2tensor.hardware import (
     HardwareBatch, HardwareCaptureError, HardwareConfig, HardwareDecodeSideband,
     HardwareMultimodalConfig,
@@ -31,6 +32,35 @@ def record(kind: int, payload: bytes = b"", *, misc: int = 0) -> bytes:
 
 
 class HardwareTests(unittest.TestCase):
+    def test_kernel_decode_cache_ignores_refcounts_but_tracks_module_mapping(self) -> None:
+        module_rows = iter((
+            b"wifi 100 0 - Live 0xffffffffc0010000\n",
+            b"wifi 100 1 - Live 0xffffffffc0010000\n",
+            b"wifi 100 0 - Live 0xffffffffc0010000\n"
+            b"crypto 200 0 - Live 0xffffffffc0020000\n",
+        ))
+        symbols = mock.Mock(return_value=b"ffffffffc0010000 T wifi_symbol\n")
+
+        def read(path):
+            if path.name == "boot_id":
+                return b"boot\n"
+            if path.name == "modules":
+                return next(module_rows)
+            if path.name == "kallsyms":
+                return symbols()
+            raise AssertionError(path)
+
+        with mock.patch.object(hardware, "_KERNEL_DECODE_CACHE", None), \
+                mock.patch.object(hardware, "_read_sideband_file", side_effect=read), \
+                mock.patch.object(hardware, "_module_build_ids", return_value=b"{}"):
+            first = hardware._kernel_decode_state()
+            second = hardware._kernel_decode_state()
+            third = hardware._kernel_decode_state()
+        self.assertNotEqual(first[0], second[0])
+        self.assertEqual(first[3], second[3])
+        self.assertNotEqual(first[3], third[3])
+        self.assertEqual(symbols.call_count, 2)
+
     def test_multimodal_config_requires_a_ready_process_and_known_sources(self) -> None:
         config = HardwareMultimodalConfig("process_kernel", 7)
         self.assertEqual(

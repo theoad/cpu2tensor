@@ -305,6 +305,9 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
             execution = experiment.PlannedExecution(
                 "getpid-00000", "getpid", 0, "training"
             )
+            next_execution = experiment.PlannedExecution(
+                "getpid-00001", "getpid", 1, "training"
+            )
             captured = experiment.CapturedExecution(
                 batches=(_capture_batch(),),
                 decode_sideband=HardwareDecodeSideband(
@@ -331,6 +334,14 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                     "workload": 3,
                     "stop_drain_decode": 4,
                 },
+            )
+            next_capture = replace(
+                captured,
+                decode_sideband=replace(
+                    captured.decode_sideband,
+                    kernel_modules=b"different module mapping",
+                    kernel_state_sha256="state-2",
+                ),
             )
             lane = argparse.Namespace(
                 tid=77, observed_cpu=2, migration_verified=True, pebs_samples=1
@@ -369,7 +380,9 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                     ) as set_affinity, mock.patch.object(
                         experiment.torch, "set_num_threads", new=set_num_threads,
                     ), mock.patch.object(
-                        experiment, "make_plan", return_value=((execution,), ("openat",)),
+                        experiment, "make_plan", return_value=(
+                            (execution, next_execution), ("openat",),
+                        ),
                     ), mock.patch.object(
                         experiment, "subject_manifest", return_value={
                             "identity_sha256": "identity",
@@ -382,6 +395,7 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                                 "source_reported_loss", "lost"
                             ),
                             captured,
+                            next_capture,
                         ),
                     ), mock.patch.object(
                         experiment, "_featurize_capture", side_effect=featurize,
@@ -394,11 +408,13 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
             [mock.call(0, {3}), mock.call(0, {2, 3})],
         )
         admission = manifest["collection"]["admission"]
-        self.assertEqual(admission["total_attempts"], 3)
+        self.assertEqual(admission["total_attempts"], 4)
         self.assertEqual(
             admission["rejected"], {"empty_pt": 1, "source_reported_loss": 1}
         )
-        self.assertEqual(admission["admitted"], {"sampled_pebs": 1})
+        self.assertEqual(admission["admitted"], {"sampled_pebs": 2})
+        self.assertEqual(len(manifest["kernel_decode_states"]), 2)
+        self.assertIsNone(manifest["kernel_decode_state"])
         self.assertEqual(manifest["collection"]["loss_count"], 1)
         self.assertGreaterEqual(manifest["collection"]["unaccounted_wall_ns"], 0)
         self.assertEqual(manifest["entries"][0]["admission"]["attempt"], 3)
@@ -407,7 +423,7 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
             "method": "sha256_dataset_seed_execution_prefix_v1",
             "fraction": 0.0,
             "retained_executions": 0,
-            "discarded_executions": 1,
+            "discarded_executions": 2,
             "decision_independent_of_trace_and_model": True,
             "prospective_checkpoint_sha256": None,
             "all_model_alerts_retained": False,

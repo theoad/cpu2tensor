@@ -702,24 +702,36 @@ def _module_build_ids() -> bytes:
     return json.dumps(modules, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _module_decode_identity(modules: bytes) -> bytes:
+    """Identify module mappings without volatile reference counts or list order."""
+    mappings = []
+    for line in modules.splitlines():
+        fields = line.split()
+        if len(fields) != 6:
+            raise HardwareCaptureError("Cannot parse required kernel module mapping")
+        mappings.append(b" ".join((fields[0], fields[1], fields[3], fields[4], fields[5])))
+    return b"\n".join(sorted(mappings))
+
+
 def _kernel_decode_state() -> tuple[bytes, bytes, bytes, str]:
-    """Reuse boot-static symbols while fail-closing on module-set changes."""
+    """Reuse symbols while the boot's address-bearing module map is stable."""
     global _KERNEL_DECODE_CACHE
 
     boot_id = _read_sideband_file(Path("/proc/sys/kernel/random/boot_id"))
     modules = _read_sideband_file(Path("/proc/modules"))
+    module_identity = _module_decode_identity(modules)
     if _KERNEL_DECODE_CACHE is not None:
         cached_boot, cached_modules, symbols, build_ids, identity = _KERNEL_DECODE_CACHE
-        if boot_id == cached_boot and modules == cached_modules:
+        if boot_id == cached_boot and module_identity == cached_modules:
             return modules, symbols, build_ids, identity
     symbols = _read_sideband_file(Path("/proc/kallsyms"))
     build_ids = _module_build_ids()
     digest = hashlib.sha256()
-    for value in (boot_id, modules, symbols, build_ids):
+    for value in (boot_id, module_identity, symbols, build_ids):
         digest.update(len(value).to_bytes(8, "little"))
         digest.update(value)
     identity = digest.hexdigest()
-    _KERNEL_DECODE_CACHE = (boot_id, modules, symbols, build_ids, identity)
+    _KERNEL_DECODE_CACHE = (boot_id, module_identity, symbols, build_ids, identity)
     return modules, symbols, build_ids, identity
 
 
