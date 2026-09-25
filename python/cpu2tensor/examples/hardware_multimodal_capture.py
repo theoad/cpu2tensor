@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import random
 import statistics
 import subprocess
@@ -21,6 +23,59 @@ ARMS = {
     "pt_pmu": ("intel_pt", "counters"),
     "pt_pebs_pmu": ("intel_pt", "memory_loads", "counters"),
 }
+
+
+def _read(path: str) -> str | None:
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return None
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _optional_sha256(path: str) -> str | None:
+    try:
+        return _sha256(Path(path))
+    except OSError:
+        return None
+
+
+def _cpu_model() -> str | None:
+    text = _read("/proc/cpuinfo")
+    if text is None:
+        return None
+    for line in text.splitlines():
+        if line.startswith("model name") and ":" in line:
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def _subject(binary: Path) -> dict[str, object]:
+    """Identify the exact host/boot/build whose distribution is being learned."""
+    module = Path(__file__)
+    hardware = module.parents[1] / "hardware.py"
+    return {
+        "host": platform.node(),
+        "machine": platform.machine(),
+        "cpu_model": _cpu_model(),
+        "kernel_release": platform.release(),
+        "kernel_version": platform.version(),
+        "boot_id": _read("/proc/sys/kernel/random/boot_id"),
+        "microcode": _read("/sys/devices/system/cpu/cpu0/microcode/version"),
+        "kernel_btf_sha256": _optional_sha256("/sys/kernel/btf/vmlinux"),
+        "kernel_notes_sha256": _optional_sha256("/sys/kernel/notes"),
+        "perf_event_paranoid": _read("/proc/sys/kernel/perf_event_paranoid"),
+        "workload_sha256": _sha256(binary),
+        "capture_module_sha256": _sha256(module),
+        "hardware_module_sha256": _sha256(hardware),
+    }
 
 
 def _run_target(args: argparse.Namespace, arm: str) -> dict[str, object]:
@@ -156,6 +211,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     return {
         "schema": "cpu2tensor-hardware-multimodal-qualification-v1",
         "binary": str(args.binary.resolve()),
+        "subject": _subject(args.binary.resolve()),
         "family": args.family,
         "loops": args.loops,
         "cpu": args.cpu,
