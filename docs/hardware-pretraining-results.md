@@ -480,17 +480,42 @@ signed image and base module package were installed without changing the
 permanent GRUB default. Their SHA-256 values are
 `a822bd320e16ced00ed434793dd33f6799016862c0294a46f5ec3314eed01b75` and
 `4262902743dffc76f510d924dc8f2c2a295bb18d2e3e3bee7ba54b616d569997`.
-The generated initramfs contains the laptop's NVMe and `e1000e` drivers and the
-package database is clean. The one-shot boot reached the desktop, and the local
-`uname` reported `5.13.0-30-generic`; its wired interface was DOWN and the host
-did not regain network presence. Capture qualification awaits network recovery.
-No vulnerable-arm or CVE-sensitivity claim is made.
+The one-shot boot reached the desktop and `uname` reported
+`5.13.0-30-generic`. The built-in wired interface remained DOWN, but Wi-Fi and
+USB Ethernet were restored using the exact archived extra modules and installed
+firmware. The package database is clean; the extra module files are official
+package contents copied into `/lib/modules`, not dpkg-managed. The vulnerable
+boot ID is `31179aea-9a43-4c5d-8bf6-1205735e42c4`.
 
-The full 278-test local suite passes with 75 platform skips at commit `ad17739`.
-The 24-hour campaign remains **NO-GO** pending hardware capture on the booted
-vulnerable production kernel, subject-matched training and blinded trigger/sibling
-validation, and semantic Intel PT packet/address decoding from the preserved
-same-session sideband.
+On that same physical boot, two tri-modal mmap qualification captures had PT,
+exact-IP PEBS, and nonmultiplexed PMU data without loss. A first larger benign
+run stopped after 1,867 executions when a transient `/proc/modules` change
+tripped the decode-state guard. Commit `7e62e82` ignores volatile module
+refcounts while retaining mapping-bearing changes as separate decode-state
+generations. A fresh run then completed 3,060/3,060 executions without retry
+or loss: 5,126,204,720 PT bytes in 107.54 seconds, or 28.45 sealed
+executions/s on the i7-10510U laptop. It trained a subject-matched frozen
+fused checkpoint, SHA-256
+`110c2cadf89c9dc5de10adcd4b34cbb89a0237c3c0ba1a9b3ace366952787e4f`.
+Its 1,008-execution calibration is only a pilot, not evidence for an operational
+1,000-per-million review rate.
+
+The blinded vulnerable Dirty Pipe canary then completed 12 effect and 12
+neutral executions, each on its first attempt without trace loss. Every effect
+execution manifested all 20 requested page-cache mutations. The frozen model
+scored before labels were unblinded, but achieved only AUROC 0.6319 and 8/12
+paired effect wins; at its pilot threshold it alerted on 4/12 effect and 2/12
+neutral executions. The content-hashed report is
+`83c638c4246f403fbf13ca40a5694209e39ddeabfaab9c56980efc207a80bc18`.
+This proves the controlled vulnerable behavior and the end-to-end validation
+path, **not** useful anomaly sensitivity or a review-rate claim. All 24 raw
+captures and their exact decode state remain preserved for diagnosis.
+
+The full 278-test local suite passed with 75 platform skips before the
+decode-generation change; its focused 31-test suite passed afterward. The
+24-hour campaign remains **NO-GO** pending materially better known-CVE
+sensitivity, independent calibration, and semantic Intel PT packet/address
+decoding from the preserved same-session sideband.
 
 ## Small-model control
 

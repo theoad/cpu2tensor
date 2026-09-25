@@ -92,12 +92,15 @@ deduplicated exact-boot decode state. A nine-execution physical smoke retained
 all three alerts and safely evicted six below-threshold rows after scoring. A
 blind 8+8 Dirty Pipe control on the fixed production kernel manifested no
 mutation, as expected, but an intentionally tiny smoke model could not separate
-effect from neutral inputs. The first archived vulnerable production candidate,
-Ubuntu `5.13.0-30.33`, passed package, initramfs, and driver preflight and
-booted to the desktop; the wired interface remained DOWN, so remote capture is
-pending network recovery. Next: restore the host connection, train and
-calibrate independently on that exact subject, run the still-blind matched arm,
-and wire semantic Intel PT decode over the now-complete original sideband.
+effect from neutral inputs. The archived vulnerable Ubuntu `5.13.0-30.33`
+subject is now reachable over Wi-Fi and USB Ethernet. It completed 3,060 benign
+tri-modal captures and subject-matched frozen training. A blind 12+12 Dirty
+Pipe validation manifested all effect mutations, but fused-model separation
+was weak (AUROC 0.6319; 4/12 effect alerts versus 2/12 neutral). Next:
+diagnose the retained raw effect/sibling pairs and improve generic
+invariant-bearing observation before scaling the campaign; wire semantic Intel
+PT decode over the complete same-session sideband. The 24-hour campaign
+remains **NO-GO**.
 
 ## Completed first iteration: AArch64 observation to MPS
 
