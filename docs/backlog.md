@@ -77,11 +77,14 @@ over clean evidence. Whole-modality masking beat span-only on every swap. The
 gate also found two decisive blockers: PEBS timestamp permutation stayed at
 0.996 times clean, and 14/36 unseen benign executions alerted, including every
 held-out `memfd` execution. Finite capture plus Python featurization reached only
-1.069 executions/s. The 24-hour campaign remains **NO-GO** until timing learning,
-benign-family generalization, and the data path improve on a fresh retained split,
-then the same tri-modal qualification must pass on the exact `c5.metal` collector
-for three sessions. P5 Spot replacement capacity also scored only 1/10 and cannot
-be assumed. The deterministic health schema and bounded adjustment policy are
+1.069 executions/s; 88.40% of wall time was the current 16-pass PT histogram.
+The retry-until-PEBS-positive rule also biases short executions and must become
+explicit zero-sample availability under verified affinity. The 24-hour campaign
+remains **NO-GO** until timing learning, benign-family generalization, and the
+native persistent data path improve on a fresh retained split, then the same
+tri-modal qualification must pass on the exact `c5.metal` collector for three
+sessions. P5 Spot replacement capacity also scored only 1/10 and cannot be
+assumed. The deterministic health schema and bounded adjustment policy are
 implemented and tested; they are procedure machinery, not launch qualification.
 
 ## Completed first iteration: AArch64 observation to MPS

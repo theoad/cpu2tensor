@@ -81,6 +81,18 @@ S3 campaign budget. Require sustained verified upload above twice measured
 production and at least 50 MiB/s. Use 128--256 MiB shards. Derived tensors may
 remain reproducible local artifacts rather than duplicating another full corpus.
 
+The real 204-execution tri-modal runner produced 8.47 MB of PT per execution and
+spent 88.40% of its wall time in the current Python histogram path. Persisting
+that volume at the desired eventual aggregate rate is impossible: 100,000
+executions/s would approach 847 GB/s and 73 PB/day. The high-rate design must
+therefore keep long-lived per-core perf sessions, continuously drain and score
+bounded raw windows, and retain full raw evidence for every alert plus a
+preregistered benign training sample. Every execution still receives a score,
+boundary metadata, integrity/loss status, and a compact derived record. Any raw
+window overwritten before its retention decision, or intersecting loss, is
+censored rather than published as valid. This rolling policy must be qualified
+before replacing the all-raw PoC custody rule.
+
 Use the first two hours as a preregistered capacity ladder rather than committing
 the full day to an arbitrary model:
 

@@ -163,6 +163,35 @@ next test is therefore an explicit within-lane temporal-consistency energy train
 with coherent timestamp-shift negatives re-featurized from retained raw samples;
 it must not manufacture order across CPU lanes.
 
+## Throughput profile
+
+The 204-run manifest separates 7.896 seconds of accepted workload execution
+from 168.649 seconds of explicit featurization and 14.234 seconds of all other
+capture/custody work. Featurization therefore consumed 88.40% of the 190.78
+second run. The dominant operation is the PT byte histogram: 1.729 GB was
+reduced at only 10.25 MB/s through 16 separate `uint8` to `int64` conversions
+and `torch.bincount` calls per execution. PEBS contained only 16,960 samples and
+cannot explain that wall time. Raw custody wrote 1.731 GB, fsynced each execution,
+then reread it for SHA-256; this belongs in a phase benchmark but is bounded by
+the 14.234-second residual, not the dominant 168.649 seconds.
+
+The workload itself also prevents a 1,000-execution/s claim: its mean accepted
+window was 38.7 ms, and even `getpid` averaged 2.44 ms. High-rate operation needs
+persistent sub-millisecond fuzz targets, one long-lived per-core perf session,
+continuous AUX draining, native one-pass reduction and hashing, and append-only
+sharded custody. At the present 8.47 MB/execution, 1,000 executions/s would emit
+8.47 GB/s per core; 100 such cores would approach 73 PB/day. The operational
+design must score every execution from bounded raw memory while retaining full
+raw evidence for alerts and a preregistered benign training sample, rather than
+claiming durable raw custody for every high-rate execution.
+
+The nine pre-admission retries expose another bias: requiring at least one PEBS
+sample at period 10,000 preferentially retains executions that happen to receive
+a sample. The next runner must admit a zero-sample PEBS interval as explicitly
+unavailable when the pinned event and target CPU affinity are independently
+verified, rather than resampling until positive. Suspicious cases can receive a
+targeted denser PEBS replay.
+
 ## Small-model control
 
 The initial masked bidirectional transformer has 171,143 parameters for four
