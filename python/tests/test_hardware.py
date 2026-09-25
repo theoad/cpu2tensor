@@ -4,7 +4,6 @@
 from array import array
 import ctypes
 import mmap
-import os
 import struct
 import unittest
 from unittest import mock
@@ -32,6 +31,7 @@ class HardwareTests(unittest.TestCase):
         invalid = (
             dict(scope="other"), dict(scope="process"), dict(scope="process", pid=-1),
             dict(scope="process", pid=1, cpus=(0,)), dict(scope="kernel"),
+            dict(scope="process_kernel"), dict(scope="process_kernel", pid=1, cpus=(0,)),
             dict(scope="kernel", cpus=(0,), pid=2), dict(scope="kernel", cpus=(0, 0)),
             dict(scope="kernel", cpus=(-1,)), dict(scope="kernel", cpus=(0,), period=0),
             dict(scope="kernel", cpus=(0,), data_pages=3),
@@ -44,12 +44,19 @@ class HardwareTests(unittest.TestCase):
 
     def test_sample_config_is_hardware_only_with_correct_privilege_scope(self) -> None:
         process = _attribute(HardwareConfig("process", pid=7, signal="instructions"))
+        process_kernel = _attribute(
+            HardwareConfig("process_kernel", pid=7, signal="instructions")
+        )
         kernel = _attribute(HardwareConfig("kernel", cpus=(0,), signal="cycles"))
         self.assertEqual((process.type, process.config, process.sample_period), (0, 1, 100_000))
         self.assertEqual((kernel.type, kernel.config), (0, 0))
         self.assertEqual(process.size, ctypes.sizeof(_PerfAttr))
         self.assertEqual(process.flags & ((1 << 1) | (1 << 5) | (1 << 6)),
                          (1 << 5) | (1 << 6))
+        self.assertEqual(
+            process_kernel.flags & ((1 << 4) | (1 << 5) | (1 << 6)),
+            (1 << 4) | (1 << 6),
+        )
         self.assertEqual(kernel.flags & ((1 << 4) | (1 << 6)), (1 << 4) | (1 << 6))
         self.assertFalse(kernel.flags & (1 << 5))
 

@@ -33,6 +33,17 @@ reached only 285 executions/s. Its anomaly gate failed: 7/10 familiar validation
 traces and 8/8 hidden benign `mmap` traces were flagged. Next: continuous AUX
 draining plus a broader family-held-out benign corpus; no CVE efficacy claim yet.
 
+[R2](raw-hardware-triage-r2-results.md) added target-attributed kernel PT and a
+retained 17-family, 8,704-execution raw corpus. The simple four-segment reducer
+reached 3,290 executions/s and the frozen scorer 247,907/s on one pinned
+`trail-x86` core. Familiar validation repeated at 670 reviews/million, but
+`readlink` and `yield` were still wholly anomalous when hidden. Next: label-hidden
+known-vulnerability sensitivity on an exact vulnerable kernel and continuous AUX
+draining; larger models are not justified by benign reconstruction alone.
+One minimal AWS bare-metal replication independently completed capture, offline
+fit, checkpoint reload, and frozen inference, while again rejecting unseen-family
+quality; its exact subject and rates are in the R2 results.
+
 ## Completed first iteration: AArch64 observation to MPS
 
 Demo: run an unmodified, benign AArch64 program on prescribed input in `trail-arm`;

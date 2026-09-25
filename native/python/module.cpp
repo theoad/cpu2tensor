@@ -41,8 +41,10 @@ PyObject* raw_trace_sketch(PyObject*, PyObject* arguments) {
     Py_buffer offsets{};
     unsigned segments = 0;
     unsigned pair_bins = 0;
+    int include_length = 0;
     if (!PyArg_ParseTuple(
-            arguments, "OOII", &trace_object, &offset_object, &segments, &pair_bins))
+            arguments, "OOIIp", &trace_object, &offset_object, &segments,
+            &pair_bins, &include_length))
         return nullptr;
     if (PyObject_GetBuffer(trace_object, &trace, PyBUF_SIMPLE) != 0)
         return nullptr;
@@ -55,7 +57,7 @@ PyObject* raw_trace_sketch(PyObject*, PyObject* arguments) {
         PyBuffer_Release(&trace);
     };
     constexpr Py_ssize_t offset_width = sizeof(uint64_t);
-    const bool power_of_two = pair_bins != 0 && (pair_bins & (pair_bins - 1)) == 0;
+    const bool power_of_two = pair_bins == 0 || (pair_bins & (pair_bins - 1)) == 0;
     if (segments == 0 || !power_of_two || offsets.len < 2 * offset_width ||
         offsets.len % offset_width != 0 || trace.len < 0) {
         release();
@@ -69,7 +71,8 @@ PyObject* raw_trace_sketch(PyObject*, PyObject* arguments) {
         return nullptr;
     }
     const size_t byte_dimensions = static_cast<size_t>(segments) * 256;
-    const size_t dimensions = byte_dimensions + pair_bins + 1;
+    const size_t dimensions =
+        byte_dimensions + pair_bins + (include_length != 0 ? 1 : 0);
     if (rows > static_cast<size_t>(PY_SSIZE_T_MAX) / dimensions / sizeof(float)) {
         release();
         PyErr_SetString(PyExc_OverflowError, "Raw trace sketch output is too large");
@@ -119,7 +122,7 @@ PyObject* raw_trace_sketch(PyObject*, PyObject* arguments) {
         for (size_t position = 0; position < length; ++position) {
             const size_t segment = position * segments / length;
             ++features[segment * 256 + bytes[start + position]];
-            if (position + 1 < length) {
+            if (pair_bins != 0 && position + 1 < length) {
                 const uint32_t pair_key =
                     (static_cast<uint32_t>(bytes[start + position]) << 8) |
                     bytes[start + position + 1];
@@ -136,10 +139,13 @@ PyObject* raw_trace_sketch(PyObject*, PyObject* arguments) {
             for (size_t value = 0; value < 256; ++value)
                 features[segment * 256 + value] /= count;
         }
-        const float pairs = static_cast<float>(length > 1 ? length - 1 : 1);
-        for (size_t index = 0; index < pair_bins; ++index)
-            features[byte_dimensions + index] /= pairs;
-        features[dimensions - 1] = static_cast<float>(std::log1p(length) / 16.0);
+        if (pair_bins != 0) {
+            const float pairs = static_cast<float>(length > 1 ? length - 1 : 1);
+            for (size_t index = 0; index < pair_bins; ++index)
+                features[byte_dimensions + index] /= pairs;
+        }
+        if (include_length != 0)
+            features[dimensions - 1] = static_cast<float>(std::log1p(length) / 16.0);
     }
     release();
     return result;

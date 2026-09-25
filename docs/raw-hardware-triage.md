@@ -7,12 +7,13 @@ the model, and scores later fuzz executions without updating it. Decoding and de
 analysis happen only after a rare execution crosses a calibrated review threshold.
 
 The first model consumes raw PT bytes. It does not parse packets, symbolize code,
-or reconstruct branches. A tensor-only reducer computes coarse segment byte
-frequencies, hashed adjacent-byte frequencies and trace length. A standardized
-low-rank linear autoencoder (PCA) learns a latent representation once. Inference
-computes residual energy without running a decoder or any iterative training. This
-is an intentionally cheap baseline, not evidence that byte sketches are sufficient
-for vulnerability detection.
+or reconstruct branches. A fused native reducer computes coarse ordered byte
+frequencies. R2 rejected optional adjacent-byte hashes and trace length because
+they increased benign family discrimination. A standardized low-rank linear
+autoencoder (PCA) learns a latent representation once. Inference computes residual
+energy without running a decoder or any iterative training. This is an intentionally
+cheap baseline, not evidence that byte sketches are sufficient for vulnerability
+detection.
 
 ## Scaling contract
 
@@ -53,5 +54,8 @@ manifest and model checkpoint are part of the learned subject. Rebooting, changi
 the kernel or changing hardware invalidates the calibration unless a separate
 experiment proves otherwise.
 
-The first measured gate is recorded in [R1 results](raw-hardware-triage-r1-results.md).
-It validates the mechanics and rejects the first anomaly calibration.
+The [R1 results](raw-hardware-triage-r1-results.md) validate the mechanics and
+reject the first anomaly calibration. [R2](raw-hardware-triage-r2-results.md)
+adds target-attributed kernel PT, a broad retained raw corpus, repeat evidence,
+and representation ablations. It meets the component-throughput gate but still
+rejects unseen-family anomaly quality; hidden-trigger sensitivity remains open.

@@ -49,13 +49,14 @@ class HardwareTraceLost(HardwareCaptureError):
 class HardwareConfig:
     """One host Linux capture. Kernel mode samples the host kernel on selected CPUs.
 
-    ``process`` observes threads of ``pid`` that exist when capture starts.
-    Attach before releasing a stopped target to avoid a startup gap. ``kernel``
-    samples all tasks executing kernel code on the selected host CPUs; it does
-    not imply that a virtual machine's guest kernel is visible to the host PMU.
+    ``process`` observes user execution of threads that exist when capture starts;
+    ``process_kernel`` observes only their kernel execution. Attach before
+    releasing a stopped target to avoid a startup gap. ``kernel`` samples all
+    tasks executing kernel code on the selected host CPUs; it does not imply that
+    a virtual machine's guest kernel is visible to the host PMU.
     """
 
-    scope: Literal["process", "kernel"]
+    scope: Literal["process", "process_kernel", "kernel"]
     signal: Literal["cycles", "instructions", "memory_loads", "intel_pt"] = "cycles"
     pid: int | None = None
     cpus: tuple[int, ...] | None = None
@@ -64,11 +65,13 @@ class HardwareConfig:
     aux_pages: int = 128
 
     def __post_init__(self) -> None:
-        if self.scope not in ("process", "kernel"):
-            raise ValueError("scope must be process or kernel")
+        if self.scope not in ("process", "process_kernel", "kernel"):
+            raise ValueError("scope must be process, process_kernel, or kernel")
         if self.signal not in ("cycles", "instructions", "memory_loads", "intel_pt"):
             raise ValueError("Unknown hardware signal")
-        if self.scope == "process" and (self.pid is None or self.pid <= 0 or self.cpus is not None):
+        if self.scope in ("process", "process_kernel") and (
+            self.pid is None or self.pid <= 0 or self.cpus is not None
+        ):
             raise ValueError("Process capture needs a positive pid and no CPU list")
         if self.scope == "kernel" and (self.pid is not None or not self.cpus):
             raise ValueError("Kernel capture needs a nonempty CPU list and no pid")
@@ -147,7 +150,7 @@ def _attribute(config: HardwareConfig) -> _PerfAttr:
     if config.scope == "process":
         # A per-thread event with cpu=-1 cannot mmap a ring when inherit is set.
         attr.flags |= 1 << 5  # exclude kernel
-    else:
+    elif config.scope in ("process_kernel", "kernel"):
         attr.flags |= 1 << 4  # exclude user code
     if config.signal in ("cycles", "instructions"):
         attr.type = 0  # PERF_TYPE_HARDWARE
@@ -273,7 +276,7 @@ class PerfCapture:
             raise RuntimeError("Create a new PerfCapture for each run")
         attr = _attribute(self.config)
         page = mmap.PAGESIZE
-        if self.config.scope == "process":
+        if self.config.scope in ("process", "process_kernel"):
             try:
                 tids = sorted(int(name) for name in os.listdir(f"/proc/{self.config.pid}/task"))
             except OSError as error:
