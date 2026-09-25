@@ -77,6 +77,22 @@ The tri-modal median was 1.092 times its matched baseline in these three repeats
 the wider earlier 4.20--5.30% matrix and this 9.2% short replay are reported
 separately rather than combined into a universal perturbation estimate.
 
+## Real capture-to-tensor seam
+
+Commit `2ca2754` was exercised directly on the same host and boot with
+`process_kernel`, `mmap` for 1,000 iterations, and PEBS period 10,000. The exact
+workload output remained `124716`. One live capture produced finite model input
+with PT shape `[1,1,16,256]`, PEBS shape `[1,1,16,24]`, and PMU shape
+`[1,1,1,4]`; all 16 PT segments, six PEBS time bins, and the PMU interval were
+available. The acquisition report retained TID and observed CPU 2 outside the
+model and marked migration verified from six PEBS samples. The cached report is
+`~/.cache/cpu2tensor/multimodal-poc/feature-smoke-r1.json`, SHA-256
+`3b4b75dc3004cb9cbe3ef21de12a978743abe0b7aef6aa768a0f63a74f94d722`.
+
+This proves that the accepted capture object reaches the accepted tensor seam on
+real hardware. It does not yet prove that training learns useful relationships;
+that is the kernel-family experiment gate.
+
 ## Small-model control
 
 The initial masked bidirectional transformer has 171,143 parameters for four
