@@ -107,7 +107,7 @@ collected data, not a rule excluding future safely approved effect examples.
 | Matched-repeat noise | Use the same exact input seeds in both sessions for 10 of 20 seeds per family/intensity stratum (510 paired repeats: 240 seeded-variation and 270 fixed-workload). Report both groups separately, including per-stratum and worst-family relative paired difference $|A-B|/((A+B)/2)$ for PT bytes, PEBS count, and elapsed time. Provisional macro-median/90th-percentile ceilings are 5%/20% PT, 20%/60% PEBS, and 7%/25% elapsed; fail or investigate if exceeded. On the 102 preregistered raw repeat pairs, require median v3 exposure-matched cosine at least 0.98 PT and 0.90 PEBS, while reporting the full distribution by group. These are acquisition-noise gates, not detector sensitivity. |
 | Pilot throughput and backpressure | For these 1,020-row sessions, require collector-sealed rate at least 10 executions/s over each balanced block (about 76% of the 13.07/s physical reference) **and** final off-host hash-acknowledged end-to-end rate at least 10/s. The unacknowledged backlog must stay below the 896 MiB tmpfs bound and drain fully before Session B. Report producer and custody rates separately, PT MB/s, phase times, queue high-water, first-attempt yield, and family/intensity mix; do not compare Mac reduction speed as host capture speed. |
 | Million-row scale throughput | This pilot floor is not a 24-hour GO: 10/s takes 27.8 hours for one million. A later million-row/24-hour plan needs at least 11.57/s sustained end-to-end custody, with independently demonstrated headroom above that mathematical minimum and a separately approved capacity/thermal plan. |
-| Disk, custody, temperature | New spool only, **at most 896 MiB tmpfs including partial files and logs**, root free at least 5.5 GiB before smoke and 5 GiB while running, and no writes, mounts, or transfers to `/dev/sda` or any child filesystem. Start below 70°C package; conservatively stop this pilot at 80°C. Record policy and temperature at least every second in the supervisor; restore pre-run turbo policy on every exit. |
+| Disk, custody, temperature | New spool only, **at most 896 MiB tmpfs including partial files and capture-local logs**, root free at least 5.5 GiB before smoke and 5 GiB while running, and no writes, mounts, or transfers to `/dev/sda` or any child filesystem. Supervisor output uses rate-limited journald outside the initially empty spool. Start below 70°C package; conservatively stop this pilot at 80°C. Record policy and temperature at least every second in the supervisor; restore pre-run turbo policy on every exit. |
 
 These ceilings are conservative proposals from one historical session, not a
 guarantee that a new seeded workload will pass. The smoke may expose a
@@ -277,12 +277,12 @@ sha256sum "$C2T_BINARY"
 sha256sum "$C2T_SOURCE/python/cpu2tensor/examples/hardware_multimodal_experiment.py"
 sha256sum "$C2T_SOURCE/python/cpu2tensor/examples/hardware_seeded_capture_plan_r2.py"
 sha256sum "$C2T_SOURCE/python/cpu2tensor/examples/hardware_seeded_capture_supervisor_r2.py"
-PYTHONPATH="$C2T_SOURCE/python" /usr/bin/python3.12 -c '
+PYTHONPATH="$C2T_SOURCE/python" /home/user/.cache/cpu2tensor/hardware-pretraining-go/venv/bin/python3.12 -c '
 from pathlib import Path
 from cpu2tensor.examples.hardware_seeded_capture_supervisor_r2 import source_bundle_manifest
 print(source_bundle_manifest(Path("/home/user/.cache/cpu2tensor/seeded-r2-source-20260926"))["digest_sha256"])
 '
-test "$(cd "$C2T_SOURCE" && PYTHONPATH="$C2T_SOURCE/python" /usr/bin/python3.12 -c 'import cpu2tensor.examples.hardware_multimodal_experiment as e; print(e.__file__)')" = \
+test "$(cd "$C2T_SOURCE" && PYTHONPATH="$C2T_SOURCE/python" /home/user/.cache/cpu2tensor/hardware-pretraining-go/venv/bin/python3.12 -c 'import cpu2tensor.examples.hardware_multimodal_experiment as e; print(e.__file__)')" = \
   "$C2T_SOURCE/python/cpu2tensor/examples/hardware_multimodal_experiment.py"
 for sensor in /sys/class/hwmon/hwmon*/name; do
   printf '%s ' "$sensor"
@@ -302,7 +302,7 @@ subcommand, with an independent restore fallback as described below.
 ```bash
 # NOT APPROVED: for an inspected systemd unit only; never run standalone.
 cd "$C2T_SOURCE"
-PYTHONPATH="$C2T_SOURCE/python" /usr/bin/python3.12 -m \
+PYTHONPATH="$C2T_SOURCE/python" /home/user/.cache/cpu2tensor/hardware-pretraining-go/venv/bin/python3.12 -m \
   cpu2tensor.examples.hardware_seeded_capture_supervisor_r2 smoke \
   --source-root "$C2T_SOURCE" \
   --binary "$C2T_BINARY" --binary-sha256 "$C2T_BINARY_SHA256" \
@@ -322,8 +322,12 @@ the reviewed new source path, with `torch` import resolving to a real file; it
 prints the actual Python/torch/package paths. A direct read-only `sudo -n`
 probe was denied (`sudo: a password is required`), so root interpreter/package
 resolution is **unverified** until an approved root unit performs that check.
-It does **not** implement Mac transfer/acknowledgement; the collector's local
-seal is explicitly unadmitted until that independent custody check. The
+The host virtualenv Python imports torch under the normal user, whereas
+`/usr/bin/python3.12` does not; the reviewed unit uses the virtualenv path.
+The independent Mac-side verifier is now implemented in
+`hardware_seeded_mac_custody_r2.py`, but transfer and acknowledgement have not
+run; the collector's local seal is explicitly unadmitted until that custody
+check. The
 collector still stops on the first rejected attempt without serializing that
 attempt's failed raw window; the failure ledger/partial artifact must be
 preserved and reviewed. Confirm the exact binary path, interpreter, package
@@ -361,8 +365,8 @@ contract for review:
 3. The supervisor launches the collector in its own process group, with a
    1,200-second hard stop. Every second inspect package temperature from a
    verified `coretemp` package sensor, root free bytes, tmpfs headroom, and
-   child liveness. At 80°C stop the pilot conservatively (no resume); at
-   85°C, less than 5 GiB free, or a spool/quota fault, abort immediately.
+   child liveness. At 80°C, less than 5 GiB free, or a spool/quota fault,
+   abort immediately with no automatic resume.
    On *every* stop send TERM to the whole process group, wait at most five
    seconds, then KILL the group and reap it. Preserve incomplete artifacts
    for diagnosis; never treat an interrupted capture as clean.
@@ -379,10 +383,12 @@ contract for review:
 
 The unit review must include at least `WorkingDirectory=` set to the exact
 new source root, `Environment=PYTHONPATH=` set to that root's `python/`,
-`RuntimeMaxSec=21min` as a backup beyond the supervisor's 20-minute child
-deadline, `KillMode=control-group`, logs directed inside the bounded tmpfs,
-and `ExecStopPost=/usr/bin/python3.12 -m cpu2tensor.examples.hardware_seeded_capture_supervisor_r2 restore` under the
-same source environment. No such unit/timer has been installed. The proposed
+`RuntimeMaxSec=20min` as an independent hard stop alongside the supervisor's
+20-minute child deadline, `KillMode=control-group`, supervisor output directed to
+rate-limited journald (not an early-created file in the empty tmpfs),
+and `ExecStopPost=/home/user/.cache/cpu2tensor/hardware-pretraining-go/venv/bin/python3.12 -m cpu2tensor.examples.hardware_seeded_capture_supervisor_r2 restore` under the
+same source environment. Review-only unit/timer templates now exist under
+`ops/systemd/`, but none has been installed. The proposed
 `/run` tmpfs mount must persist after unit exit until independent Mac hash
 acknowledgement; an ephemeral unit-private mount would discard unadmitted
 evidence.

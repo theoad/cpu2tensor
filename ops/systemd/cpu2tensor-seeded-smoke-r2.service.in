@@ -1,0 +1,27 @@
+[Unit]
+Description=Bounded cpu2tensor seeded 51-row physical smoke
+Requires=cpu2tensor-seeded-restore-r2.timer
+After=cpu2tensor-seeded-restore-r2.timer
+ConditionPathIsMountPoint=/run/cpu2tensor-seeded-r2-smoke
+
+[Service]
+Type=exec
+Group=user
+UMask=0027
+WorkingDirectory=/home/user/.cache/cpu2tensor/seeded-r2-source-20260926
+Environment=PYTHONPATH=/home/user/.cache/cpu2tensor/seeded-r2-source-20260926/python
+Environment=C2T_SEEDED_REHEARSAL=0
+ReadOnlyPaths=/home/user/.cache/cpu2tensor/seeded-r2-source-20260926 /home/user/.cache/cpu2tensor/seeded-r2-build-20260926
+ExecStart=/home/user/.cache/cpu2tensor/hardware-pretraining-go/venv/bin/python3.12 -m cpu2tensor.examples.hardware_seeded_capture_supervisor_r2 smoke --source-root /home/user/.cache/cpu2tensor/seeded-r2-source-20260926 --binary /home/user/.cache/cpu2tensor/seeded-r2-build-20260926/hardware_kernel_workload --binary-sha256 @BINARY_SHA256@ --runner-sha256 @RUNNER_SHA256@ --planner-sha256 @PLANNER_SHA256@ --supervisor-sha256 @SUPERVISOR_SHA256@ --source-bundle-sha256 @SOURCE_BUNDLE_SHA256@ --spool /run/cpu2tensor-seeded-r2-smoke --temperature-input @PACKAGE_TEMP_INPUT@ --cohort-seed 2026092601
+ExecStopPost=/home/user/.cache/cpu2tensor/hardware-pretraining-go/venv/bin/python3.12 -m cpu2tensor.examples.hardware_seeded_capture_supervisor_r2 restore
+RuntimeMaxSec=20min
+TimeoutStopSec=15s
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=yes
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cpu2tensor-seeded-smoke-r2
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=100

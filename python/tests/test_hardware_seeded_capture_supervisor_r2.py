@@ -6,6 +6,7 @@ import base64
 import hashlib
 from pathlib import Path
 import json
+import os
 import signal
 import subprocess
 import tempfile
@@ -16,6 +17,89 @@ from cpu2tensor.examples import hardware_seeded_capture_supervisor_r2 as guard
 
 
 class HardwareSeededCaptureSupervisorR2Tests(unittest.TestCase):
+    def test_unit_journald_does_not_populate_required_empty_spool(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        unit = (repo / "ops/systemd/cpu2tensor-seeded-smoke-r2.service.in").read_text()
+        self.assertIn("StandardOutput=journal\n", unit)
+        self.assertIn("StandardError=journal\n", unit)
+        self.assertNotIn("StandardOutput=append:", unit)
+        self.assertNotIn("/supervisor.log", unit)
+        self.assertIn("LogRateLimitBurst=100\n", unit)
+
+    def test_manual_invocation_and_missing_restore_hook_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup = Path(directory) / "cgroup"
+            cgroup.write_text("0::/system.slice/cpu2tensor-seeded-smoke-r2.service\n")
+            with mock.patch.object(guard, "CGROUP", cgroup), \
+                    mock.patch.dict(guard.os.environ, {"INVOCATION_ID": ""}):
+                with self.assertRaisesRegex(ValueError, "reviewed systemd unit"):
+                    guard._require_service_context()
+            active = mock.Mock(returncode=0)
+            wrong = mock.Mock(stdout="ExecStopPost=\nRuntimeMaxUSec=20min\nKillMode=control-group\n")
+            with mock.patch.object(guard, "CGROUP", cgroup), \
+                    mock.patch.dict(guard.os.environ, {"INVOCATION_ID": "unit-id"}), \
+                    mock.patch.object(guard.subprocess, "run", side_effect=[active, wrong]):
+                with self.assertRaisesRegex(ValueError, "restore hook"):
+                    guard._require_service_context()
+
+    def test_memory_headroom_is_bounded_by_system_and_cgroup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            meminfo = root / "meminfo"
+            cgroup = root / "cgroup"
+            accounting = root / "system.slice/unit"
+            accounting.mkdir(parents=True)
+            meminfo.write_text("MemAvailable: 5242880 kB\n")
+            cgroup.write_text("0::/system.slice/unit\n")
+            (accounting / "memory.max").write_text(str(4 * guard.GIB))
+            (accounting / "memory.current").write_text(str(guard.GIB))
+            with mock.patch.object(guard, "MEMINFO", meminfo), \
+                    mock.patch.object(guard, "CGROUP", cgroup), \
+                    mock.patch.object(guard, "CGROUP_ROOT", root):
+                guard._check_memory(start=True)
+                (accounting / "memory.current").write_text(str(3 * guard.GIB))
+                with self.assertRaisesRegex(RuntimeError, "cgroup memory"):
+                    guard._check_memory(start=True)
+                (accounting / "memory.current").write_text(str(guard.GIB))
+                meminfo.write_text("MemAvailable: 1048576 kB\n")
+                with self.assertRaisesRegex(RuntimeError, "MemAvailable"):
+                    guard._check_memory(start=False)
+                meminfo.write_text("MemAvailable: 5242880 kB\n")
+                legacy = root / "memory/system.slice/unit"
+                legacy.mkdir(parents=True)
+                (legacy / "memory.limit_in_bytes").write_text(str(4 * guard.GIB))
+                (legacy / "memory.usage_in_bytes").write_text(str(guard.GIB))
+                cgroup.write_text("10:memory:/system.slice/unit\n")
+                guard._check_memory(start=True)
+
+    def test_package_sensor_must_match_cpu2_package(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "name").write_text("coretemp\n")
+            (root / "temp1_label").write_text("Package id 0\n")
+            sensor = root / "temp1_input"
+            sensor.write_text("65000\n")
+            package = root / "physical_package_id"
+            package.write_text("0\n")
+            with mock.patch.object(guard, "CPU2_PACKAGE", package):
+                self.assertEqual(guard.package_temperature_millic(sensor), 65_000)
+                package.write_text("1\n")
+                with self.assertRaisesRegex(ValueError, "package sensor"):
+                    guard.package_temperature_millic(sensor)
+
+    def test_sealed_files_require_group_read_without_group_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            spool = Path(directory)
+            shard_dir = spool / "raw"
+            shard_dir.mkdir(mode=0o750)
+            shard = shard_dir / "shard.pt"
+            shard.write_bytes(b"sealed")
+            shard.chmod(0o640)
+            guard._verify_mac_readability(spool, owner_uid=os.getuid(), user_gid=os.getgid())
+            shard.chmod(0o600)
+            with self.assertRaisesRegex(RuntimeError, "read-only transferable"):
+                guard._verify_mac_readability(spool, owner_uid=os.getuid(), user_gid=os.getgid())
+
     def test_portable_source_bundle_detects_change_and_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -36,6 +120,23 @@ class HardwareSeededCaptureSupervisorR2Tests(unittest.TestCase):
             (native / "link.c").symlink_to(native / "target.c")
             with self.assertRaisesRegex(ValueError, "symlinks"):
                 guard.source_bundle_manifest(repo)
+
+    def test_post_capture_binary_rehash_detects_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "binary"
+            binary.write_bytes(b"reviewed")
+            repo = Path(guard.__file__).resolve().parents[3]
+            args = Namespace(
+                binary=binary, binary_sha256=guard.sha256(binary),
+                runner_sha256=guard.sha256(Path(guard.collector.__file__)),
+                planner_sha256=guard.sha256(Path(guard.plans.__file__)),
+                supervisor_sha256=guard.sha256(Path(guard.__file__)),
+                source_bundle_sha256=guard.source_bundle_manifest(repo)["digest_sha256"],
+            )
+            guard._verify_frozen_sources(args, repo)
+            binary.write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "binary or source changed"):
+                guard._verify_frozen_sources(args, repo)
 
     def test_policy_restore_is_idempotent_and_preserves_bad_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -58,6 +159,21 @@ class HardwareSeededCaptureSupervisorR2Tests(unittest.TestCase):
                     guard.restore_policy(state)
                 self.assertTrue(state.exists())
 
+    def test_timer_restore_skips_active_and_deactivating_service(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "policy.json"
+            state.write_text('{"no_turbo":"0","maximum_khz":"4900000"}')
+            with mock.patch.object(guard, "POLICY_STATE", state), \
+                    mock.patch.object(guard, "restore_policy") as restore, \
+                    mock.patch.object(guard.subprocess, "run") as run:
+                for service_state in ("active", "activating", "deactivating"):
+                    run.return_value = mock.Mock(stdout=service_state + "\n")
+                    guard.restore_if_inactive()
+                restore.assert_not_called()
+                run.return_value = mock.Mock(stdout="failed\n")
+                guard.restore_if_inactive()
+                restore.assert_called_once_with(state)
+
     def test_process_group_receives_term_kill_and_is_reaped(self) -> None:
         process = mock.Mock(pid=1234)
         process.wait.side_effect = [subprocess.TimeoutExpired("collector", 5), 0]
@@ -67,6 +183,30 @@ class HardwareSeededCaptureSupervisorR2Tests(unittest.TestCase):
             mock.call(1234, signal.SIGTERM), mock.call(1234, signal.SIGKILL),
         ])
         self.assertEqual(process.wait.call_count, 2)
+
+    def test_unit_rehearsal_changes_and_restores_policy_without_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = Namespace(spool=root)
+            process = mock.Mock(pid=1234)
+            values = {guard.NO_TURBO: "0", guard.MAX_FREQ: "4900000"}
+            with mock.patch.dict(guard.os.environ, {"C2T_SEEDED_REHEARSAL": "1"}), \
+                    mock.patch.object(guard, "preflight", return_value=("0", "4900000")), \
+                    mock.patch.object(guard, "_seal_policy_state"), \
+                    mock.patch.object(guard, "_write", side_effect=lambda path, value: values.__setitem__(path, value)), \
+                    mock.patch.object(guard, "_read", side_effect=lambda path: values[path]), \
+                    mock.patch.object(guard.subprocess, "Popen", return_value=process) as popen, \
+                    mock.patch.object(guard, "source_bundle_manifest") as bundle, \
+                    mock.patch.object(guard.collector, "subject_manifest") as subject, \
+                    mock.patch.object(guard, "terminate_group") as terminate, \
+                    mock.patch.object(guard, "restore_policy") as restore:
+                guard.run_smoke(args)
+            popen.assert_called_once_with(("/bin/sleep", "30"), start_new_session=True)
+            process.wait.assert_called_once_with(timeout=35)
+            bundle.assert_not_called()
+            subject.assert_not_called()
+            terminate.assert_called_once_with(process)
+            restore.assert_called_once_with(guard.POLICY_STATE)
 
     def test_root_child_python_must_resolve_frozen_checkout(self) -> None:
         repo = Path(guard.__file__).resolve().parents[3]
@@ -113,6 +253,20 @@ class HardwareSeededCaptureSupervisorR2Tests(unittest.TestCase):
                         "stdin": guard.torch.tensor(list(frame), dtype=guard.torch.uint8),
                     },
                     "stdout": guard.torch.tensor(list(stdout), dtype=guard.torch.uint8),
+                    "batches": [{
+                        "source": 123, "tid": 123, "cpu": 2,
+                        "status": [{"signal": signal, "requested": True,
+                                    "available": True, "lost": False,
+                                    "time_enabled_ns": 100 if signal != "intel_pt" else None,
+                                    "time_running_ns": 100 if signal != "intel_pt" else None}
+                                   for signal in ("intel_pt", "memory_loads", "counters")],
+                        "pt": {"signal": "intel_pt", "trace_bytes": guard.torch.tensor([1], dtype=guard.torch.uint8)},
+                        "pebs": {"signal": "memory_loads", "ip": guard.torch.tensor([1]),
+                                 "address": guard.torch.tensor([1]), "exact_ip": guard.torch.tensor([True]),
+                                 "cpu": guard.torch.tensor([2])},
+                        "counters": {"available": True, "lost": False,
+                                     "time_enabled_ns": 100, "time_running_ns": 100},
+                    }],
                 }
                 paths = {}
                 raw_relative = Path("raw") / f"{execution_id}.pt"
@@ -122,6 +276,8 @@ class HardwareSeededCaptureSupervisorR2Tests(unittest.TestCase):
                 guard.torch.save({
                     "schema": guard.collector.DERIVED_SCHEMA,
                     "execution": execution, "raw_sha256": raw_hash,
+                    "batch": {f"{name}_available": guard.torch.tensor([True])
+                              for name in ("pt", "pebs", "pmu")},
                 }, artifact / derived_relative)
                 paths.update({
                     "raw_path": str(raw_relative), "raw_sha256": raw_hash,
@@ -135,6 +291,11 @@ class HardwareSeededCaptureSupervisorR2Tests(unittest.TestCase):
                                    "stdin_sha256": frame_hash},
                     "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
                     "stdout_base64": base64.b64encode(stdout).decode("ascii"),
+                    "capture": {"pt_bytes": 1, "pebs_samples": 1,
+                                "pebs_usable_samples": 1, "pebs_censored_samples": 0,
+                                "pebs_exact_ip": 1, "pebs_nonzero_address": 1,
+                                "lost_sources": 0, "missing_sources": 0,
+                                "multiplexed_sources": 0},
                     **paths,
                 })
             manifest = {
@@ -144,8 +305,11 @@ class HardwareSeededCaptureSupervisorR2Tests(unittest.TestCase):
                     "kind": "smoke", "sha256": guard.sha256(sealed_plan),
                 }},
                 "collection": {
+                    "executions": 51, "total_pt_bytes": 51,
+                    "total_pebs_samples": 51, "total_pebs_usable_samples": 51,
+                    "total_pebs_censored_samples": 0,
                     "loss_count": 0,
-                    "admission": {"rejected_attempts": 0},
+                    "admission": {"rejected_attempts": 0, "total_attempts": 51},
                     "missing_modality_executions": {"pt": 0, "pebs": 0, "pmu": 0},
                 },
                 "entries": entries,
@@ -159,6 +323,51 @@ class HardwareSeededCaptureSupervisorR2Tests(unittest.TestCase):
 
             seal_manifest()
             guard.verify_smoke_artifact(artifact, "a" * 64, plan)
+            retained_schema_raw = guard.torch.load(artifact / entries[0]["raw_path"], weights_only=True)
+            retained_schema_derived = guard.torch.load(artifact / entries[0]["derived_path"], weights_only=True)
+            retained_schema_raw["batches"][0]["pebs"]["signal"] = "memory_stores"
+            retained_schema_raw["batches"][0]["status"][1]["signal"] = "memory_stores"
+            self.assertEqual(
+                guard._verified_sensor_counts(retained_schema_raw, retained_schema_derived,
+                                              pebs_signal="memory_stores"), entries[0]["capture"],
+            )
+            with self.assertRaisesRegex(RuntimeError, "status contract"):
+                guard._verified_sensor_counts(retained_schema_raw, retained_schema_derived)
+            first = entries[0]
+            raw = guard.torch.load(artifact / first["raw_path"], weights_only=True)
+            raw["batches"][0]["status"][1]["lost"] = True
+            guard.torch.save(raw, artifact / first["raw_path"])
+            first["raw_sha256"] = guard.sha256(artifact / first["raw_path"])
+            derived = guard.torch.load(artifact / first["derived_path"], weights_only=True)
+            derived["raw_sha256"] = first["raw_sha256"]
+            guard.torch.save(derived, artifact / first["derived_path"])
+            first["derived_sha256"] = guard.sha256(artifact / first["derived_path"])
+            seal_manifest()
+            with self.assertRaisesRegex(RuntimeError, "raw sensor reports loss"):
+                guard.verify_smoke_artifact(artifact, "a" * 64, plan)
+            raw["batches"][0]["status"][1]["lost"] = False
+            guard.torch.save(raw, artifact / first["raw_path"])
+            first["raw_sha256"] = guard.sha256(artifact / first["raw_path"])
+            derived["raw_sha256"] = first["raw_sha256"]
+            guard.torch.save(derived, artifact / first["derived_path"])
+            first["derived_sha256"] = guard.sha256(artifact / first["derived_path"])
+            seal_manifest()
+            guard.verify_smoke_artifact(artifact, "a" * 64, plan)
+            derived["batch"]["pebs_available"] = guard.torch.tensor([False])
+            guard.torch.save(derived, artifact / first["derived_path"])
+            first["derived_sha256"] = guard.sha256(artifact / first["derived_path"])
+            seal_manifest()
+            with self.assertRaisesRegex(RuntimeError, "derived sensor modality"):
+                guard.verify_smoke_artifact(artifact, "a" * 64, plan)
+            derived["batch"]["pebs_available"] = guard.torch.tensor([True])
+            guard.torch.save(derived, artifact / first["derived_path"])
+            first["derived_sha256"] = guard.sha256(artifact / first["derived_path"])
+            manifest["collection"]["total_pt_bytes"] = 50
+            seal_manifest()
+            with self.assertRaisesRegex(RuntimeError, "aggregate differs"):
+                guard.verify_smoke_artifact(artifact, "a" * 64, plan)
+            manifest["collection"]["total_pt_bytes"] = 51
+            seal_manifest()
             original_raw = (artifact / entries[0]["raw_path"]).read_bytes()
             (artifact / entries[0]["raw_path"]).write_bytes(b"changed")
             with self.assertRaisesRegex(RuntimeError, "hash mismatch"):
@@ -229,6 +438,11 @@ class HardwareSeededCaptureSupervisorR2Tests(unittest.TestCase):
                     mock.patch.object(guard.platform, "system", return_value="Linux"), \
                     mock.patch.object(guard.platform, "release", return_value=guard.EXPECTED_KERNEL), \
                     mock.patch.object(guard, "_check_child_resolution"), \
+                    mock.patch.object(guard, "_check_spool_access"), \
+                    mock.patch.object(guard, "_require_service_context"), \
+                    mock.patch.object(guard, "_check_memory"), \
+                    mock.patch.object(guard, "POLICY_STATE", root / "policy.json"), \
+                    mock.patch.object(guard, "CPU2_PACKAGE", root / "physical_package_id"), \
                     mock.patch.object(guard, "package_temperature_millic", return_value=60_000) as temp, \
                     mock.patch.object(guard, "_mount_fields", return_value=("tmpfs", "tmpfs", str(spool.resolve()))) as mount:
                 self.assertEqual(guard.preflight(args), ("0", "4900000"))
@@ -279,6 +493,7 @@ class HardwareSeededCaptureSupervisorR2Tests(unittest.TestCase):
                         mock.patch.object(guard, "_write", side_effect=write), \
                         mock.patch.object(guard, "_read", side_effect=lambda path: values[path]), \
                         mock.patch.object(guard, "source_bundle_manifest", return_value={"digest_sha256": "a" * 64}), \
+                        mock.patch.object(guard, "_check_memory"), \
                         mock.patch.object(guard.collector, "subject_manifest", return_value={"identity_sha256": "a" * 64}), \
                         mock.patch.object(guard.subprocess, "Popen", return_value=process), \
                         mock.patch.object(guard, "package_temperature_millic", side_effect=temperatures), \
@@ -290,7 +505,7 @@ class HardwareSeededCaptureSupervisorR2Tests(unittest.TestCase):
                     with self.assertRaisesRegex((RuntimeError, TimeoutError), message):
                         guard.run_smoke(args)
                 terminate.assert_called_once_with(process)
-                restore.assert_called_once_with(args.state_path)
+                restore.assert_called_once_with(guard.POLICY_STATE)
 
 
 if __name__ == "__main__":

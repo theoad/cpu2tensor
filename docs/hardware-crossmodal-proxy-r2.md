@@ -1,6 +1,7 @@
 # Cross-modal discordance proxy R2: review-only design
 
-Status: **proposed development diagnostic, not run or trained** (2026-09-26).
+Status: **development diagnostic executed on frozen cache/checkpoints, not a
+bug gate** (2026-09-26). No model was trained or selected by this diagnostic.
 This protocol deliberately makes an internally discordant *synthetic feature
 record* from two lawful executions. It can test whether a frozen scorer uses
 relationships among hardware modalities. It cannot establish sensitivity to a
@@ -101,3 +102,61 @@ Pre-register pair construction and a single frozen checkpoint before opening
 those scores. The existing one-session sealed cache can support a development
 diagnostic only. Neither a proxy pass nor an artificially improved low-FPR
 number can replace the [real-bug physical effect/control gate](hardware-anomaly-validation-r1.md).
+
+## Frozen CPU-only execution and result
+
+The two-stage implementation is
+[`hardware_crossmodal_proxy_r2.py`](../python/cpu2tensor/examples/hardware_crossmodal_proxy_r2.py).
+Its pair stage did not load a checkpoint. It froze 12,252 disjoint pairs from
+24,504 of 25,000 validation rows (98.016% coverage), leaving 496 unpaired
+across 51 family-by-intensity cells. The immutable
+[`pairs.json`](/Users/theoad/.cache/cpu2tensor/hardware-autoresearch-v2-exposure/crossmodal-proxy-r2/pairs.json)
+has SHA-256
+`7071a3e50c6c811a6ebe54565d5b59a2efd42c4a7a0b3d77a2fad7358c845730`.
+All four checkpoints were then scored on **Darwin arm64 CPU**, not the physical
+Linux capture host or Mac GPU. The final
+[`report.json`](/Users/theoad/.cache/cpu2tensor/hardware-autoresearch-v2-exposure/crossmodal-proxy-r2/report-verified/report.json)
+SHA-256 is
+`f68977263a3b05d5c619400abf70d38f703daf18d9e402eff185cec2216ea6ba`;
+its seed-wise [`scores.pt`](/Users/theoad/.cache/cpu2tensor/hardware-autoresearch-v2-exposure/crossmodal-proxy-r2/report-verified/scores.pt)
+SHA-256 is
+`a3477f0abdb8cdbdcf28ebadd74b029907609f6bd6bdc1ab157cd2b62431d396`.
+The report retains every family/intensity coverage and score/control metric.
+The runner-smoke checkpoint hashes are v1 seeds 1729/1730
+`b44cd086c1c7f1b5fafb54c0968026d6785638f70c836be069367ef17d128f0c`/
+`aaed68240b843d2d437af898ddae4400b04bef18627752fa061aef758a8495c8`,
+and v2 seeds 1729/1730
+`abf3d8af55927292d57a1416f0a4e289ba1d1eae2411a889d9ad736f93a6ffe0`/
+`543ff4f97a3b0ebc30ee20ef451fda7d8a01c1dc5d4fa4b63f0293fffe46fc60`.
+
+| Frozen scorer | Hybrid wins versus both originals | Hybrid-only alerts at exploratory $10^{-4}$ | Unmodified held-out benign alerts at $10^{-4}$ |
+| --- | ---: | ---: | ---: |
+| v1 seed 1729 | 27.16% | 25/12,252 | 10,463/18,000 |
+| v1 seed 1730 | 26.73% | 25/12,252 | 10,100/18,000 |
+| v2 seed 1729 | 26.84% | 24/12,252 | 11,500/18,000 |
+| v2 seed 1730 | 26.67% | 0/12,252 | 12,000/18,000 |
+
+Every scorer's median $s(H)-\max(s(A),s(B))$ was negative. The hybrid alert
+counts were close to the anchor, donor, sham, and metadata-only counts; PEBS-only
+and PMU-only ablations are in the report. At $10^{-4}$, all 6,000 unmodified
+`memfd` rows alerted for every checkpoint; `dup` contributed 4,099–6,000 more
+of its 6,000 rows, while `pipe` contributed 0–3. Most hybrid-only alerts were
+in `dup` (one v1 seed-1730 `pipe` exception). At $10^{-3}$, held-out benign
+alerts remained 12,015–12,042/18,000 and hybrid-only alerts were only 5–10.
+This is dominated by a known lawful-family novelty failure, not a selective
+cross-modal discordance response. The retrospective mixed-pool top-100 held
+32–37 hybrids, but that queue is neither a real-bug recall estimate nor an
+operational 100-per-million result.
+
+Familiar validation had 0/7,000 original alerts at exploratory $10^{-4}$ for
+all four checkpoints, yet its exact one-sided 95% upper bound is
+$4.28\times 10^{-4}$ even under an independence assumption. The 21,000-row
+calibration admitted two rows at that threshold. This one-session cache
+cannot support a session-block confidence interval or certify a low-FPR
+production threshold. The proxy verdict is **NO-GO for cross-modal sensitivity
+evidence from these frozen models**; it is not a model-selection decision and
+says nothing affirmative or negative about real-bug recall.
+
+Focused tests for pairing, controls, the v1/v2 external evaluator, and the
+real frozen-v2 scorer interface passed: `12 passed in 0.64s` with source-first
+`PYTHONPATH` and `python3.12 -S -m pytest`.

@@ -1,0 +1,11 @@
+[Unit]
+Description=Independent one-minute cpu2tensor CPU policy restore fallback
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=5s
+Persistent=true
+Unit=cpu2tensor-seeded-restore-r2.service
+
+[Install]
+WantedBy=timers.target

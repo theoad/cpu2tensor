@@ -1,0 +1,7 @@
+[Unit]
+Description=Restore cpu2tensor CPU policy if the seeded smoke supervisor dies
+
+[Service]
+Type=oneshot
+Environment=PYTHONPATH=/home/user/.cache/cpu2tensor/seeded-r2-source-20260926/python
+ExecStart=/home/user/.cache/cpu2tensor/hardware-pretraining-go/venv/bin/python3.12 -m cpu2tensor.examples.hardware_seeded_capture_supervisor_r2 restore-if-inactive

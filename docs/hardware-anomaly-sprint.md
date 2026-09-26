@@ -169,3 +169,23 @@ experiment. The prior 102k scale comparison and corrected Dirty Pipe canary
 were NO-GO: d128 AUROC 0.5208, d512 AUROC 0.4722; greater capacity did not
 create sensitivity. Do not launch a 24-hour campaign merely because training
 loss improved.
+
+## Reconciled sprint verdict
+
+The sprint is closed **NO-GO** for a million-execution or 24-hour anomaly
+campaign. The 102,000-execution corpus is intact and acquisition-complete, but
+it is a one-session corpus without real per-execution input seeds. The compact
+autoresearch candidates flooded on lawful held-out families, the frozen
+cross-modal splice proxy did not produce useful discordance sensitivity, and no
+safe same-subject corruption gate established recall at the required review
+budget. No automatic five-minute model-selection loop or live R2 capture was
+started.
+
+The retained positive engineering result is a review-only R2 capture package:
+deterministic input frames, exact invocation custody, an explicit two-session
+noise protocol, fail-closed sensor verification, bounded systemd templates, and
+off-host acknowledgement. Offline tests and all 525 retained raw audits passed,
+but live use remains gated on a non-capture systemd rehearsal and independent
+review of the full identity, PMU payload, and decode-sideband custody checks.
+These are acquisition-integrity gates, not evidence of vulnerability
+sensitivity.
