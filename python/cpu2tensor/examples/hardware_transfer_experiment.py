@@ -482,6 +482,14 @@ def main() -> None:
     args = parser.parse_args()
     if (args.score_checkpoints is None) != (args.checkpoint_sha256 is None):
         parser.error("--score-checkpoints and --checkpoint-sha256 must be provided together")
+    # Preflight outside the failure writer: a rejected preserved directory must
+    # never become a destination for our error artifacts.
+    if args.output.exists():
+        parser.error("use a fresh output directory")
+    if args.score_checkpoints is not None and any(
+            args.output.resolve().is_relative_to(root.resolve())
+            for root in (args.data, args.score_checkpoints)):
+        parser.error("scoring output must be outside preserved data/checkpoint trees")
     try:
         if args.score_checkpoints is not None:
             hashes = dict(value.split("=", 1) for value in (args.checkpoint_sha256 or []))

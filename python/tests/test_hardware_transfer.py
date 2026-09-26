@@ -171,3 +171,16 @@ def test_preserved_scoring_cannot_write_inside_immutable_inputs():
         with pytest.raises(ValueError, match="outside preserved"):
             evaluate_preserved(root, root, root / "baseline", root / "new-output", "0",
                                {arm: "0" for arm in ("scratch", "frozen", "finetuned")}, 1729)
+
+
+def test_rejected_existing_cli_output_does_not_overwrite_custody(tmp_path):
+    original = tmp_path / "failure.json"
+    original.write_text("preserved evidence")
+    arguments = ["transfer", str(tmp_path), "pretrained", "baseline", str(tmp_path),
+                 "--plan-sha256", "0", "--score-checkpoints", str(tmp_path),
+                 "--checkpoint-sha256", "scratch=0", "frozen=0", "finetuned=0"]
+    with patch("sys.argv", arguments):
+        with pytest.raises(SystemExit) as failure:
+            main()
+        assert failure.value.code == 2
+    assert original.read_text() == "preserved evidence"

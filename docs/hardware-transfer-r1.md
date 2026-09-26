@@ -161,7 +161,7 @@ The off-host v1/v2 score reports are superseded by v3, not independent trials.
 
 ## Development checks
 
-On the Mac coordinator, 32 focused tests pass across `test_hardware_transfer.py`,
+On the Mac coordinator, 33 focused tests pass across `test_hardware_transfer.py`,
 `test_hardware_multimodal.py`, and `test_hardware_multimodal_experiment.py`.
 They cover unchanged reconstruction, frozen weights, identical sampling schedules,
 faithful token readout, label-independent calibration, fail-closed thermal guards,
