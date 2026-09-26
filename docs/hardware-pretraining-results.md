@@ -647,6 +647,19 @@ Mac at `38cd67008e22aa4106b5a56d89049911ff0220f6084db5e5cf5a70ec5c4e3f44`.
 The 24-hour campaign is **NO-GO**: the completed benign-validation comparison
 and independent matched canary both reject scale-up of this representation and
 objective. The canary labels were not used to select or retrain either model.
+The capacity test and canaries ended before the hard-stop fallback. The owned
+turbo-restore service was run early, restoring `no_turbo=0` and CPU 2's
+4,900,000-kHz maximum; the now-redundant timer was stopped. The physical-host
+dataset and all canary raw evidence remain intact, with verified Mac copies.
+
+The next research iteration should test what information the raw-PT histogram
+and PEBS sketches discard before committing more collection time or model
+parameters. In particular, examine whether a generic, timing-aligned PT packet
+and precise-store-address representation can retain the mutation's causal
+context while controlling benign family and loop-intensity variation. Freeze
+that representation and its benign calibration before any further known-CVE
+evaluation. The current failure is an observation/learning limitation, not a
+missing Dirty Pipe manifestation or a capture-integrity failure.
 
 The full 278-test local suite passed with 75 platform skips before the
 decode-generation change; its focused 31-test suite passed afterward. The
