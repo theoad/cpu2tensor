@@ -603,8 +603,7 @@ tensor hashes and all 525 retained-raw hashes. The host copy remains intact.
 The attempted one-Spot-H100 trainer in `us-east-2` was rejected by AWS with
 `MaxSpotInstanceCountExceeded` before an instance was created. Its unused SSH
 key and security group were removed; no instance was billed. The same-data
-small-versus-larger model comparison therefore uses the local Mac GPU. No
-large-model result, known-CVE sensitivity, or 24-hour GO is implied yet.
+small-versus-larger model comparison therefore used the local Mac GPU.
 
 The first capacity-ladder control used $d=128$, 8 heads, FFN 512, two local
 and two cross-CPU layers, 500 steps, batch 64, and MPS on `mac.local`. Its
@@ -617,9 +616,19 @@ familiar and 2,073/18,000 whole-family holdout executions exceeded the
 and 454/18,000 respectively. The marginal baseline alerted on 75/7,000 and
 15/18,000; PT-only PCA on 69/7,000 and 8,150/18,000. These are matched-data
 comparisons, not evidence of vulnerability sensitivity. The preregistered
-$d=512$, 7-local-layer, 2-cross-CPU-layer, 500-step comparison is running on
-the same Mac dataset; both frozen checkpoint files exist, but its full report
-is not yet sealed.
+$d=512$, 7-local-layer, 2-cross-CPU-layer, 500-step comparison completed on
+the same Mac dataset. Its report SHA-256 is
+`f6fbfc4fe6492c3a3b390155bfcba15e95c1963b7685f89e0aa0a521805ee267`.
+The fused model alerted on 67/7,000 familiar and 2,240/18,000 held-out benign
+executions (9.57 and 124.44 per thousand), versus 65 and 2,073 for the
+$d=128$ fused control (9.29 and 115.17 per thousand). Span-only worsened from
+454 to 4,032 held-out alerts (25.22 to 224.00 per thousand). The larger
+fused model's measured scoring rate on `mac.local` MPS was 116.93 executions/s,
+versus 1,062.69 for the small fused model. Training loss fell from 0.440 to
+0.072 and both frozen checkpoints reloaded bit-exactly, but more capacity did
+not improve reusable benign generalization or inference throughput. The
+large-model report and checkpoints are preserved separately under
+`/Users/theoad/.cache/cpu2tensor/hardware-pretraining-go/large-d512-step500`.
 
 Both already-frozen fused checkpoints were then replayed on the exact same
 physical subject against 12 blinded Dirty Pipe effects and 12 matched lawful
@@ -635,9 +644,9 @@ Their respective report-file SHA-256 values are
 and `1c2a91d54f61c20c254efb456fbbe1d74c9fc3c51b0d616f365d1200a30b2941`.
 The off-host canary archive's uncompressed tar SHA-256 matches on the host and
 Mac at `38cd67008e22aa4106b5a56d89049911ff0220f6084db5e5cf5a70ec5c4e3f44`.
-The 24-hour campaign remains **NO-GO** regardless of the pending full benign
-validation report. Its result will characterize capacity and false positives,
-not authorize scale-up or retroactively select a model using the canary labels.
+The 24-hour campaign is **NO-GO**: the completed benign-validation comparison
+and independent matched canary both reject scale-up of this representation and
+objective. The canary labels were not used to select or retrain either model.
 
 The full 278-test local suite passed with 75 platform skips before the
 decode-generation change; its focused 31-test suite passed afterward. The
