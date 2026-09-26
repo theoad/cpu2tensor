@@ -331,13 +331,14 @@ class MaskedHardwareModel(nn.Module):
             dim=-1,
         )
 
-    def forward(
+    def encode(
         self,
         batch: HardwareMultimodalBatch,
         masked: MaskedTokens,
         *,
         timing_features: torch.Tensor | None = None,
-    ) -> MultimodalPrediction:
+    ) -> torch.Tensor:
+        """Return contextual token features for a trained downstream head."""
         self._check_batch(batch)
         if masked.pt.shape != batch.pt_available.shape:
             raise ValueError("PT masks differ from the batch")
@@ -411,6 +412,16 @@ class MaskedHardwareModel(nn.Module):
         cpu_context = self.cross_cpu_encoder(cpu_summaries)
         tokens = local[:, 1:].reshape(batch_size, cpus, token_count, dimensions)
         tokens = self.output_norm(tokens + cpu_context[:, :, None, :])
+        return tokens
+
+    def forward(
+        self,
+        batch: HardwareMultimodalBatch,
+        masked: MaskedTokens,
+        *,
+        timing_features: torch.Tensor | None = None,
+    ) -> MultimodalPrediction:
+        tokens = self.encode(batch, masked, timing_features=timing_features)
         pt_end = self.config.segments
         pebs_end = 2 * self.config.segments
         return MultimodalPrediction(

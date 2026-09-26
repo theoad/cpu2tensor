@@ -28,6 +28,10 @@ PEBS, and PMU training and calibration fixture.
 [kernel-only multimodal corpus](../../../docs/kernel-multimodal-experiment.md),
 then trains and evaluates fused whole-modality and span-only frozen models. Its
 collect-only/train-only split supports capture on Linux x86 and training on MPS.
+`hardware_transfer_data` imports retained captures for the short
+[scratch/frozen/fine-tuned comparison](../../../docs/hardware-transfer-r1.md).
+`hardware_transfer_experiment` owns its architecture, losses, and training loop;
+it does not collect new traces or update a detector during inference.
 `hardware_anomaly_bundle` turns one retained score into the replay, localization,
 confidence, PEBS semantic, and optional exact-boot symbol evidence described in
 the [LLM handoff contract](../../../docs/hardware-anomaly-evidence.md).

@@ -7,7 +7,21 @@ MPS. Mixed frames, bounded multiworker collation and packed MPS uploads are now
 measured. AWS/CUDA and sustained multi-host scaling remain open.
 Later milestones are outcomes, not schedule promises.
 
-## Current decision: six-hour hardware-anomaly sprint
+## Current decision: short hardware transfer comparison
+
+The previous sprint is closed NO-GO and its heartbeat is paused. The accepted
+next slice is the [three-arm transfer comparison](hardware-transfer-r1.md):
+scratch, frozen pretrained encoder plus trained head, and fine-tuned encoder/head.
+The initial retained-data slice is implemented and its preliminary result is
+negative: scratch/fine-tuned checkpoints separate all training pairs but fail
+second-session separation. The corrected 40-step x86 run finished all three arms
+then hit its 80 C stop while scoring. Checkpoints were hash-verified off-host and
+scored on Mac CPU. No further host training, second seed, or scale campaign was
+launched. Next: restore safe host cooling, qualify stable cross-session observations
+and independent-input/effect data, then resume short serialized cycles. Do not
+increase capacity or promote a detector on familiar-defect training accuracy.
+
+## Closed decision: six-hour hardware-anomaly sprint
 
 The 102,000-execution same-subject collection finished without loss or retry,
 but the frozen d128/d512 models failed the corrected Dirty Pipe canary. Capacity
