@@ -619,7 +619,25 @@ and 454/18,000 respectively. The marginal baseline alerted on 75/7,000 and
 comparisons, not evidence of vulnerability sensitivity. The preregistered
 $d=512$, 7-local-layer, 2-cross-CPU-layer, 500-step comparison is running on
 the same Mac dataset; both frozen checkpoint files exist, but its full report
-is not yet sealed. No Dirty Pipe canary has been run on those new checkpoints.
+is not yet sealed.
+
+Both already-frozen fused checkpoints were then replayed on the exact same
+physical subject against 12 blinded Dirty Pipe effects and 12 matched lawful
+near misses each. Every effect produced 20/20 page-cache mutations; every near
+miss produced zero. All 48 captures succeeded on their first attempt with no
+lost, missing, or multiplexed sources, and all original raw records were kept.
+The $d=128$ model achieved AUROC 0.5208, five of 12 paired effect wins, and
+zero alerts in either arm. The $d=512$ model achieved AUROC 0.4722, five of
+12 paired effect wins, and one alert in each arm. Neither detects the known
+vulnerability reliably; capacity alone has not repaired this representation.
+Their respective report-file SHA-256 values are
+`fca22177df0926f1a14a6caf34f3f2bbb865bc431b6acfec3fd050b47fdcfc79`
+and `1c2a91d54f61c20c254efb456fbbe1d74c9fc3c51b0d616f365d1200a30b2941`.
+The off-host canary archive's uncompressed tar SHA-256 matches on the host and
+Mac at `38cd67008e22aa4106b5a56d89049911ff0220f6084db5e5cf5a70ec5c4e3f44`.
+The 24-hour campaign remains **NO-GO** regardless of the pending full benign
+validation report. Its result will characterize capacity and false positives,
+not authorize scale-up or retroactively select a model using the canary labels.
 
 The full 278-test local suite passed with 75 platform skips before the
 decode-generation change; its focused 31-test suite passed afterward. The
