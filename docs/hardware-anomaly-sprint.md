@@ -126,6 +126,39 @@ separation. The PT capture has no TSC/MTC/CYC timing packets and only one
 sampled CPU lane. A distinct safe real-bug primary gate is still not admitted
 on the exact signed kernel. These are early results, not the six-hour verdict.
 
+The first single-file autoresearch smoke is likewise **report-only**, not a
+model-selection result. On the Mac MPS GPU, two fixed-seed 438,101-parameter
+denoising models trained in 36.13 s total and scored an in-memory 8,192-row
+batch at roughly 339k--396k rows/s; those numbers are Mac model throughput,
+not physical-host capture speed. Independent CPU evaluation at an exploratory
+`1e-4` calibration tail flagged 10,463/18,000 and 10,100/18,000 lawful
+held-out-family executions. In both seeds, all 6,000 held-out `memfd` rows
+were flagged; most `dup` rows were flagged as load increased. The sealed
+evaluation report hashes are
+`e13863f51e2db5d66d0dd650f21397b8172fab27226cb5f8d3a51c6fb6c9bffc`
+(`1e-4`) and
+`bb4383fa75d7fb2bcd476008074d94c14f281ba5ee24ffbdee4b85fc6d37a59e`
+(`1e-3`). This is lawful-family novelty flooding, not demonstrated bug
+sensitivity. The evaluator refuses keep/discard, and no five-minute automatic
+model loop or 24-hour campaign has begun.
+
+A second report-only trial added training-only PT-byte/PEBS-count exposure
+correction using the same verified corpus and two seeds. It also failed the
+lawful-family-transfer diagnostic: at `1e-3`, it flagged 12,042/18,000 and
+12,036/18,000 held-out rows versus 12,015 and 12,018 for the first compact
+autoencoder. At exploratory `1e-4`, it flagged 11,500 and 12,000 held-out
+rows. The simpler R2 exposure-corrected diagonal score had only 11--12
+held-out alerts at `1e-3`; adding this autoencoder did not preserve that
+specificity. No effect recall or independent-session false-positive bound is
+available, so there is no justified model promotion or recurring five-minute
+search on this compact one-session dataset.
+
+R2 follow-ups now test two measured gaps in parallel: benign-only exposure
+conditioning on the full derived 102k corpus, and lightweight raw order plus
+PEBS sequence grammar on the 525 verified audit shards. The latter must first
+produce a safety-gated two-session capture plan; it is not authorization to
+run a new physical collection or to infer timing absent from old PT packets.
+
 **GO** for a one-million-execution prospective campaign only if at least one
 predeclared effect family has repeat-stable detection at the review cap,
 matched benign siblings stay below the measured tail budget, artifact custody

@@ -21,14 +21,44 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-static int gate(void) {
+static int gate(uint64_t *seed, int *seeded) {
     const char ready[] = "READY\n";
     char start = 0;
     if (write(STDOUT_FILENO, ready, sizeof(ready) - 1) != (ssize_t)(sizeof(ready) - 1)) {
         return -1;
     }
     ssize_t count = read(STDIN_FILENO, &start, 1);
-    return count == 1 ? 0 : count == 0 ? 1 : -1;
+    if (count != 1) {
+        return count == 0 ? 1 : -1;
+    }
+    *seed = 0;
+    *seeded = 0;
+    if (start != 's') {
+        return 0;
+    }
+    // A seed frame is exactly one marker byte followed by eight little-endian bytes.
+    // The fixed bound prevents a partial frame from becoming a valid execution.
+    unsigned char bytes[8];
+    size_t received = 0;
+    while (received < sizeof(bytes)) {
+        count = read(STDIN_FILENO, bytes + received, sizeof(bytes) - received);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0) {
+            return -1;
+        }
+        received += (size_t)count;
+    }
+    for (size_t index = 0; index < sizeof(bytes); ++index) {
+        *seed |= (uint64_t)bytes[index] << (index * 8);
+    }
+    *seeded = 1;
+    return 0;
+}
+
+static unsigned char seeded_byte(uint64_t seed, uint64_t index) {
+    return (unsigned char)(seed >> ((index % 8) * 8));
 }
 
 static int run_getpid(uint64_t loops, uint64_t *result) {
@@ -61,9 +91,11 @@ static int run_futex(uint64_t loops, uint64_t *result) {
     return 0;
 }
 
-static int run_openat(uint64_t loops, uint64_t *result) {
+static int run_openat(uint64_t loops, uint64_t *result, uint64_t seed, int seeded) {
     for (uint64_t index = 0; index < loops; ++index) {
-        int descriptor = openat(AT_FDCWD, "/dev/null", O_RDONLY | O_CLOEXEC);
+        const char *path = seeded && (seeded_byte(seed, index) & 1) ?
+            "/dev/zero" : "/dev/null";
+        int descriptor = openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
         if (descriptor < 0) {
             return -1;
         }
@@ -75,10 +107,10 @@ static int run_openat(uint64_t loops, uint64_t *result) {
     return 0;
 }
 
-static int run_pipe(uint64_t loops, uint64_t *result) {
-    const char value = 'x';
+static int run_pipe(uint64_t loops, uint64_t *result, uint64_t seed, int seeded) {
     char observed = 0;
     for (uint64_t index = 0; index < loops; ++index) {
+        const char value = seeded ? (char)seeded_byte(seed, index) : 'x';
         int descriptors[2];
         if (pipe2(descriptors, O_CLOEXEC) != 0 ||
             write(descriptors[1], &value, 1) != 1 ||
@@ -91,7 +123,7 @@ static int run_pipe(uint64_t loops, uint64_t *result) {
     return 0;
 }
 
-static int run_mmap(uint64_t loops, uint64_t *result) {
+static int run_mmap(uint64_t loops, uint64_t *result, uint64_t seed, int seeded) {
     const size_t bytes = 4096;
     for (uint64_t index = 0; index < loops; ++index) {
         unsigned char *mapping = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
@@ -99,8 +131,10 @@ static int run_mmap(uint64_t loops, uint64_t *result) {
         if (mapping == MAP_FAILED) {
             return -1;
         }
-        mapping[index % bytes] = (unsigned char)index;
-        *result += mapping[index % bytes];
+        size_t offset = seeded ? (size_t)((index + (seed % bytes)) % bytes) :
+            (size_t)(index % bytes);
+        mapping[offset] = seeded ? seeded_byte(seed, index) : (unsigned char)index;
+        *result += mapping[offset];
         if (munmap(mapping, bytes) != 0) {
             return -1;
         }
@@ -108,10 +142,10 @@ static int run_mmap(uint64_t loops, uint64_t *result) {
     return 0;
 }
 
-static int run_eventfd(uint64_t loops, uint64_t *result) {
+static int run_eventfd(uint64_t loops, uint64_t *result, uint64_t seed, int seeded) {
     for (uint64_t index = 0; index < loops; ++index) {
         int descriptor = eventfd(0, EFD_CLOEXEC);
-        uint64_t value = index + 1;
+        uint64_t value = seeded ? UINT64_C(1) + seeded_byte(seed, index) : index + 1;
         uint64_t observed = 0;
         if (descriptor < 0 || write(descriptor, &value, sizeof(value)) != sizeof(value) ||
             read(descriptor, &observed, sizeof(observed)) != sizeof(observed) ||
@@ -123,13 +157,13 @@ static int run_eventfd(uint64_t loops, uint64_t *result) {
     return 0;
 }
 
-static int run_epoll(uint64_t loops, uint64_t *result) {
+static int run_epoll(uint64_t loops, uint64_t *result, uint64_t seed, int seeded) {
     for (uint64_t index = 0; index < loops; ++index) {
         int event_descriptor = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
         int epoll_descriptor = epoll_create1(EPOLL_CLOEXEC);
         struct epoll_event registration = {.events = EPOLLIN, .data.u64 = index};
         struct epoll_event observed = {0};
-        uint64_t value = 1;
+        uint64_t value = 1 + (seeded ? seeded_byte(seed, index) : 0);
         uint64_t consumed = 0;
         if (event_descriptor < 0 || epoll_descriptor < 0 ||
             epoll_ctl(epoll_descriptor, EPOLL_CTL_ADD, event_descriptor, &registration) != 0 ||
@@ -144,10 +178,10 @@ static int run_epoll(uint64_t loops, uint64_t *result) {
     return 0;
 }
 
-static int run_socketpair(uint64_t loops, uint64_t *result) {
-    const char value = 's';
+static int run_socketpair(uint64_t loops, uint64_t *result, uint64_t seed, int seeded) {
     char observed = 0;
     for (uint64_t index = 0; index < loops; ++index) {
+        const char value = seeded ? (char)seeded_byte(seed, index) : 's';
         int descriptors[2];
         if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, descriptors) != 0 ||
             send(descriptors[0], &value, 1, 0) != 1 ||
@@ -171,7 +205,7 @@ static int run_getrandom(uint64_t loops, uint64_t *result) {
     return 0;
 }
 
-static int run_memfd(uint64_t loops, uint64_t *result) {
+static int run_memfd(uint64_t loops, uint64_t *result, uint64_t seed, int seeded) {
     const size_t bytes = 4096;
     for (uint64_t index = 0; index < loops; ++index) {
         int descriptor = (int)syscall(SYS_memfd_create, "cpu2tensor", MFD_CLOEXEC);
@@ -184,8 +218,10 @@ static int run_memfd(uint64_t loops, uint64_t *result) {
             close(descriptor);
             return -1;
         }
-        mapping[index % bytes] = (unsigned char)index;
-        *result += mapping[index % bytes];
+        size_t offset = seeded ? (size_t)((index + (seed % bytes)) % bytes) :
+            (size_t)(index % bytes);
+        mapping[offset] = seeded ? seeded_byte(seed, index) : (unsigned char)index;
+        *result += mapping[offset];
         if (munmap(mapping, bytes) != 0 || close(descriptor) != 0) {
             return -1;
         }
@@ -193,10 +229,10 @@ static int run_memfd(uint64_t loops, uint64_t *result) {
     return 0;
 }
 
-static int run_ioctl(uint64_t loops, uint64_t *result) {
-    const char value = 'i';
+static int run_ioctl(uint64_t loops, uint64_t *result, uint64_t seed, int seeded) {
     char observed = 0;
     for (uint64_t index = 0; index < loops; ++index) {
+        const char value = seeded ? (char)seeded_byte(seed, index) : 'i';
         int descriptors[2];
         int available = 0;
         if (pipe2(descriptors, O_CLOEXEC) != 0 ||
@@ -275,7 +311,8 @@ static int run_fork(uint64_t loops, uint64_t *result) {
     return 0;
 }
 
-static int run_family(const char *family, uint64_t loops, uint64_t *result) {
+static int run_family(const char *family, uint64_t loops, uint64_t *result,
+                      uint64_t seed, int seeded) {
     if (strcmp(family, "getpid") == 0) {
         return run_getpid(loops, result);
     }
@@ -286,31 +323,31 @@ static int run_family(const char *family, uint64_t loops, uint64_t *result) {
         return run_futex(loops, result);
     }
     if (strcmp(family, "openat") == 0) {
-        return run_openat(loops, result);
+        return run_openat(loops, result, seed, seeded);
     }
     if (strcmp(family, "pipe") == 0) {
-        return run_pipe(loops, result);
+        return run_pipe(loops, result, seed, seeded);
     }
     if (strcmp(family, "mmap") == 0) {
-        return run_mmap(loops, result);
+        return run_mmap(loops, result, seed, seeded);
     }
     if (strcmp(family, "eventfd") == 0) {
-        return run_eventfd(loops, result);
+        return run_eventfd(loops, result, seed, seeded);
     }
     if (strcmp(family, "epoll") == 0) {
-        return run_epoll(loops, result);
+        return run_epoll(loops, result, seed, seeded);
     }
     if (strcmp(family, "socketpair") == 0) {
-        return run_socketpair(loops, result);
+        return run_socketpair(loops, result, seed, seeded);
     }
     if (strcmp(family, "getrandom") == 0) {
         return run_getrandom(loops, result);
     }
     if (strcmp(family, "memfd") == 0) {
-        return run_memfd(loops, result);
+        return run_memfd(loops, result, seed, seeded);
     }
     if (strcmp(family, "ioctl") == 0) {
-        return run_ioctl(loops, result);
+        return run_ioctl(loops, result, seed, seeded);
     }
     if (strcmp(family, "dup") == 0) {
         return run_dup(loops, result);
@@ -357,7 +394,9 @@ int main(int argc, char **argv) {
         return 2;
     }
     do {
-        int gated = gate();
+        uint64_t seed = 0;
+        int seeded = 0;
+        int gated = gate(&seed, &seeded);
         if (server && gated == 1) {
             return 0;
         }
@@ -365,7 +404,7 @@ int main(int argc, char **argv) {
             return 3;
         }
         uint64_t result = 0;
-        if (run_family(family, loops, &result) != 0) {
+        if (run_family(family, loops, &result, seed, seeded) != 0) {
             perror("hardware kernel workload");
             return 4;
         }

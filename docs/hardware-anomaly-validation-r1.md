@@ -76,6 +76,37 @@ still need verification. These are **screening leads, not authorized triggers**.
 If no candidate clears the risk and attribution checks, preserve the real-bug
 gate as blocked; do not relabel a surrogate positive as a known bug.
 
+### Read-only exact-package re-audit, 2026-09-26
+
+The physical `trail-x86` host reports `5.13.0-30-generic` and
+`/proc/version_signature` says `Ubuntu 5.13.0-30.33-generic 5.13.19`.
+`dpkg-query` reports `5.13.0-30.33` for its image, modules, and extra-modules
+packages. The boot config enables `CONFIG_WATCH_QUEUE=y`, `CONFIG_USER_NS=y`,
+and `CONFIG_NF_TABLES=m`. These are read-only identity/prerequisite checks, not
+evidence that a defect has manifested. The installed image's `linux-signed`
+changelog records the `5.13.0-30.33` master version. The running kernel was not
+replaced or modified.
+
+| Lead distinct from Dirty Pipe | Exact-package evidence | Admission decision |
+| --- | --- | --- |
+| Filesystem-context out-of-bounds write, CVE-2022-0185 | Canonical's [USN-5240-1](https://ubuntu.com/security/notices/USN-5240-1) lists the Impish fix at `5.13.0-27.29`, before this host's `-30.33`. | **Ruled out** on the selected package; an upstream affected-version range must not override the Ubuntu fix. |
+| `nf_tables` invalid-register out-of-bounds write, CVE-2022-1015 | Canonical's [CVE record](https://ubuntu.com/security/CVE-2022-1015) and [Impish `5.13.0-40.45` history](https://lists.ubuntu.com/archives/impish-changes/2022-April/009232.html) place the fix after `-30.33`. | Plausibly present but **not admitted**: kernel-memory overwrite may crash or persistently corrupt the host; no bounded caller-owned effect oracle or lawful same-load sibling has been shown. A userspace timeout cannot bound kernel damage. |
+| Netfilter offload out-of-bounds write, CVE-2022-25636 | Canonical's [USN-5317-1](https://ubuntu.com/security/notices/USN-5317-1) first lists the Impish generic fix in `5.13.0-35.40`, after `-30.33`. | Plausibly present but **not admitted** for the same physical-host memory-corruption and oracle/control reasons. |
+| Watch-queue out-of-bounds write, CVE-2022-0995 | The subsystem is configured in this boot and [Canonical describes](https://ubuntu.com/security/CVE-2022-0995) possible crash and privilege escalation. Its current Impish tracker entry is not a clear exact `-30.33` fix statement. | **Not admitted**: exact-source status is unresolved and a kernel-memory write is not a safely bounded oracle. `panic_on_oops=0` does not make memory corruption recoverable. |
+| TCP page-fragment wrong-byte stream | The [upstream fix](https://github.com/torvalds/linux/commit/dacb5d8875cc6cd3a553363b4d6f06760fcbe70c) and later [Impish history](https://lists.ubuntu.com/archives/impish-changes/2022-March/009011.html) support a bounded receiver-byte oracle and a fix after `-30.33`; see the separate [candidate audit](hardware-anomaly-candidate-r1.md). | Best *research lead*, still **not admitted**: the required nested CIFS/SMB page-fault traffic has no demonstrated matched high-load sibling or repeatable untraced oracle, and the exact signed-tag source diff has not been completed. A read-only Launchpad tag-file fetch returned HTTP 403; chronology is not a binary audit. |
+
+The decision remains **NO-GO for any second physical bug trigger**. The next
+reversible step is an offline exact-tag source/patch comparison and a separately
+reviewed, disposable VM rehearsal using the exact signed package, an isolated
+network, a revertible snapshot, no writable host-shared mount, and small
+memory/disk/runtime bounds. A receiver-side byte oracle for the TCP lead would
+need the same CIFS mount, traffic, payload, size, affinity, and fault pressure
+in both arms; only the hypothesized page-fragment recursion may differ. Any
+kernel warning, hang, taint, wrong unrelated bytes, or non-repeatable oracle
+stops that lead. A VM can establish mechanism and harness safety, but not
+physical-host PT/PEBS/PMU sensitivity. No such rehearsal, physical trigger,
+perf capture, or new collection was run in this audit.
+
 An admissible candidate must pass all of the following before score inspection:
 
 1. Source/fix provenance proves the defect exists in the exact signed package;

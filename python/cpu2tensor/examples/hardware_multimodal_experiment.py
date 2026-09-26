@@ -104,6 +104,9 @@ class CapturedExecution:
     counts: dict[str, int]
     target_affinity: tuple[int, ...]
     phases_ns: dict[str, int]
+    invocation_argv: tuple[str, ...] = ()
+    invocation_stdin: bytes = b"x"
+    input_seed: int | None = None
 
 
 class CaptureAdmissionError(HardwareCaptureError):
@@ -353,6 +356,23 @@ def planned_loops(
     return max(1, WORKLOAD_LOOPS[execution.family] * loop_scale // loop_divisors[choice])
 
 
+def planned_input_seed(execution: PlannedExecution, *, seed: int) -> int:
+    """Choose target input independently of partition labels and trace content."""
+    digest = hashlib.sha256(
+        f"input-seed-v1\0{seed}\0{execution.execution_id}".encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], "little")
+
+
+def input_frame(input_seed: int | None) -> bytes:
+    """Keep the legacy one-byte gate unless per-execution input is requested."""
+    if input_seed is None:
+        return b"x"
+    if not 0 <= input_seed < 1 << 64:
+        raise ValueError("input_seed must be an unsigned 64-bit integer")
+    return b"s" + input_seed.to_bytes(8, "little")
+
+
 def prospective_retention_decision(
     score: float,
     threshold: float,
@@ -459,14 +479,24 @@ def raw_capture_payload(
     loops: int,
     stdout: bytes,
     elapsed_ns: int,
+    invocation_argv: Sequence[str] | None = None,
+    invocation_stdin: bytes | None = None,
+    input_seed: int | None = None,
 ) -> dict[str, object]:
+    argv = (
+        list(invocation_argv) if invocation_argv is not None
+        else [execution.family, str(loops)]
+    )
+    stdin_bytes = invocation_stdin if invocation_stdin is not None else b""
     return {
         "schema": RAW_SCHEMA,
         "execution": asdict(execution),
         "loops": loops,
         "invocation": {
-            "argv": [execution.family, str(loops)],
-            "stdin": torch.empty(0, dtype=torch.uint8),
+            "argv": argv,
+            "stdin": torch.tensor(list(stdin_bytes), dtype=torch.uint8),
+            "stdin_sha256": hashlib.sha256(stdin_bytes).hexdigest(),
+            "input_seed": input_seed,
         },
         "stdout": torch.tensor(list(stdout), dtype=torch.uint8),
         "elapsed_ns": elapsed_ns,
@@ -772,10 +802,13 @@ def capture_execution(
     timeout: float,
     pebs_signal: str = "memory_loads",
     pebs_period: int = PEBS_PERIOD,
+    input_seed: int | None = None,
 ) -> CapturedExecution:
+    stdin_bytes = input_frame(input_seed)
+    invocation_argv = (str(binary), execution.family, str(loops))
     launch_started_ns = time.perf_counter_ns()
     process = subprocess.Popen(
-        ("taskset", "-c", str(target_cpu), str(binary), execution.family, str(loops)),
+        ("taskset", "-c", str(target_cpu), *invocation_argv),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     if process.stdout is None or process.stdout.readline() != b"READY\n":
@@ -806,7 +839,7 @@ def capture_execution(
             event_open_arm_ns = time.perf_counter_ns() - arm_started_ns
             workload_started_ns = time.perf_counter_ns()
             started_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
-            output, error = process.communicate(b"x", timeout=timeout)
+            output, error = process.communicate(stdin_bytes, timeout=timeout)
             elapsed_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW) - started_ns
             workload_ns = time.perf_counter_ns() - workload_started_ns
             stop_started_ns = time.perf_counter_ns()
@@ -829,6 +862,9 @@ def capture_execution(
         elapsed_ns=elapsed_ns,
         counts=counts,
         target_affinity=target_affinity,
+        invocation_argv=invocation_argv,
+        invocation_stdin=stdin_bytes,
+        input_seed=input_seed,
         phases_ns={
             "launch_ready": launch_ready_ns,
             "event_open_arm": event_open_arm_ns,
@@ -930,14 +966,17 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
     torch.set_num_threads(1)
 
     families = tuple(args.families)
-    plan, heldout = make_plan(
-        families,
-        repetitions=args.repetitions,
-        training_rows=args.training_rows,
-        calibration_rows=args.calibration_rows,
-        heldout_family_count=args.heldout_family_count,
-        seed=args.seed,
-    )
+    plan = ()
+    heldout = ()
+    if getattr(args, "execution_plan", None) is None:
+        plan, heldout = make_plan(
+            families,
+            repetitions=args.repetitions,
+            training_rows=args.training_rows,
+            calibration_rows=args.calibration_rows,
+            heldout_family_count=args.heldout_family_count,
+            seed=args.seed,
+        )
     identity = subject_manifest(
         binary,
         target_cpu=args.target_cpu,
@@ -947,6 +986,28 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
         pebs_signal=getattr(args, "pebs_signal", "memory_loads"),
         pebs_period=getattr(args, "pebs_period", PEBS_PERIOD),
     )
+    explicit_plan = None
+    planned_rows = {}
+    plan_path = getattr(args, "execution_plan", None)
+    if plan_path is not None:
+        from cpu2tensor.examples.hardware_seeded_capture_plan_r2 import load_plan
+
+        if not args.collect_only or args.capture_retries != 0:
+            raise ValueError("explicit capture plan requires collect-only and zero retries")
+        if getattr(args, "prospective_checkpoint", None) is not None:
+            raise ValueError("explicit benign capture plan cannot use prospective scoring")
+        if float(getattr(args, "retain_raw_fraction", 1.0)) != 1.0:
+            raise ValueError("explicit capture plan owns the exact raw retention set")
+        explicit_plan = load_plan(Path(plan_path), identity["identity_sha256"])
+        planned_rows = {
+            row["execution_id"]: row for row in explicit_plan["rows"]
+        }
+        plan = tuple(PlannedExecution(
+            row["execution_id"], row["family"], row["repetition"],
+            row["partition"],
+        ) for row in explicit_plan["rows"])
+        families = tuple(WORKLOAD_LOOPS)
+        heldout = ()
     prospective_checkpoint = getattr(args, "prospective_checkpoint", None)
     prospective_model = None
     prospective_threshold = None
@@ -973,6 +1034,10 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
     artifact = args.artifact.resolve()
     if (artifact / "capture-manifest.json").exists():
         raise ValueError("artifact already contains a sealed capture manifest")
+    if explicit_plan is not None:
+        if artifact.exists() and any(artifact.iterdir()):
+            raise ValueError("explicit capture requires a new empty artifact directory")
+        _atomic_json(artifact / "execution-plan.json", explicit_plan)
 
     entries = []
     collection_started = time.perf_counter()
@@ -988,10 +1053,19 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
     censored_tokens = {"pt": 0, "pebs": 0, "pmu": 0}
     kernel_decode_states: dict[str, dict[str, str]] = {}
     for execution in plan:
-        loops = planned_loops(
-            execution, seed=args.seed, loop_scale=args.loop_scale,
-            loop_divisors=getattr(args, "loop_divisors", (1,)),
-        )
+        if explicit_plan is None:
+            loops = planned_loops(
+                execution, seed=args.seed, loop_scale=args.loop_scale,
+                loop_divisors=getattr(args, "loop_divisors", (1,)),
+            )
+            input_seed = (
+                planned_input_seed(execution, seed=args.seed)
+                if getattr(args, "vary_input_seed", False) else None
+            )
+        else:
+            planned_row = planned_rows[execution.execution_id]
+            loops = planned_row["loops"]
+            input_seed = planned_row["input_seed"]
         for attempt in range(args.capture_retries + 1):
             total_attempts += 1
             try:
@@ -1001,6 +1075,7 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
                     timeout=args.timeout,
                     pebs_signal=getattr(args, "pebs_signal", "memory_loads"),
                     pebs_period=getattr(args, "pebs_period", PEBS_PERIOD),
+                    input_seed=input_seed,
                 )
                 feature_phases_ns: dict[str, int] = {}
                 feature_started = time.perf_counter()
@@ -1042,9 +1117,13 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             )
             kernel_decode_states[state_id] = kernel_decode_state
         phases_ns = {**captured.phases_ns, **feature_phases_ns}
-        audit_selected = retain_raw_execution(
-            identity["identity_sha256"], execution.execution_id,
-            seed=args.seed, fraction=raw_retention_fraction,
+        audit_selected = (
+            bool(planned_rows[execution.execution_id]["retain_raw"])
+            if explicit_plan is not None else
+            retain_raw_execution(
+                identity["identity_sha256"], execution.execution_id,
+                seed=args.seed, fraction=raw_retention_fraction,
+            )
         )
         prospective = None
         if prospective_model is not None:
@@ -1072,11 +1151,17 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             phases_ns["prospective_scoring"] = 0
         raw_path = artifact / "raw" / f"{execution.execution_id}.pt"
         raw_started_ns = time.perf_counter_ns()
+        invocation_argv = captured.invocation_argv or (
+            str(binary), execution.family, str(loops)
+        )
         raw_hash = _atomic_torch_save(raw_path, raw_capture_payload(
             captured.batches, decode_sideband=captured.decode_sideband,
             kernel_decode_state=kernel_decode_state,
             execution=execution, loops=loops,
             stdout=captured.output, elapsed_ns=captured.elapsed_ns,
+            invocation_argv=invocation_argv,
+            invocation_stdin=captured.invocation_stdin,
+            input_seed=captured.input_seed,
         ))
         phases_ns["raw_serialization_fsync_hash"] = (
             time.perf_counter_ns() - raw_started_ns
@@ -1110,6 +1195,11 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
         entries.append({
             **asdict(execution),
             "loops": loops,
+            "invocation": {
+                "argv": list(invocation_argv),
+                "stdin_sha256": hashlib.sha256(captured.invocation_stdin).hexdigest(),
+                "input_seed": captured.input_seed,
+            },
             "raw_path": str(raw_path.relative_to(artifact)),
             "raw_sha256": raw_hash,
             "raw_retained": raw_retained,
@@ -1141,13 +1231,27 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
         "feature_schema": MULTIMODAL_FEATURE_SCHEMA,
         **identity,
         "split": {
-            "seed": args.seed,
+            "seed": explicit_plan["cohort_seed"] if explicit_plan is not None
+            else args.seed,
+            "vary_input_seed": (
+                explicit_plan is not None or
+                bool(getattr(args, "vary_input_seed", False))
+            ),
             "families": list(families),
             "heldout_families": list(heldout),
-            "repetitions": args.repetitions,
-            "loop_divisors": list(getattr(args, "loop_divisors", (1,))),
-            "training_rows_per_familiar_family": args.training_rows,
-            "calibration_rows_per_familiar_family": args.calibration_rows,
+            "repetitions": (1 if explicit_plan["kind"] == "smoke" else 20)
+            if explicit_plan is not None else args.repetitions,
+            "loop_divisors": [1, 2, 5] if explicit_plan is not None else
+            list(getattr(args, "loop_divisors", (1,))),
+            "training_rows_per_familiar_family": 0 if explicit_plan is not None
+            else args.training_rows,
+            "calibration_rows_per_familiar_family": 0 if explicit_plan is not None
+            else args.calibration_rows,
+            "explicit_plan": None if explicit_plan is None else {
+                "kind": explicit_plan["kind"],
+                "cohort_seed": explicit_plan["cohort_seed"],
+                "sha256": _sha256(artifact / "execution-plan.json"),
+            },
         },
         "collection": {
             "executions": len(entries),
@@ -1176,11 +1280,16 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             "censored_tokens": censored_tokens,
             "raw_retention": {
                 "method": (
+                    "exact_seeded_plan_r2" if explicit_plan is not None else
                     "frozen_score_then_preregistered_audit_v1"
-                    if prospective_model is not None
-                    else "sha256_dataset_seed_execution_prefix_v1"
+                    if prospective_model is not None else
+                    "sha256_dataset_seed_execution_prefix_v1"
                 ),
-                "fraction": raw_retention_fraction,
+                "fraction": (
+                    sum(bool(row["retain_raw"]) for row in explicit_plan["rows"])
+                    / len(explicit_plan["rows"])
+                    if explicit_plan is not None else raw_retention_fraction
+                ),
                 "retained_executions": sum(
                     bool(entry["raw_retained"]) for entry in entries
                 ),
@@ -1753,6 +1862,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("loop divisors must be positive")
     if not 0.0 <= float(getattr(args, "retain_raw_fraction", 1.0)) <= 1.0:
         raise ValueError("raw retention fraction must be between zero and one")
+    if getattr(args, "execution_plan", None) is not None and not args.collect_only:
+        raise ValueError("explicit capture plans require --collect-only")
     if args.collect_only:
         return {"collection": collect(args)}
     if args.train_only:
@@ -1795,6 +1906,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--loop-scale", type=int, default=1)
     result.add_argument("--loop-divisors", type=int, nargs="+", default=(1,))
     result.add_argument("--seed", type=int, default=20260925)
+    result.add_argument(
+        "--execution-plan", type=Path,
+        help="exact subject-bound smoke or two-session seed/retention plan",
+    )
+    result.add_argument(
+        "--vary-input-seed", action="store_true",
+        help="send deterministic per-execution benign input bytes after READY",
+    )
     result.add_argument("--repetitions", type=int, default=12)
     result.add_argument("--training-rows", type=int, default=6)
     result.add_argument("--calibration-rows", type=int, default=3)
