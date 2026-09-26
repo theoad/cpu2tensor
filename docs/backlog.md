@@ -1,11 +1,37 @@
 # Work board
 
-Updated 2026-09-25. This file owns work status. The first vertical slice is complete:
+Updated 2026-09-26. This file owns work status. The first vertical slice is complete:
 real observation, integration, packaging, and standard-IDE navigation checks pass.
 Core register and memory instrumentation is checked on ARM, x86 guests, CPU and
 MPS. Mixed frames, bounded multiworker collation and packed MPS uploads are now
 measured. AWS/CUDA and sustained multi-host scaling remain open.
 Later milestones are outcomes, not schedule promises.
+
+## Current decision: six-hour hardware-anomaly sprint
+
+The 102,000-execution same-subject collection finished without loss or retry,
+but the frozen d128/d512 models failed the corrected Dirty Pipe canary. Capacity
+alone did not help. Dirty Pipe is now a secondary logic-flaw challenge; the
+primary validation will use a matched corruption or pathological-execution
+effect with lawful controls. Parallel tracks are examining validation,
+generic PT/PEBS/PMU observability, efficient model baselines, a separate
+benign-only pretraining objective, and exact-package safe candidate provenance.
+The coordinator owns the [sprint gate](hardware-anomaly-sprint.md): recall in
+the top 100 of one million executions, benign FPR at most `1e-4` (target
+`5e-5` for headroom), independent calibration/session holdout, complete
+capture custody, and bounded GPU resources. Review by 2026-09-26 06:20 UTC.
+The 24-hour campaign remains **NO-GO** pending measured sensitivity.
+
+First bounded ablations are recorded in the [validation](hardware-anomaly-validation-r1.md),
+[capture](hardware-anomaly-capture-r1.md), [model](hardware-anomaly-model-r1.md),
+[pretraining](hardware-anomaly-pretraining-r1.md), [candidate](hardware-anomaly-candidate-r1.md),
+and [nuisance](hardware-anomaly-nuisance-r1.md) notes. Compact models and a
+cross-modal residual failed benign whole-family transfer; the raw audit found
+PT order omitted by the model but no PT timing packets and no compelling Dirty
+Pipe effect. No safe distinct exact-package physical bug trigger is admitted.
+Fourteen focused new tests pass. The thirty-minute sprint monitor can launch
+one bounded, disjoint next ablation when a measured blocker is identified;
+none of these negative results authorizes scale by itself.
 
 ## Current hardware tracing slice
 
