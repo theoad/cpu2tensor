@@ -41,12 +41,20 @@ of the fused-plus-PMU conjunction now passes unchanged for all three models:
 control alerts. All 83 fresh physical executions were first-attempt, lossless,
 and copied off-host with every raw and derived hash verified.
 
-This confirms a reusable hardware-visible proxy, not vulnerability sensitivity
-or the target false-positive rate. Next: freeze this detector for a 30,000-row
-independent benign calibration gate, while training a cross-modal anomaly head
-on disjoint lawful effects without confirmation-label leakage. Promotion still
-requires recall in the top 100 at benign FPR at most $10^{-4}$; the million-run
-and 24-hour campaigns remain **NO-GO**.
+This confirms a reusable hardware-visible proxy, not vulnerability sensitivity.
+The subsequent [3,060-row benign pilot](hardware-effect-calibration-pilot-r1.md)
+cleanly collected all rows but failed its zero-alert gate: frozen seeds 2801,
+2802, and 2803 produced 1, 0, and 23 alerts. Seed 2803's failures concentrate on
+22 `uname` rows across all three cohorts; the remaining `yield` row is also the
+seed-2801 alert. The 30,000-row calibration is therefore blocked, and no
+threshold or ensemble rule will be selected post hoc on these data.
+
+Next: use the pilot as development data for a lightweight cross-modal anomaly
+head that conditions out family/intensity nuisance, while keeping the pretrained
+encoder and a new physical session untouched for prospective evaluation. Train
+effect discrimination only on disjoint lawful error/control pairs. Promotion
+still requires recall in the top 100 at benign FPR at most $10^{-4}$; the
+million-run and 24-hour campaigns remain **NO-GO**.
 
 ## Closed decision: initial hardware transfer comparison
 
