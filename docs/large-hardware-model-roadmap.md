@@ -5,6 +5,41 @@ foundation model that learns a reusable grammar of hardware execution from raw
 PT, PEBS, PMU, timing, topology, and workload context. Vulnerability detection
 is one downstream task.
 
+## Deployment hierarchy
+
+The intended system narrows its data and responsibilities at each level:
+
+```text
+architecture foundation model
+  -> application world model
+     -> API / attack-surface fuzzing harness
+```
+
+1. **Architecture pretraining** spans user and kernel execution, many
+   applications and operating systems, and eventually several ISAs, CPU
+   families, and microarchitectures. ISA, vendor, family/model/stepping,
+   topology, event-schema, privilege, and address-layout context condition
+   architecture-specific frontends and decoders around a shared trunk. The
+   objective is reusable execution grammar—not a vulnerability label—while
+   retaining exact-machine residuals rather than normalizing real quirks away.
+2. **Application fine-tuning** narrows interaction to one application or
+   executable build. Paired `(state, action/input) -> (trace, transition,
+   effect)` episodes teach forward dynamics, inverse action proposals,
+   counterfactuals, and application invariants. One application model should be
+   reusable by several independently operated harnesses.
+3. **Harnessed inference** narrows again to one API or attack surface. The
+   harness owns its input grammar, mutators, reset protocol, batching,
+   exploration policy, evidence custody, and review budget. It uses a frozen or
+   explicitly versioned application model to rank perturbations and suspicious
+   executions without silently changing the deployed judge.
+
+Evaluation must follow the same hierarchy: hold out whole applications and
+machines during pretraining, whole APIs or subsystems during application
+fine-tuning, and hidden effects, vulnerabilities, and seeds at the harness
+level. Each level has its own autoresearch loop, joined by explicit promotion
+gates. A five-minute run is a scout, not evidence that a champion scales;
+survivors advance through longer confirmation and scaling rungs.
+
 ## Four stages
 
 1. **Self-supervised scaling laws.** Measure held-out reconstruction,

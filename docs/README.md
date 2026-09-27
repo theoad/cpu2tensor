@@ -19,6 +19,10 @@
   within-lane timing objective result and rejection decision.
 - [Hardware anomaly evidence](hardware-anomaly-evidence.md): replayable LLM
   handoff, faithful residual localization, PEBS semantics, and symbol sideband.
+- [Large Hardware Model roadmap](large-hardware-model-roadmap.md): hierarchical
+  architecture pretraining, application fine-tuning, and API-level harnessing.
+- [Large Hardware Model applications](large-hardware-model-applications.md):
+  downstream tasks, evaluation splits, flagship transfers, and autoresearch gates.
 - [Kernel-only multimodal experiment](kernel-multimodal-experiment.md): sealed
   corpus collection, MPS training, frozen calibration, and corruption evaluation.
 - [Repeated action windows](action-windows.md): guest boundaries and fixed
