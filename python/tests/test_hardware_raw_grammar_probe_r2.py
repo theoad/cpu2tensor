@@ -5,7 +5,12 @@ import numpy as np
 import pytest
 import torch
 
-from cpu2tensor.examples.hardware_raw_grammar_probe_r2 import grammar_for_raw
+from cpu2tensor.examples.hardware_raw_grammar_probe_r2 import (
+    _anchor_variation,
+    _finite_median,
+    _pair_medians,
+    grammar_for_raw,
+)
 
 
 def _lane(tid: int, cpu: int, trace: bytes, timestamp: int) -> dict:
@@ -75,3 +80,35 @@ def test_rejects_missing_or_multiplexed_signal() -> None:
     raw["batches"][0]["pt"]["source"] = 99
     with pytest.raises(ValueError, match="escaped"):
         grammar_for_raw(raw, (0x1000, 0x2000))
+
+
+def test_empty_finite_similarity_is_explicitly_missing() -> None:
+    assert _finite_median([float("nan"), float("inf")]) is None
+    assert _finite_median([float("nan"), 0.25, 0.75]) == 0.5
+
+
+def test_similarity_uses_every_within_and_cross_group_pair() -> None:
+    psb = bytes((2, 130)) * 8
+    lanes = [
+        grammar_for_raw({"batches": [_lane(tid, 2, psb + suffix, 130)]},
+                        (0x1000, 0x2000))[0]
+        for tid, suffix in ((11, b"aa"), (12, b"ab"), (13, b"bb"))
+    ]
+    rows = [
+        ({"family": "effect", "loops": 20}, lanes[0]),
+        ({"family": "effect", "loops": 20}, lanes[1]),
+        ({"family": "neutral", "loops": 20}, lanes[2]),
+    ]
+    result = _pair_medians(rows)
+    assert result["same_family_intensity"]["pairs"] == 1
+    assert result["cross_family_same_intensity"]["pairs"] == 2
+
+
+def test_anchor_variation_counts_unique_per_execution_minima() -> None:
+    assert _anchor_variation([10, 10, 20], [30, 40, 40]) == {
+        "ip_unique": 2,
+        "address_unique": 2,
+        "rows_with_pebs": 3,
+    }
+    with pytest.raises(ValueError, match="anchor rows differ"):
+        _anchor_variation([10], [])

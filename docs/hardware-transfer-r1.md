@@ -134,6 +134,76 @@ cost. First improve stable observations and independently varied matched example
 then rerun a fully archived comparison and evaluate a different effect family.
 The detector and million-execution campaign remain **NO-GO**.
 
+## Qualified completion and observation diagnosis
+
+The preliminary section above records the thermal/debugging path. It is
+superseded for the matched comparison by two complete one-thread physical-host
+runs. Seed 1729 ran in a transient user service with a 5% CPU quota and required
+240.36 seconds of service wall time (214.32 seconds inside the report), 12.02 CPU
+seconds, 459,920 KiB peak RSS, and no swap. All three resulting checkpoint hashes
+are byte-identical to the earlier completed training checkpoint files, while this
+run additionally preserves every training statistic and the common row-schedule
+hash. Seed 1730 ran with CPU 2 capped at 1.8 GHz and turbo disabled under an
+independent restore timer. It required 27.12 seconds of service wall time (24.46
+seconds inside the report), 27.09 CPU seconds, 460,144 KiB peak RSS, and no swap.
+The host policy was restored to `no_turbo=0` and a 4.9 GHz maximum immediately
+afterward. These timings use different duty/frequency controls and are not a
+performance comparison.
+
+| Seed | Arm | Training result | Second-session AUROC | Paired wins | Alerts at calibration maximum (effect/control) |
+| --- | --- | --- | ---: | ---: | ---: |
+| 1729 | Scratch | loss 1.292 $\rightarrow$ 0.059 | 0.424 | 5/12 | 0/0 |
+| 1729 | Frozen pretrained | loss 1.202 $\rightarrow$ 1.028 | 0.417 | 4/12 | 0/0 |
+| 1729 | Fine-tuned pretrained | loss 1.207 $\rightarrow$ 0.011 | 0.438 | 5/12 | 0/0 |
+| 1730 | Scratch | loss 1.544 $\rightarrow$ 0.033 | 0.715 | 8/12 | 2/0 |
+| 1730 | Frozen pretrained | loss 1.237 $\rightarrow$ 1.038 | 0.424 | 4/12 | 0/0 |
+| 1730 | Fine-tuned pretrained | loss 1.241 $\rightarrow$ 0.090 | 0.465 | 5/12 | 0/0 |
+
+The seed-1730 scratch result is not a promotion: it is one reused 12-pair
+development replay, unstable across predetermined seeds, and its conservative
+threshold catches only 2/12 effects. Most importantly, neither pretrained arm
+beats scratch. Offline pretraining has not demonstrated reusable bug signal.
+
+A separate 1.20-second x86 diagnostic used 256 benign training rows only to fit
+per-coordinate scale. For each modality, the first canary session then defined a
+single mean effect-minus-control direction; the second session was projected
+without refitting. This is deliberately a linear representation diagnostic, not
+a claim that every nonlinear classifier must fail. Coordinates constant in the
+256 benign scaling rows are omitted, so a rare site confined to the canary is
+also outside this diagnostic:
+
+| Modality | Train AUROC | Second-session AUROC | Effect-direction cosine across sessions | Train effect norm / session-shift norm |
+| --- | ---: | ---: | ---: | ---: |
+| Raw PT v3 tensor | 1.000 | 0.326 | -0.071 | 1.182 |
+| PEBS v3 tensor | 1.000 | 0.354 | -0.047 | 1.369 |
+| PMU | 0.618 | 0.361 | -0.987 | 0.106 |
+| Timing | 0.569 | 0.493 | 0.176 | 0.716 |
+| Fused | 1.000 | 0.354 | -0.049 | 1.320 |
+
+The raw, fixed-boot grammar audit verified all 24 raw hashes per session against
+the content-hashed canary report, then used all 132 within-arm and 144 cross-arm
+pairs per session. Those pairwise comparisons reuse 24 executions and are
+descriptive similarities, not independent trials. PT ordinal-bigram cosine was
+0.9986 within an arm and 0.9985 across
+arms in the first session (0.9987 for both in the second): stationary, but not a
+Dirty Pipe separator. PEBS time/site/address cosine was 0.2123 within an arm and
+0.2117 across arms (0.2133 and 0.2140 in the second): sampling noise overwhelms
+this effect. All 52,119 combined PEBS records had exact IP and nonzero address,
+and more than 99.8% mapped to core text, so missing/censored samples do not
+explain the result.
+
+The v3 feature code also chooses `min(ip)` and `min(address)` independently per
+execution. Each 24-row session had 16 distinct IP minima and 24 distinct address
+minima. Because those minima determine IP hash bins and offset moments, one rare
+lower sample moves otherwise unchanged features. This is a generic coordinate
+bug, now tracked as cpu2tensor issue
+[#28](https://github.com/theoad/cpu2tensor/issues/28). The existing 102k derived
+corpus cannot be repaired because only 525 raw audit traces were retained. The
+next experiment is therefore a small two-session seeded collection under a
+schema using exact-boot `_text` anchoring and relocation-safe address summaries,
+followed by a distinct safe hardware-visible effect gate. Dirty Pipe stays a
+secondary logic-flaw challenge. Scale remains **NO-GO**.
+
 ## Artifact custody
 
 Physical artifacts remain under
@@ -154,6 +224,18 @@ is `/Users/theoad/.cache/cpu2tensor/hardware-transfer-20260926`. Neither the ori
 - Recovered score report: `preserved-evaluation-seed1729-step40-v3/report.json`,
   SHA-256 `46b6363c1283ca581c74d6085535262d86cfcf33f5223221ea1866898f7b1e37`.
 - Recovered scores: `6cdc551e0b05bb034ee902ca1c86285074c96f616b54741f7567f12f454aba75`.
+- Qualified seed-1729 report: `qualified-seed1729-step40/report.json`,
+  `e7387c2d234582e86ee92e1aff672717b1cb559517e27d5873c09755dbbf4e41`;
+  training ledger `5133ffe20156200d4f31c45c2f25de6d1ea3acc9e0127f78bf5d90a05676316b`.
+- Qualified seed-1730 report: `capped-seed1730-step40/report.json`,
+  `8efcbc18f7807f3df80ce66ff9b18bfb97a32592a2c47b82bc8ba379d2c93890`;
+  training ledger `cbf8230c71fcaa1befedc7348b8b1619b73b856bf96d0d9d59bd3e5b21310e27`.
+- Cross-session modality diagnostic: `stability-r2-v2.json`,
+  `af949ba064016cdf4f662732470bfdab2f07e2e75f41d80031e6c5fc3864f166`.
+- Corrected, raw-hash-verified grammar reports: `raw-grammar-d128-v5.json`,
+  `2b9f5db93520661878d954c95247055f79263f58584ea6371a5abd7ddad70c78`,
+  and `raw-grammar-d512-v5.json`,
+  `89741ed7560660a13671d4da2b8427b3ab9bb0b4f5d22ed74983786a33d22798`.
 
 The old `cycle-seed*-step40` outputs have unequal sampling schedules and are
 excluded from the table. `cycle-seed1729-step500` contains partial evidence only.

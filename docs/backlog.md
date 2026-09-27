@@ -1,6 +1,6 @@
 # Work board
 
-Updated 2026-09-26. This file owns work status. The first vertical slice is complete:
+Updated 2026-09-27. This file owns work status. The first vertical slice is complete:
 real observation, integration, packaging, and standard-IDE navigation checks pass.
 Core register and memory instrumentation is checked on ARM, x86 guests, CPU and
 MPS. Mixed frames, bounded multiworker collation and packed MPS uploads are now
@@ -12,14 +12,24 @@ Later milestones are outcomes, not schedule promises.
 The previous sprint is closed NO-GO and its heartbeat is paused. The accepted
 next slice is the [three-arm transfer comparison](hardware-transfer-r1.md):
 scratch, frozen pretrained encoder plus trained head, and fine-tuned encoder/head.
-The initial retained-data slice is implemented and its preliminary result is
-negative: scratch/fine-tuned checkpoints separate all training pairs but fail
-second-session separation. The corrected 40-step x86 run finished all three arms
-then hit its 80 C stop while scoring. Checkpoints were hash-verified off-host and
-scored on Mac CPU. No further host training, second seed, or scale campaign was
-launched. Next: restore safe host cooling, qualify stable cross-session observations
-and independent-input/effect data, then resume short serialized cycles. Do not
-increase capacity or promote a detector on familiar-defect training accuracy.
+negative. Two corrected 40-step seeds now have complete training and evaluation
+reports from physical `trail-x86`, identical per-arm row schedules, and
+hash-verified off-host custody. Pretrained/fine-tuned arms remain near chance on
+the second session; scratch varies from AUROC 0.424 to 0.715 across seeds. A
+fixed train-session mean-difference audit fits PT/PEBS training pairs perfectly
+but reverses on the second session. This establishes failure of that linear
+transfer direction, not absence of every nonlinear modality signal.
+
+Raw inspection found a generic representation defect: v3 PEBS features anchor
+site and address offsets to each execution's sampled minimum. Each retained
+24-row session had 16 minimum-IP identities and 24/24 distinct minimum-address
+identities despite the exact same boot and workload recipe. cpu2tensor issue
+[#28](https://github.com/theoad/cpu2tensor/issues/28) owns the exact-boot anchor
+correction. Dirty Pipe remains a secondary logic challenge, not the primary
+hardware-sensitivity gate. Next: validate a corrected feature schema on a small
+two-session seeded capture and admit a separate safe corruption/pathological-
+execution effect gate before recollecting pretraining data. Do not increase
+capacity or promote a detector on familiar-defect training accuracy.
 
 ## Closed decision: six-hour hardware-anomaly sprint
 

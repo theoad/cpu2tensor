@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import itertools
 import json
 import math
 from pathlib import Path
@@ -227,6 +228,21 @@ def _cosine(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.dot(flat_left, flat_right) / denominator) if denominator else math.nan
 
 
+def _finite_median(values: list[float]) -> float | None:
+    finite = [value for value in values if math.isfinite(value)]
+    return statistics.median(finite) if finite else None
+
+
+def _anchor_variation(min_ips: list[int], min_addresses: list[int]) -> dict[str, int]:
+    if len(min_ips) != len(min_addresses):
+        raise ValueError("PEBS IP/address anchor rows differ")
+    return {
+        "ip_unique": len(set(min_ips)),
+        "address_unique": len(set(min_addresses)),
+        "rows_with_pebs": len(min_ips),
+    }
+
+
 def _pair_medians(rows: list[tuple[dict[str, Any], LaneGrammar]]) -> dict[str, Any]:
     groups: dict[tuple[str, int], list[LaneGrammar]] = {}
     for entry, lane in rows:
@@ -234,40 +250,81 @@ def _pair_medians(rows: list[tuple[dict[str, Any], LaneGrammar]]) -> dict[str, A
     vectors = ("pt_ordinal_bigram", "pebs_time_site_address")
     comparisons = {kind: {name: [] for name in vectors} for kind in
                    ("same_family_intensity", "cross_intensity", "cross_family_same_intensity")}
-    for key, lanes in groups.items():
-        if len(lanes) >= 2:
+    for lanes in groups.values():
+        for left, right in itertools.combinations(lanes, 2):
             for name in vectors:
                 comparisons["same_family_intensity"][name].append(
-                    _cosine(getattr(lanes[0], name), getattr(lanes[1], name)))
-        alternatives = sorted(other for other in groups if other[1] == key[1]
-                              and other[0] != key[0])
-        if alternatives:
+                    _cosine(getattr(left, name), getattr(right, name)))
+    keys = sorted(groups)
+    for left_key, right_key in itertools.combinations(keys, 2):
+        if left_key[1] != right_key[1] or left_key[0] == right_key[0]:
+            continue
+        for left, right in itertools.product(groups[left_key], groups[right_key]):
             for name in vectors:
                 comparisons["cross_family_same_intensity"][name].append(
-                    _cosine(getattr(lanes[0], name),
-                            getattr(groups[alternatives[0]][0], name)))
+                    _cosine(getattr(left, name), getattr(right, name)))
     for family in sorted({key[0] for key in groups}):
         intensities = sorted(key for key in groups if key[0] == family)
-        if len(intensities) >= 2:
-            for name in vectors:
-                comparisons["cross_intensity"][name].append(
-                    _cosine(getattr(groups[intensities[0]][0], name),
-                            getattr(groups[intensities[-1]][0], name)))
-    return {
-        kind: {"pairs": len(values[vectors[0]]),
-               "cosine_median": {name: statistics.median([value for value in values[name]
-                                                           if math.isfinite(value)])
-                                  for name in vectors}}
-        for kind, values in comparisons.items()
-    }
+        for left_key, right_key in itertools.combinations(intensities, 2):
+            for left, right in itertools.product(groups[left_key], groups[right_key]):
+                for name in vectors:
+                    comparisons["cross_intensity"][name].append(
+                        _cosine(getattr(left, name), getattr(right, name)))
+    result = {}
+    for kind, values in comparisons.items():
+        medians = {}
+        finite_counts = {}
+        for name in vectors:
+            finite = [value for value in values[name] if math.isfinite(value)]
+            medians[name] = _finite_median(values[name])
+            finite_counts[name] = len(finite)
+        result[kind] = {
+            "pairs": len(values[vectors[0]]),
+            "finite_pairs": finite_counts,
+            "cosine_median": medians,
+        }
+    return result
 
 
 def audit_raw_grammar(artifact: Path, *, verify_manifest: bool = True) -> dict[str, Any]:
     """Reduce one shard at a time; retain only compact diagnostic sketches."""
-    manifest_bytes = (artifact / "capture-manifest.json").read_bytes() if verify_manifest else b""
-    manifest = json.loads(manifest_bytes) if verify_manifest else None
-    entries = ([entry for entry in manifest["entries"] if entry["raw_retained"]]
-               if manifest is not None else None)
+    custody_bytes = b""
+    custody_kind = None
+    metadata_by_path: dict[str, dict[str, Any]] = {}
+    entries = None
+    if verify_manifest:
+        manifest_path = artifact / "capture-manifest.json"
+        report_path = artifact / "report.json"
+        if manifest_path.exists():
+            custody_bytes = manifest_path.read_bytes()
+            custody_kind = "capture_manifest"
+            manifest = json.loads(custody_bytes)
+            entries = [entry for entry in manifest["entries"] if entry["raw_retained"]]
+            metadata_by_path = {
+                entry["raw_path"]: {"family": entry["family"], "loops": entry["loops"]}
+                for entry in entries
+            }
+        elif report_path.exists():
+            custody_bytes = report_path.read_bytes()
+            custody_kind = "canary_report"
+            report = json.loads(custody_bytes)
+            canonical = dict(report)
+            expected_content = canonical.pop("content_sha256", None)
+            observed_content = hashlib.sha256(json.dumps(
+                canonical, sort_keys=True, separators=(",", ":")
+            ).encode()).hexdigest()
+            if expected_content != observed_content:
+                raise ValueError("canary report content hash mismatch")
+            entries = report["rows"]
+            metadata_by_path = {
+                entry["raw_path"]: {
+                    "family": entry["arm"],
+                    "loops": report["protocol"]["loops"],
+                }
+                for entry in entries
+            }
+        else:
+            raise ValueError("no capture manifest or canary report for raw custody")
     paths = ([artifact / entry["raw_path"] for entry in entries] if entries is not None
              else sorted((artifact / "raw").glob("*.pt")))
     paths.sort()
@@ -276,6 +333,8 @@ def audit_raw_grammar(artifact: Path, *, verify_manifest: bool = True) -> dict[s
         raise ValueError("no retained raw shards")
     decode_cache: dict[str, tuple[dict[str, Any], tuple[int, int]]] = {}
     rows: list[tuple[dict[str, Any], LaneGrammar]] = []
+    pebs_min_ips: list[int] = []
+    pebs_min_addresses: list[int] = []
     started = time.perf_counter()
     reduction_seconds = 0.0
     for path in paths:
@@ -305,9 +364,15 @@ def audit_raw_grammar(artifact: Path, *, verify_manifest: bool = True) -> dict[s
         reduction_seconds += time.perf_counter() - reducing
         if len(lanes) != 1:
             raise ValueError("the audit comparison requires one lane per shard")
-        metadata = entry if expected else {**raw["execution"], "loops": raw["loops"]}
+        metadata = (metadata_by_path[str(path.relative_to(artifact))]
+                    if expected else {**raw["execution"], "loops": raw["loops"]})
         # Do not retain raw PT, PEBS token objects, or decoded sideband per row.
         lane = lanes[0]
+        if lane.pebs_stores:
+            pebs_min_ips.append(min(store.raw_ip for store in lane.pebs_stores))
+            pebs_min_addresses.append(
+                min(store.raw_virtual_address for store in lane.pebs_stores)
+            )
         rows.append((metadata, LaneGrammar(
             tid=lane.tid, pt_spans=(), pebs_stores=(),
             pt_ordinal_bigram=lane.pt_ordinal_bigram,
@@ -326,8 +391,15 @@ def audit_raw_grammar(artifact: Path, *, verify_manifest: bool = True) -> dict[s
         del raw, file_bytes, lanes, lane
     elapsed = time.perf_counter() - started
     source_rows = [lane for _, lane in rows]
+    custody_sha256 = (
+        hashlib.sha256(custody_bytes).hexdigest() if custody_bytes else None
+    )
     return {
-        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest() if manifest is not None else None,
+        "custody_kind": custody_kind,
+        "custody_sha256": custody_sha256,
+        "manifest_sha256": (
+            custody_sha256 if custody_kind == "capture_manifest" else None
+        ),
         "raw_hashes_verified": bool(expected),
         "rows": len(rows),
         "boot_decode_states": sorted(decode_cache),
@@ -342,6 +414,9 @@ def audit_raw_grammar(artifact: Path, *, verify_manifest: bool = True) -> dict[s
         "pebs_nonzero_addresses": sum(lane.pebs_nonzero_address_count for lane in source_rows),
         "pebs_timestamp_inversions": sum(lane.pebs_timestamp_inversions for lane in source_rows),
         "pebs_timestamp_ties": sum(lane.pebs_timestamp_ties for lane in source_rows),
+        "per_execution_anchor_variation": _anchor_variation(
+            pebs_min_ips, pebs_min_addresses
+        ),
         "sampled_cpus": sorted({cpu for lane in source_rows for cpu in lane.sampled_cpus}),
         "similarity": _pair_medians(rows),
         "elapsed_seconds": elapsed,
