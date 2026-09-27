@@ -1,0 +1,83 @@
+# Intel x86-64 foundation corpus
+
+The first autoresearch loop requires 64 GB of diverse raw Intel PT, PEBS, PMU,
+perf sideband, and exact workload evidence from one physical Intel x86-64
+subject. Byte count is necessary but not sufficient: the release is rejected if
+loss, workload imbalance, provenance gaps, session leakage, or collector identity
+can explain its evaluation results.
+
+## Collection ladder
+
+1. Qualify `process_user_kernel` capture on the exact host with matched
+   user-only and kernel-only controls.
+2. Seal an 8 GB pilot spanning every planned software family and at least two
+   sessions. Audit coverage, first-attempt admission, repeat noise, phase and
+   family balance, input effectiveness, and split leakage.
+3. Freeze the accepted plan and collect nested 8, 32, and 64 GB subsets. New
+   bytes may expand repetitions and inputs but cannot repair evaluation splits
+   after model results are visible.
+4. Publish the 64 GB release only after independent manifest and object-hash
+   verification from a second machine.
+
+Whole applications, not executions, own partitions. An evaluation application,
+input, generated artifact, session, or derivative may not appear in training.
+Long traces are windowed for training but remain grouped by execution and split.
+
+## Remote storage
+
+The private source of truth is
+`s3://alphaflow-hardware-corpus-403339561360-us-east-1`. Public access is
+blocked, default SSE-S3 encryption and versioning are enabled, and incomplete
+multipart uploads expire after seven days. The x86 host stages at most one
+closed shard; a coordinator verifies the uploaded checksum before removing that
+staging copy.
+
+```text
+objects/raw/sha256/<prefix>/<digest>.tar
+releases/<corpus-id>/manifest.json
+releases/<corpus-id>/index.jsonl
+views/<corpus-id>/<view-schema>/sha256/<prefix>/<digest>.safetensors
+views/<corpus-id>/<view-schema>/manifest.json
+```
+
+Raw objects are immutable, uncompressed tar shards targeted at 256 MiB. Each
+execution member contains its original PT AUX bytes, perf records, PEBS samples,
+boundary PMU counters, decode sideband reference, invocation, output, capture
+envelope, and subject identity. An index records the tar data offset and length,
+so readers may use HTTP/S3 range reads; sequential trainers instead download and
+shuffle whole shards. Object names are SHA-256 content addresses, and release
+manifests are append-only commit records.
+
+Training views are separately versioned 128--512 MiB `safetensors` shards with
+fixed-size windows and columnar metadata. They are cheap to stream, cache, memory
+map, and sample with multiple data-loader workers. A view retains execution ID,
+raw object/hash/offset, window offset, application/family/split/session, privilege
+policy, missingness, and temporal alignment. Changing tokenization creates a new
+view; it never rewrites raw custody.
+
+AWS trainers receive a read-only instance role. External trainers such as
+RunPod receive bounded temporary read-only credentials or presigned manifests;
+no long-lived write key is embedded in an image. A trainer caches shards on
+local NVMe and samples in two stages: select the requested family/split stratum,
+then shuffle shards and windows within it. This prevents high-byte-rate programs
+from defining the training distribution.
+
+## Admission and release gates
+
+- exact stock kernel, boot, CPU family/model/stepping, microcode, topology,
+  frequency policy, capture code, event encodings, executable and input hashes;
+- both user and kernel PT admitted under one explicit privilege policy;
+- no PT/perf loss, AUX gaps, PMU multiplexing, missing expected output, or
+  undeclared retry;
+- PEBS zero-sample windows are explicit rather than retried into a biased set;
+- every accepted execution has a complete raw record before sharding;
+- family and application byte quotas, execution counts, duration, PT bytes,
+  PEBS counts, PMU distributions, and privilege coverage are reported;
+- matched repeats and independent sessions quantify acquisition noise;
+- whole-application/session split audit has zero collisions by content and
+  provenance hashes;
+- every local shard, S3 object, release index, and manifest hash verifies from
+  an independent reader before release.
+
+The 8 GB pilot may expose new gates. It cannot weaken these gates merely to make
+the 64 GB target complete.

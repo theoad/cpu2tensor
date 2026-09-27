@@ -7,6 +7,26 @@ MPS. Mixed frames, bounded multiworker collation and packed MPS uploads are now
 measured. AWS/CUDA and sustained multi-host scaling remain open.
 Later milestones are outcomes, not schedule promises.
 
+## Current decision: 64 GB Intel x86-64 foundation corpus
+
+The active slice is the [foundation corpus](hardware-foundation-corpus.md) for
+the first autoresearch loop. Completion requires a diverse, balanced, loss-free,
+hash-verified 64 GB raw corpus with whole-application and independent-session
+splits; bytes alone do not complete it. Collection proceeds through an 8 GB
+qualification pilot before nested 32 and 64 GB releases. Raw custody and
+training-ready views live in a private, versioned S3 store so AWS and external
+GPU trainers can stream or cache large shards efficiently.
+
+The first implementation checkpoint adds an explicit `process_user_kernel`
+perf scope and a gated arbitrary-program launcher. Twenty hardware contract
+tests pass locally. On `trail-x86` (Intel i7-10510U, Linux
+`5.13.0-30-generic`, boot `31179aea-9a43-4c5d-8bf6-1205735e42c4`), a real
+root-owned mixed mmap qualification retained 138,944 PT bytes, one precise-load
+sample, and non-multiplexed instructions/cycles/reference-cycles while the
+target remained an ordinary CPU-2-pinned user process. Matched privilege arms,
+generic application custody, shard publication, and the 8 GB quality audit are
+still required before pilot collection is GO.
+
 ## PEBS coordinate correctness: issue 28
 
 The isolated generic fix uses retained runtime core `_text`/`_etext` bounds,

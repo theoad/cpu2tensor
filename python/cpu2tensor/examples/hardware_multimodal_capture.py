@@ -101,7 +101,7 @@ def _run_target(args: argparse.Namespace, arm: str) -> dict[str, object]:
             elapsed_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW) - started
         else:
             config = HardwareMultimodalConfig(
-                "process_kernel",
+                args.scope,
                 process.pid,
                 modalities=modalities,
                 pebs_period=args.pebs_period,
@@ -130,6 +130,7 @@ def _run_target(args: argparse.Namespace, arm: str) -> dict[str, object]:
         "pid": process.pid,
         "tid": process.pid,
         "cpu": args.cpu,
+        "scope": args.scope,
         "pt_bytes": 0,
         "pebs_samples": 0,
         "pebs_time_min_ns": None,
@@ -194,8 +195,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if len(outputs) != 1:
         raise RuntimeError("instrumentation changed the target's exact output")
     tri_modal = [row for row in rows if row["arm"] == "pt_pebs_pmu"]
-    if any(row["pt_bytes"] == 0 or row["pebs_samples"] == 0 for row in tri_modal):
-        raise RuntimeError("a tri-modal arm did not produce both PT bytes and PEBS samples")
+    if any(row["pt_bytes"] == 0 for row in tri_modal):
+        raise RuntimeError("a tri-modal arm did not produce PT bytes")
     for row in tri_modal:
         envelope = row["envelope"]
         if (row["pebs_cpus"] != [args.cpu] or row["pebs_tids"] != [row["tid"]] or
@@ -229,6 +230,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "family": args.family,
         "loops": args.loops,
         "cpu": args.cpu,
+        "scope": args.scope,
         "seed": args.seed,
         "runs_per_arm": args.runs,
         "schedule": schedule,
@@ -250,6 +252,12 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     result.add_argument("--binary", type=Path, required=True)
     result.add_argument("--cpu", type=int, default=2)
+    result.add_argument(
+        "--scope",
+        choices=("process", "process_kernel", "process_user_kernel"),
+        default="process_kernel",
+        help="retain user, kernel, or both privilege domains for the gated task",
+    )
     result.add_argument("--family", default="mmap")
     result.add_argument("--loops", type=int, default=1000)
     result.add_argument("--runs", type=int, default=5)

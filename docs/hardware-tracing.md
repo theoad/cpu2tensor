@@ -30,7 +30,9 @@ for batch in batches:
 
 `scope="process"` attaches to threads present at entry and excludes kernel code.
 `scope="process_kernel"` attaches in the same way but excludes user code, retaining
-only kernel execution attributed to those threads. New threads and child processes
+only kernel execution attributed to those threads. `scope="process_user_kernel"`
+retains both privilege domains, including the system calls and faults executed by
+those threads. New threads and child processes
 are not followed in either mode. Start capture while the target is waiting if
 startup events matter. `scope="kernel"` uses `cpus=(...)` and samples the **host**
 kernel on those CPUs, including other processes that run there. It does not by

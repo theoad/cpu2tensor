@@ -74,6 +74,10 @@ class HardwareTests(unittest.TestCase):
             ).modalities,
             ("intel_pt", "memory_stores", "counters"),
         )
+        self.assertEqual(
+            HardwareMultimodalConfig("process_user_kernel", 7).scope,
+            "process_user_kernel",
+        )
         invalid = (
             dict(scope="kernel", pid=7),
             dict(scope="process", pid=0),
@@ -95,6 +99,8 @@ class HardwareTests(unittest.TestCase):
             dict(scope="other"), dict(scope="process"), dict(scope="process", pid=-1),
             dict(scope="process", pid=1, cpus=(0,)), dict(scope="kernel"),
             dict(scope="process_kernel"), dict(scope="process_kernel", pid=1, cpus=(0,)),
+            dict(scope="process_user_kernel"),
+            dict(scope="process_user_kernel", pid=1, cpus=(0,)),
             dict(scope="kernel", cpus=(0,), pid=2), dict(scope="kernel", cpus=(0, 0)),
             dict(scope="kernel", cpus=(-1,)), dict(scope="kernel", cpus=(0,), period=0),
             dict(scope="kernel", cpus=(0,), data_pages=3),
@@ -110,6 +116,9 @@ class HardwareTests(unittest.TestCase):
         process_kernel = _attribute(
             HardwareConfig("process_kernel", pid=7, signal="instructions")
         )
+        process_user_kernel = _attribute(
+            HardwareConfig("process_user_kernel", pid=7, signal="instructions")
+        )
         kernel = _attribute(HardwareConfig("kernel", cpus=(0,), signal="cycles"))
         self.assertEqual((process.type, process.config, process.sample_period), (0, 1, 100_000))
         self.assertEqual((kernel.type, kernel.config), (0, 0))
@@ -120,9 +129,13 @@ class HardwareTests(unittest.TestCase):
             process_kernel.flags & ((1 << 4) | (1 << 5) | (1 << 6)),
             (1 << 4) | (1 << 6),
         )
+        self.assertEqual(
+            process_user_kernel.flags & ((1 << 4) | (1 << 5) | (1 << 6)),
+            1 << 6,
+        )
         self.assertEqual(kernel.flags & ((1 << 4) | (1 << 6)), (1 << 4) | (1 << 6))
         self.assertFalse(kernel.flags & (1 << 5))
-        for attr in (process, process_kernel, kernel):
+        for attr in (process, process_kernel, process_user_kernel, kernel):
             self.assertTrue(attr.flags & (1 << 25))
             self.assertEqual(attr.clockid, 4)
 
@@ -130,6 +143,7 @@ class HardwareTests(unittest.TestCase):
         leader = _counter_attribute("process_kernel", "instructions", leader=True)
         member = _counter_attribute("process_kernel", "cycles", leader=False)
         reference = _counter_attribute("process", "ref_cycles", leader=False)
+        mixed = _counter_attribute("process_user_kernel", "cycles", leader=False)
         self.assertEqual((leader.type, leader.config, leader.sample_period), (0, 1, 0))
         self.assertEqual((member.type, member.config), (0, 0))
         self.assertEqual(reference.config, 9)
@@ -138,6 +152,7 @@ class HardwareTests(unittest.TestCase):
         self.assertFalse(member.flags & (1 << 2))
         self.assertTrue(leader.flags & (1 << 4))
         self.assertTrue(reference.flags & (1 << 5))
+        self.assertFalse(mixed.flags & ((1 << 4) | (1 << 5)))
         with self.assertRaises(ValueError):
             _counter_attribute("kernel", "cycles", leader=True)
         with self.assertRaises(ValueError):

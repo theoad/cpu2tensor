@@ -23,6 +23,8 @@
   architecture pretraining, application fine-tuning, and API-level harnessing.
 - [Large Hardware Model applications](large-hardware-model-applications.md):
   downstream tasks, evaluation splits, flagship transfers, and autoresearch gates.
+- [Intel x86-64 foundation corpus](hardware-foundation-corpus.md): qualified
+  mixed user/kernel collection, remote custody, sharding, and release gates.
 - [Kernel-only multimodal experiment](kernel-multimodal-experiment.md): sealed
   corpus collection, MPS training, frozen calibration, and corruption evaluation.
 - [Repeated action windows](action-windows.md): guest boundaries and fixed

@@ -83,13 +83,14 @@ class HardwareConfig:
     """One host Linux capture. Kernel mode samples the host kernel on selected CPUs.
 
     ``process`` observes user execution of threads that exist when capture starts;
-    ``process_kernel`` observes only their kernel execution. Attach before
+    ``process_kernel`` observes only their kernel execution, while
+    ``process_user_kernel`` retains both privilege domains and their transitions. Attach before
     releasing a stopped target to avoid a startup gap. ``kernel`` samples all
     tasks executing kernel code on the selected host CPUs; it does not imply that
     a virtual machine's guest kernel is visible to the host PMU.
     """
 
-    scope: Literal["process", "process_kernel", "kernel"]
+    scope: Literal["process", "process_kernel", "process_user_kernel", "kernel"]
     signal: Literal[
         "cycles", "instructions", "memory_loads", "memory_stores", "intel_pt"
     ] = "cycles"
@@ -100,13 +101,15 @@ class HardwareConfig:
     aux_pages: int = 128
 
     def __post_init__(self) -> None:
-        if self.scope not in ("process", "process_kernel", "kernel"):
-            raise ValueError("scope must be process, process_kernel, or kernel")
+        if self.scope not in ("process", "process_kernel", "process_user_kernel", "kernel"):
+            raise ValueError(
+                "scope must be process, process_kernel, process_user_kernel, or kernel"
+            )
         if self.signal not in (
             "cycles", "instructions", "memory_loads", "memory_stores", "intel_pt"
         ):
             raise ValueError("Unknown hardware signal")
-        if self.scope in ("process", "process_kernel") and (
+        if self.scope in ("process", "process_kernel", "process_user_kernel") and (
             self.pid is None or self.pid <= 0 or self.cpus is not None
         ):
             raise ValueError("Process capture needs a positive pid and no CPU list")
@@ -179,7 +182,7 @@ class HardwareMultimodalConfig:
     boundary counter reads. New threads created after entry are not followed.
     """
 
-    scope: Literal["process", "process_kernel"]
+    scope: Literal["process", "process_kernel", "process_user_kernel"]
     pid: int
     modalities: tuple[str, ...] = _MODALITIES
     pebs_period: int = 100_000
@@ -189,8 +192,11 @@ class HardwareMultimodalConfig:
     aux_pages: int = 2048
 
     def __post_init__(self) -> None:
-        if self.scope not in ("process", "process_kernel"):
-            raise ValueError("Multimodal capture needs process or process_kernel scope")
+        if self.scope not in ("process", "process_kernel", "process_user_kernel"):
+            raise ValueError(
+                "Multimodal capture needs process, process_kernel, or "
+                "process_user_kernel scope"
+            )
         if self.pid <= 0:
             raise ValueError("Multimodal capture needs a positive pid")
         if not self.modalities or len(set(self.modalities)) != len(self.modalities):
@@ -384,8 +390,12 @@ def _counter_attribute(scope: str, signal: str, *, leader: bool) -> _PerfAttr:
         attr.flags |= 1 << 5
     elif scope == "process_kernel":
         attr.flags |= 1 << 4
+    elif scope == "process_user_kernel":
+        pass
     else:
-        raise ValueError("Boundary counters need process or process_kernel scope")
+        raise ValueError(
+            "Boundary counters need process, process_kernel, or process_user_kernel scope"
+        )
     return attr
 
 
@@ -553,7 +563,7 @@ class PerfCapture:
             raise RuntimeError("Create a new PerfCapture for each run")
         attr = _attribute(self.config)
         page = mmap.PAGESIZE
-        if self.config.scope in ("process", "process_kernel"):
+        if self.config.scope in ("process", "process_kernel", "process_user_kernel"):
             try:
                 tids = sorted(int(name) for name in os.listdir(f"/proc/{self.config.pid}/task"))
             except OSError as error:

@@ -46,6 +46,10 @@ if(CPU2TENSOR_BUILD_HARDWARE_EXAMPLE)
     target_compile_definitions(hardware_kernel_workload PRIVATE _GNU_SOURCE)
     target_compile_options(hardware_kernel_workload PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
+    add_executable(hardware_exec_gate examples/hardware_exec_gate.c)
+    target_compile_features(hardware_exec_gate PRIVATE c_std_17)
+    target_compile_options(hardware_exec_gate PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
     add_executable(hardware_dirty_pipe_canary examples/hardware_dirty_pipe_canary.c)
     target_compile_features(hardware_dirty_pipe_canary PRIVATE c_std_17)
     target_compile_definitions(hardware_dirty_pipe_canary PRIVATE _GNU_SOURCE)
