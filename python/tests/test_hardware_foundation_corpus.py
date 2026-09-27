@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -12,7 +13,9 @@ import torch
 from cpu2tensor.examples.hardware_foundation_corpus import (
     PLAN_SCHEMA,
     TarShardWriter,
+    WorkloadRow,
     load_plan,
+    seal_custody,
 )
 
 
@@ -92,3 +95,34 @@ def test_tar_shards_are_content_addressed_and_range_indexed() -> None:
             extracted = archive.extractfile(member)
             assert extracted is not None
             assert hashlib.sha256(extracted.read()).hexdigest() == index["sha256"]
+
+
+def test_custody_deduplicates_inputs_and_preserves_plan() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        artifact = root / "artifact"
+        artifact.mkdir()
+        binary = root / "binary"
+        input_path = root / "input"
+        plan = root / "plan.json"
+        binary.write_bytes(b"binary")
+        input_path.write_bytes(b"same")
+        plan.write_text("{}\n")
+        row = WorkloadRow(
+            execution_id="row-1", family="fixture", application="fixture",
+            partition="training", session="session-a", input_seed=1,
+            argv=(str(binary),), stdin=b"", cwd=str(root),
+            input_paths=(str(input_path), str(input_path)), expected_exit_code=0,
+            expected_stdout_sha256=_hash(b""), expected_stderr_sha256=_hash(b""),
+            timeout_seconds=1,
+        )
+        manifest = seal_custody(
+            artifact, plan, (row,), binary, (os.getuid(), os.getgid())
+        )
+        digests = {item["sha256"] for item in manifest["unique_objects"]}
+        assert {_hash(b"binary"), _hash(b"same")} <= digests
+        assert sum(
+            item["sha256"] == _hash(b"same")
+            for item in manifest["unique_objects"]
+        ) == 1
+        assert (artifact / "custody/plan.json").read_text() == "{}\n"

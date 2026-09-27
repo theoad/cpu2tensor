@@ -114,9 +114,33 @@ class S3CorpusStore:
         return {"path": path.name, "sha256": digest, "bytes": path.stat().st_size,
                 "key": key}
 
+    def upload_custody(self, artifact: Path) -> dict[str, object]:
+        root = artifact / "custody"
+        manifest_path = root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        uploaded = []
+        for item in manifest.get("unique_objects", []):
+            digest = item["sha256"]
+            path = root / item["path"]
+            key = f"objects/custody/sha256/{digest[:2]}/{digest}"
+            self.put_verified(path, key, digest)
+            uploaded.append({**item, "key": key})
+        for name, kind in (("plan", "plan"), ("package_inventory", "packages")):
+            item = manifest[name]
+            digest = item["sha256"]
+            path = root / item["path"]
+            key = f"objects/{kind}/sha256/{digest[:2]}/{digest}"
+            self.put_verified(path, key, digest)
+            item["key"] = key
+        digest = sha256(manifest_path)
+        key = f"objects/custody-manifest/sha256/{digest[:2]}/{digest}.json"
+        self.put_verified(manifest_path, key, digest)
+        return {"manifest_sha256": digest, "manifest_key": key,
+                "objects": uploaded, **manifest}
+
     def publish_release(
         self, artifact: Path, uploaded_shards: Sequence[dict[str, object]],
-        uploaded_decode: Sequence[dict[str, object]],
+        uploaded_decode: Sequence[dict[str, object]], uploaded_custody: dict[str, object],
     ) -> dict[str, object]:
         manifest_path = artifact / "capture-manifest.json"
         manifest = json.loads(manifest_path.read_text())
@@ -136,6 +160,7 @@ class S3CorpusStore:
             "capture_manifest": manifest,
             "shards": list(uploaded_shards),
             "decode_states": list(uploaded_decode),
+            "custody": uploaded_custody,
         }
         release_path = artifact / "release.json"
         release_path.write_text(json.dumps(release, indent=2, sort_keys=True) + "\n")
@@ -156,7 +181,10 @@ def upload_artifact(
         store.upload_decode_state(path)
         for path in sorted((artifact / "decode").glob("kernel-*.pt"))
     ]
-    return store.publish_release(artifact, uploaded_shards, uploaded_decode)
+    uploaded_custody = store.upload_custody(artifact)
+    return store.publish_release(
+        artifact, uploaded_shards, uploaded_decode, uploaded_custody
+    )
 
 
 def parser() -> argparse.ArgumentParser:

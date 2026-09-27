@@ -14,6 +14,7 @@ from pathlib import Path
 import platform
 import pwd
 import re
+import shutil
 import subprocess
 import tarfile
 import time
@@ -547,6 +548,85 @@ def _identity(path: str) -> dict[str, object]:
     return {"path": str(target.resolve()), "sha256": _sha256(target), "bytes": target.stat().st_size}
 
 
+def seal_custody(
+    artifact: Path, plan_path: Path, rows: Sequence[WorkloadRow], gate: Path,
+    owner: tuple[int, int],
+) -> dict[str, object]:
+    """Preserve exact small inputs and binaries without duplicating source bytes."""
+    root = artifact / "custody"
+    objects = root / "objects"
+    objects.mkdir(parents=True, exist_ok=True)
+    for path in (root, objects):
+        os.chown(path, *owner)
+    candidates: dict[str, set[str]] = {}
+    roles: dict[str, set[str]] = {}
+    runner = Path(__file__).resolve()
+    hardware = runner.parents[1] / "hardware.py"
+    for role, path in (
+        ("collector", runner), ("capture_module", hardware), ("gate", gate),
+    ):
+        resolved = str(path.resolve())
+        candidates.setdefault(resolved, set()).add(role)
+    for row in rows:
+        executable = str(Path(row.argv[0]).resolve())
+        candidates.setdefault(executable, set()).add("executable")
+        for path in row.input_paths:
+            resolved = str(Path(path).resolve())
+            candidates.setdefault(resolved, set()).add("input")
+    members = []
+    for original, member_roles in sorted(candidates.items()):
+        source = Path(original)
+        digest = _sha256(source)
+        destination = objects / digest
+        if not destination.exists():
+            try:
+                os.link(source, destination)
+            except OSError:
+                shutil.copyfile(source, destination)
+            os.chown(destination, *owner)
+        elif _sha256(destination) != digest:
+            raise RuntimeError(f"custody object collision: {digest}")
+        roles.setdefault(digest, set()).update(member_roles)
+        members.append({
+            "original_path": original,
+            "sha256": digest,
+            "bytes": source.stat().st_size,
+            "roles": sorted(member_roles),
+        })
+    plan_copy = root / "plan.json"
+    shutil.copyfile(plan_path, plan_copy)
+    os.chown(plan_copy, *owner)
+    inventory = root / "packages.txt"
+    try:
+        packages = subprocess.run(
+            ("dpkg-query", "-W", "-f=${binary:Package}\t${Version}\t${Architecture}\n"),
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        packages = b""
+    inventory.write_bytes(packages)
+    os.chown(inventory, *owner)
+    manifest = {
+        "schema": "cpu2tensor-hardware-foundation-custody-v1",
+        "plan": {"path": "plan.json", "sha256": _sha256(plan_copy),
+                 "bytes": plan_copy.stat().st_size},
+        "package_inventory": {
+            "path": "packages.txt", "sha256": _sha256(inventory),
+            "bytes": inventory.stat().st_size,
+        },
+        "members": members,
+        "unique_objects": [
+            {"path": f"objects/{digest}", "sha256": digest,
+             "bytes": (objects / digest).stat().st_size,
+             "roles": sorted(member_roles)}
+            for digest, member_roles in sorted(roles.items())
+        ],
+    }
+    _atomic_json(root / "manifest.json", manifest)
+    os.chown(root / "manifest.json", *owner)
+    return manifest
+
+
 def collect_row(
     row: WorkloadRow, *, gate: Path, environment: dict[str, str],
     target_cpu: int, target_user: str, data_pages: int, aux_pages: int,
@@ -657,6 +737,9 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         aux_pages=args.aux_pages, pebs_period=args.pebs_period,
         gate=args.gate.resolve(),
     )
+    custody = seal_custody(
+        artifact, args.plan.resolve(), rows, args.gate.resolve(), artifact_owner
+    )
     original_affinity = os.sched_getaffinity(0)
     writer = TarShardWriter(
         artifact / "shards", args.shard_bytes, artifact_owner
@@ -712,6 +795,11 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         "plan_sha256": _sha256(args.plan.resolve()),
         "plan_content_sha256": _json_hash(plan),
         "subject": subject,
+        "custody": {
+            "path": "custody/manifest.json",
+            "sha256": _sha256(artifact / "custody/manifest.json"),
+            "content_sha256": _json_hash(custody),
+        },
         "session": args.session,
         "executions": len(entries),
         "rejections": rejections,

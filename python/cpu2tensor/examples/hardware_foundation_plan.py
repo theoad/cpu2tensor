@@ -160,7 +160,6 @@ def workloads() -> tuple[Workload, ...]:
         Workload("compression", "gzip", _single("gzip", "-n", "-c")),
         Workload("compression", "bzip2", _single("bzip2", "-c")),
         Workload("compression", "xz", _single("xz", "--threads=1", "-c")),
-        Workload("compression", "zstd", _single("zstd", "-q", "-T1", "-c")),
         Workload("text", "sort", _single("sort", member="text")),
         Workload("text", "grep", _single("grep", "-E", "alpha|omega", member="text")),
         Workload("text", "sed", _single("sed", "-E", "s/[0-9]+/<n>/g", member="text")),
