@@ -308,7 +308,10 @@ def make_plan(
     generator.shuffle(rows)
     payload = {
         "schema": PLAN_SCHEMA,
-        "corpus_id": f"intel-x86-foundation-pilot-{seed}",
+        "corpus_id": (
+            f"intel-x86-foundation-s{seed}-f{fixture_count}"
+            f"-b{input_bytes}-r{repetitions}"
+        ),
         "generator_seed": seed,
         "fixture_count": fixture_count,
         "input_bytes": input_bytes,
