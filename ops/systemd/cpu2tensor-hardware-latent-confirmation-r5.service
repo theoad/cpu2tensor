@@ -1,0 +1,21 @@
+[Unit]
+Description=cpu2tensor prospective benign latent-geometry confirmation
+After=multi-user.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/home/user/.cache/cpu2tensor/heldout-effect-source-92618e9
+Environment=PYTHONPATH=/home/user/.cache/cpu2tensor/heldout-effect-source-92618e9/python
+ExecStart=/home/user/.cache/cpu2tensor/hardware-latent-confirmation-r5.sh
+ExecStopPost=/home/user/.cache/cpu2tensor/hardware-latent-confirmation-r5.sh restore
+RuntimeMaxSec=10min
+KillMode=control-group
+UMask=0027
+ReadOnlyPaths=/home/user/.cache/cpu2tensor/heldout-effect-source-92618e9
+ReadOnlyPaths=/home/user/.cache/cpu2tensor/hardware-latent-confirmation-r5.sh
+ReadOnlyPaths=/home/user/.cache/cpu2tensor/hardware-latent-confirmation-r5-plan.json
+
+[Install]
+WantedBy=multi-user.target
