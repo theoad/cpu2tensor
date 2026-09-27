@@ -98,3 +98,8 @@ now sealed while a benign-only diagnostic measures cross-session family and
 intensity retrieval, view agreement, and effective rank for all nine retained
 encoders. Those generic metrics—not the successful effect seed—must determine
 the next objective change.
+
+The [R4 latent-geometry audit](hardware-latent-geometry-r4.md) therefore freezes
+all nine R3 encoders and uses only benign sessions to measure family/intensity
+retrieval, masked-view identity, centroid drift, and effective rank. It has no
+promotion threshold and cannot select the exceptional VICReg seed.
