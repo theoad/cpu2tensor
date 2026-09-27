@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only
 # Three exact benign cohorts for the frozen effect-detector calibration pilot.
-set -euo pipefail
+set -Eeuo pipefail
+
+trap 'status=$?; printf "failure line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2; exit "$status"' ERR
 
 readonly SOURCE=/home/user/.cache/cpu2tensor/heldout-effect-source-92618e9
 readonly PYTHON=/home/user/.cache/cpu2tensor/hardware-pretraining-go/venv/bin/python3.12
