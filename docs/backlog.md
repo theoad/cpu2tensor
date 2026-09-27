@@ -71,9 +71,15 @@ stable local capacity signal: held-out masked loss falls from roughly 0.146 at
 d64 to 0.114 at d128 and 0.098 at d256, with parameter-loss slopes near −0.16
 at all three data budgets. Data slopes are flat under the fixed 2,560-example
 optimizer budget, identifying compute limitation rather than data saturation.
-The next matrix crosses data volume with optimizer steps and aggregates multiple
-few-shot head selections; d512 and workload-diversity axes follow only if those
-curves are coherent.
+The [R2 compute matrix](hardware-compute-scaling-r2.md) resolves that ambiguity:
+all six d128/d256 trajectories improve from 80 to 320 steps, and the 2,040-row
+corpus beats 255 rows by 2.09% at d128 and 5.47% at d256. The preregistered
+self-supervised scaling gate passes. The replicated cross-family transfer probe
+does not: its median AUROC is at or near zero, and longer training makes it no
+better. The next bounded experiment varies a generic representation objective
+on the retained tensors under the same locked transfer protocol. More parameters
+or physical collection wait until reconstruction scaling and reusable transfer
+are no longer moving in opposite directions.
 
 ## Closed decision: initial hardware transfer comparison
 

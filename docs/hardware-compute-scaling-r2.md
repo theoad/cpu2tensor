@@ -30,4 +30,33 @@ only when both conditions hold.
 
 ## Result
 
-Pending.
+The full 18-checkpoint matrix completed on Mac MPS in about three minutes and
+passed the preregistered gate. Every compute trajectory improved:
+
+| Width | Rows | Loss at 80 steps | Loss at 160 steps | Loss at 320 steps |
+| ---: | ---: | ---: | ---: | ---: |
+| 128 | 255 | 0.1154 | 0.0955 | 0.0818 |
+| 128 | 1,020 | 0.1131 | 0.0965 | 0.0809 |
+| 128 | 2,040 | 0.1143 | 0.0935 | 0.0801 |
+| 256 | 255 | 0.0971 | 0.0834 | 0.0727 |
+| 256 | 1,020 | 0.0970 | 0.0836 | 0.0710 |
+| 256 | 2,040 | 0.0984 | 0.0824 | 0.0688 |
+
+The six log-loss slopes against optimizer steps range from −0.209 to −0.259.
+At 320 steps, data-volume slopes are −0.0099 for d128 and −0.0257 for d256;
+increasing the corpus from 255 to 2,040 rows improves loss by 2.09% and 5.47%,
+respectively. R1's flat data curve was therefore a compute-budget artifact, not
+evidence of data saturation. Capacity and data are complementary at this scale.
+
+The transfer diagnostic remains negative. Median unseen-`read` AUROC is 0 for
+15 of 18 checkpoints, 0.074 for d256/n1,020/80, and 0.023 for
+d256/n2,040/80. Longer self-supervised training improves reconstruction while
+driving this particular cross-family linear probe in the wrong direction. This
+does not invalidate the grammar-learning result, but it rules out treating
+masked reconstruction loss as a sufficient proxy for downstream effect
+semantics.
+
+Artifact directory:
+`/Users/theoad/.cache/cpu2tensor/hardware-compute-scaling-r2`. All 18 checkpoint
+hashes verify. Report SHA-256:
+`fb405c45ae7efaaf3233ee45377852699cb1c42924b30b01b04472b64163512f`.

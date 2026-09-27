@@ -74,3 +74,13 @@ The preregistered [R2 compute grid](hardware-compute-scaling-r2.md) crosses d128
 and d256 with 255, 1,020, and 2,040 rows at 80, 160, and 320 optimizer steps.
 Reconstruction loss remains primary; every point also receives three fixed
 two-shot frozen-head probes solely as a representation-transfer diagnostic.
+
+R2 passes its self-supervised scaling gate: all six compute trajectories improve,
+and at 320 steps the largest data budget reduces held-out loss by 2.09% at d128
+and 5.47% at d256. Its replicated transfer probe fails, however, with median
+AUROC at or near zero. The next experiment should therefore vary a generic
+representation objective on the same retained tensors and locked transfer
+protocol—without tuning to the effect labels—before paying for more parameters
+or collection. A successful objective must preserve reconstruction scaling and
+recover stable transfer across fixed heads; otherwise the project should report
+grammar compression and task transfer as separate capabilities.
