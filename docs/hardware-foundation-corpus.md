@@ -62,6 +62,36 @@ local NVMe and samples in two stages: select the requested family/split stratum,
 then shuffle shards and windows within it. This prevents high-byte-rate programs
 from defining the training distribution.
 
+AWS training hosts may mount the release prefix with Mountpoint for Amazon S3;
+RunPod and other hosts may use an S3-compatible ranged reader or `rclone` with
+temporary read-only credentials. Mounting is optional: the raw index gives the
+exact byte range and SHA-256 of every tar member, and training views are already
+independently sampleable objects.
+
+## Current qualification evidence
+
+The exact `80f0506` collector calibration on `iseeyou` admitted 164/164
+executions from 41 applications across both user and kernel execution. It
+captured 812,863,424 PT bytes and 3,204 PEBS rows, with zero inexact or
+zero-address PEBS rows, zero rejected applications, no source loss, and no PMU
+multiplexing. The four raw shards total 817,264,640 bytes. Collection took 39.2
+seconds under the sealed non-turbo 1.8 GHz CPU-2 policy; the wrapper restored
+the original turbo-enabled 4.9 GHz ceiling before publishing the manifest.
+
+An earlier transport smoke published 14 content-addressed shards plus one-time
+decode state and custody objects. An independent S3 range read of one indexed
+107,023-byte execution matched its member SHA-256 exactly. The calibration that
+first exposed the CPU-policy restoration-order bug is retained as failed
+evidence but is not a release and cannot enter training.
+
+The preregistered 8 GB pilot plan contains 26,206 executions, eight deterministic
+fixtures per application, eight whole held-out applications, and a complete
+second-session arm. Counts are inverse-weighted by the calibration median so
+each application contributes approximately 100 MiB per session; minimum input
+coverage raises the estimated total to about 8.97 GiB. Collection backpressures
+when two 256 MiB shards await verified upload, stops below 1 GiB free disk or
+above 85 C, and never exposes the final manifest until CPU policy restoration.
+
 ## Admission and release gates
 
 - exact stock kernel, boot, CPU family/model/stepping, microcode, topology,
