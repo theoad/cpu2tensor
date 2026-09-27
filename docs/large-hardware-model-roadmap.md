@@ -113,3 +113,7 @@ program boundary is now clearer: confirm the generic result on a fresh benign
 session, then evaluate task post-training sample efficiency over scratch across
 multiple effect-family splits. Zero-shot effect orientation is not a reliable
 proxy for the quality of foundation pretraining.
+
+The prospective [R5 confirmation](hardware-latent-confirmation-r5.md) freezes a
+new 1,020-row physical-host plan, the six reconstruction/VICReg checkpoints, and
+all absolute and paired benign-geometry thresholds before collection.
