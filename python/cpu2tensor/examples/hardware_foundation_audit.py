@@ -9,6 +9,7 @@ from collections import Counter, defaultdict
 import hashlib
 import json
 from pathlib import Path
+import statistics
 import subprocess
 import tempfile
 from typing import Sequence
@@ -73,9 +74,104 @@ def _range_probe(
         }
 
 
+def _median_absolute_deviation(values: Sequence[float]) -> float:
+    center = statistics.median(values)
+    return statistics.median(abs(value - center) for value in values)
+
+
+def _quality_statistics(
+    observed: dict[str, dict[str, object]], expected: dict[str, object],
+) -> dict[str, object]:
+    metrics = ("pt_bytes", "instructions", "cycles", "ref_cycles")
+    grouped: dict[tuple[str, str, int, str], list[float]] = defaultdict(list)
+    application_values: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for execution_id, entry in observed.items():
+        row = expected[execution_id]
+        for metric in metrics:
+            value = float(entry[metric])
+            grouped[(row.application, row.session, row.input_seed, metric)].append(value)
+            application_values[(row.application, metric)].append(value)
+    repeat_relative_mad: dict[str, list[float]] = defaultdict(list)
+    repeat_absolute_mad: dict[str, list[float]] = defaultdict(list)
+    means: dict[tuple[str, int, str, str], float] = {}
+    for (application, session, seed, metric), values in grouped.items():
+        means[(application, seed, session, metric)] = statistics.median(values)
+        if len(values) >= 2:
+            spread = _median_absolute_deviation(values)
+            repeat_absolute_mad[metric].append(spread)
+            repeat_relative_mad[metric].append(
+                spread / max(abs(statistics.median(values)), 1.0)
+            )
+    session_shift: dict[str, list[float]] = defaultdict(list)
+    applications = {key[0] for key in means}
+    seeds = {key[1] for key in means}
+    for application in applications:
+        for seed in seeds:
+            for metric in metrics:
+                left = means.get((application, seed, "session-a", metric))
+                right = means.get((application, seed, "session-b", metric))
+                if left is not None and right is not None:
+                    session_shift[metric].append(
+                        abs(left - right) / max(abs(left), abs(right), 1.0)
+                    )
+    signal_to_noise = {}
+    for metric in metrics:
+        app_medians = [
+            statistics.median(values)
+            for (application, name), values in application_values.items()
+            if name == metric
+        ]
+        signal = _median_absolute_deviation(app_medians)
+        repeats = repeat_absolute_mad[metric]
+        signal_to_noise[metric] = (
+            signal / max(statistics.median(repeats), 1.0) if repeats else 0.0
+        )
+    result = {
+        "repeat_relative_mad": {
+            metric: statistics.median(values)
+            for metric, values in repeat_relative_mad.items()
+        },
+        "matched_session_relative_shift": {
+            metric: statistics.median(values)
+            for metric, values in session_shift.items()
+        },
+        "application_signal_to_repeat_noise": signal_to_noise,
+        "repeat_groups": {
+            metric: len(values) for metric, values in repeat_relative_mad.items()
+        },
+        "matched_session_pairs": {
+            metric: len(values) for metric, values in session_shift.items()
+        },
+    }
+    return result
+
+
+def _quality_gates(statistics_: dict[str, object]) -> dict[str, bool]:
+    repeat = statistics_["repeat_relative_mad"]
+    shift = statistics_["matched_session_relative_shift"]
+    signal = statistics_["application_signal_to_repeat_noise"]
+    groups = statistics_["repeat_groups"]
+    pairs = statistics_["matched_session_pairs"]
+    assert isinstance(repeat, dict) and isinstance(shift, dict)
+    assert isinstance(signal, dict) and isinstance(groups, dict) and isinstance(pairs, dict)
+    return {
+        "at_least_100_repeat_groups": min(groups.values(), default=0) >= 100,
+        "at_least_100_matched_session_pairs": min(pairs.values(), default=0) >= 100,
+        "instruction_repeat_relative_mad_le_0.02": repeat.get("instructions", 1.0) <= 0.02,
+        "pt_repeat_relative_mad_le_0.10": repeat.get("pt_bytes", 1.0) <= 0.10,
+        "cycle_repeat_relative_mad_le_0.20": repeat.get("cycles", 1.0) <= 0.20,
+        "instruction_session_shift_le_0.05": shift.get("instructions", 1.0) <= 0.05,
+        "pt_session_shift_le_0.15": shift.get("pt_bytes", 1.0) <= 0.15,
+        "three_metrics_signal_to_noise_ge_5": sum(
+            float(value) >= 5.0 for value in signal.values()
+        ) >= 3,
+    }
+
+
 def audit(
     plan_path: Path, release_paths: Sequence[Path], *, minimum_bytes: int,
     minimum_application_pt_bytes: int, bucket: str | None, region: str,
+    enforce_quality: bool = True,
 ) -> dict[str, object]:
     # The plan is audited off-host after collection. Its content hashes remain
     # authoritative, while its collector-local absolute paths need not exist.
@@ -155,6 +251,14 @@ def audit(
     }
     if underweight:
         raise ValueError(f"applications missed the PT quota: {underweight}")
+    quality_statistics = _quality_statistics(observed, expected)
+    quality_gates = _quality_gates(quality_statistics)
+    if enforce_quality and not all(quality_gates.values()):
+        failed = sorted(name for name, passed in quality_gates.items() if not passed)
+        raise ValueError(
+            f"corpus failed preregistered quality gates: {failed}; "
+            f"statistics={quality_statistics}"
+        )
     remote = []
     probes = []
     if bucket is not None:
@@ -188,6 +292,8 @@ def audit(
         "partition_counts": dict(sorted(partition_counts.items())),
         "application_pt_bytes": dict(sorted(pt_by_application.items())),
         "application_pebs_samples": dict(sorted(pebs_by_application.items())),
+        "quality_statistics": quality_statistics,
+        "quality_gates": quality_gates,
         "remote_objects_verified": len(remote),
         "range_probes": probes,
     }

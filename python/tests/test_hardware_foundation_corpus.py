@@ -176,6 +176,7 @@ def test_release_audit_requires_complete_exact_sessions() -> None:
                 "application": "fixture",
                 "partition": "training" if session == "session-a" else "heldout_session",
                 "session": session, "pt_bytes": 1, "pebs_samples": 0,
+                "instructions": 1, "cycles": 1, "ref_cycles": 1,
             }
             manifest = {
                 "plan_sha256": plan_digest, "rejections": [],
@@ -196,6 +197,7 @@ def test_release_audit_requires_complete_exact_sessions() -> None:
         report = audit(
             plan_path, releases, minimum_bytes=0,
             minimum_application_pt_bytes=0, bucket=None, region="us-east-1",
+            enforce_quality=False,
         )
         assert report["accepted"] is True
         assert report["executions"] == 2

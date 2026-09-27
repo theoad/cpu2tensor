@@ -128,6 +128,12 @@ CPU policy restoration.
 - family and application byte quotas, execution counts, duration, PT bytes,
   PEBS counts, PMU distributions, and privilege coverage are reported;
 - matched repeats and independent sessions quantify acquisition noise;
+- before the pilot result was visible, the statistical gate was fixed at at
+  least 100 repeat groups and 100 matched-session pairs, median repeat relative
+  MAD no greater than 2% for instructions, 10% for PT bytes, and 20% for
+  cycles, median matched-session shift no greater than 5% for instructions and
+  15% for PT bytes, and application-signal/repeat-noise at least 5 for three of
+  the four PT/instruction/cycle/reference-cycle metrics;
 - whole-application/session split audit has zero collisions by content and
   provenance hashes, except the explicitly matched familiar-validation/session
   nuisance arm;
