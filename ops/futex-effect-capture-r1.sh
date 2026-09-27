@@ -63,18 +63,24 @@ runtime_usec="$(systemctl show "$SERVICE" --property=RuntimeMaxUSec --value)"
 ! pgrep -f '[h]ardware_multimodal_experiment' >/dev/null
 export PYTHONPATH="$SOURCE/python"
 mapfile -t imported < <("$PYTHON" - <<'PY'
+from importlib.util import find_spec
 from pathlib import Path
-import cpu2tensor
-from cpu2tensor import hardware
-from cpu2tensor.examples import hardware_multimodal_experiment as experiment
-print(Path(cpu2tensor.__file__).resolve())
-print(Path(hardware.__file__).resolve())
-print(Path(experiment.__file__).resolve())
+for name in (
+    "cpu2tensor",
+    "cpu2tensor.hardware",
+    "cpu2tensor.examples.hardware_multimodal_experiment",
+    "cpu2tensor._native",
+):
+    spec = find_spec(name)
+    if spec is None or spec.origin is None:
+        raise SystemExit(f"cannot resolve {name}")
+    print(Path(spec.origin).resolve())
 PY
 )
 [[ "${imported[0]}" == "$SOURCE/python/cpu2tensor/__init__.py" ]]
 [[ "${imported[1]}" == "$HARDWARE" ]]
 [[ "${imported[2]}" == "$RUNNER" ]]
+[[ "${imported[3]}" == "$NATIVE" ]]
 
 temperature_input=
 for label in /sys/class/hwmon/hwmon*/temp*_label; do
