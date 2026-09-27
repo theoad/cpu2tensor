@@ -14,16 +14,21 @@ page-local data-address summaries, and an explicit v4 feature schema. Derived-v2
 rows bind their anchor to their own retained decode state; legacy v3 remains
 readable without mixing schemas. [PEBS anchors](pebs-anchors.md) defines the
 contract. Thirty-seven feature/model/collector/seeded-plan tests pass on Mac CPU.
-The physical same-boot two-session benign audit and featurization-cost measurement
-remain pending. The experiment coordinator owns privileged policy setup and
-restoration; this change does not relabel the old raw-evicted corpus.
+The physical same-boot audit is now complete: two identical 51-row seeded plans
+finished first-attempt clean with zero rejected, lost, or multiplexed sources.
+Median repeat cosine was 0.9916 PT, 0.9845 PEBS on the 35 rows sampled in both
+sessions, and 0.99999 PMU. Sampled-only PEBS p10 was 0.8045, including a noisy
+sparse-sample tail. This qualifies v4 coordinate stability for the next small
+experiment, not detector sensitivity. The experiment coordinator restored CPU
+policy and copied all 121 MiB off-host with production loader verification. The
+change does not relabel the old raw-evicted corpus.
 
 ## Current decision: short hardware transfer comparison
 
 The previous sprint is closed NO-GO and its heartbeat is paused. The accepted
 next slice is the [three-arm transfer comparison](hardware-transfer-r1.md):
 scratch, frozen pretrained encoder plus trained head, and fine-tuned encoder/head.
-negative. Two corrected 40-step seeds now have complete training and evaluation
+The result is negative. Two corrected 40-step seeds now have complete training and evaluation
 reports from physical `trail-x86`, identical per-arm row schedules, and
 hash-verified off-host custody. Pretrained/fine-tuned arms remain near chance on
 the second session; scratch varies from AUROC 0.424 to 0.715 across seeds. A
