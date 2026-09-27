@@ -133,7 +133,9 @@ CPU policy restoration.
   MAD no greater than 2% for instructions, 10% for PT bytes, and 20% for
   cycles, median matched-session shift no greater than 5% for instructions and
   15% for PT bytes, and application-signal/repeat-noise at least 5 for three of
-  the four PT/instruction/cycle/reference-cycle metrics;
+  the four PT/instruction/cycle/reference-cycle metrics; PEBS must be at least
+  95% usable and cover both user and kernel privilege in at least 80% of
+  applications;
 - whole-application/session split audit has zero collisions by content and
   provenance hashes, except the explicitly matched familiar-validation/session
   nuisance arm;

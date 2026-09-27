@@ -8,6 +8,7 @@ import base64
 from collections import Counter, defaultdict
 import hashlib
 import json
+import math
 from pathlib import Path
 import statistics
 import subprocess
@@ -206,6 +207,12 @@ def audit(
         subject = manifest.get("subject", {}).get("identity_sha256")
         if not isinstance(subject, str):
             raise ValueError("release omitted exact subject identity")
+        subject_value = manifest.get("subject", {}).get("subject", {})
+        if (subject_value.get("scope") != "process_user_kernel" or
+                set(subject_value.get("modalities", [])) != {
+                    "intel_pt", "memory_loads", "counters",
+                }):
+            raise ValueError("release did not capture the required mixed modalities")
         subjects.add(subject)
         entries = manifest.get("entries")
         if not isinstance(entries, list) or len(entries) != manifest.get("executions"):
@@ -239,11 +246,21 @@ def audit(
         raise ValueError(f"raw release is too small: {total_bytes} < {minimum_bytes}")
     pt_by_application: dict[str, int] = defaultdict(int)
     pebs_by_application: dict[str, int] = defaultdict(int)
+    pebs_user_by_application: dict[str, int] = defaultdict(int)
+    pebs_kernel_by_application: dict[str, int] = defaultdict(int)
+    pebs_usable = 0
+    pebs_inexact = 0
+    pebs_zero_address = 0
     partition_counts: Counter[str] = Counter()
     for execution_id, entry in observed.items():
         application = expected[execution_id].application
         pt_by_application[application] += int(entry["pt_bytes"])
         pebs_by_application[application] += int(entry["pebs_samples"])
+        pebs_user_by_application[application] += int(entry["pebs_user_samples"])
+        pebs_kernel_by_application[application] += int(entry["pebs_kernel_samples"])
+        pebs_usable += int(entry["pebs_usable_samples"])
+        pebs_inexact += int(entry["pebs_inexact_samples"])
+        pebs_zero_address += int(entry["pebs_zero_address_samples"])
         partition_counts[expected[execution_id].partition] += 1
     underweight = {
         application: value for application, value in pt_by_application.items()
@@ -252,7 +269,38 @@ def audit(
     if underweight:
         raise ValueError(f"applications missed the PT quota: {underweight}")
     quality_statistics = _quality_statistics(observed, expected)
+    application_count = len(pt_by_application)
+    pebs_samples = sum(pebs_by_application.values())
+    quality_statistics["pebs"] = {
+        "samples": pebs_samples,
+        "usable": pebs_usable,
+        "inexact": pebs_inexact,
+        "zero_address": pebs_zero_address,
+        "usable_fraction": pebs_usable / max(pebs_samples, 1),
+        "applications_with_user_samples": sum(
+            value > 0 for value in pebs_user_by_application.values()
+        ),
+        "applications_with_kernel_samples": sum(
+            value > 0 for value in pebs_kernel_by_application.values()
+        ),
+        "application_count": application_count,
+    }
     quality_gates = _quality_gates(quality_statistics)
+    pebs_quality = quality_statistics["pebs"]
+    assert isinstance(pebs_quality, dict)
+    quality_gates.update({
+        "pebs_usable_fraction_ge_0.95": (
+            float(pebs_quality["usable_fraction"]) >= 0.95
+        ),
+        "pebs_user_application_coverage_ge_0.80": (
+            int(pebs_quality["applications_with_user_samples"]) >=
+            max(1, math.ceil(application_count * 0.80))
+        ),
+        "pebs_kernel_application_coverage_ge_0.80": (
+            int(pebs_quality["applications_with_kernel_samples"]) >=
+            max(1, math.ceil(application_count * 0.80))
+        ),
+    })
     if enforce_quality and not all(quality_gates.values()):
         failed = sorted(name for name, passed in quality_gates.items() if not passed)
         raise ValueError(
@@ -292,6 +340,8 @@ def audit(
         "partition_counts": dict(sorted(partition_counts.items())),
         "application_pt_bytes": dict(sorted(pt_by_application.items())),
         "application_pebs_samples": dict(sorted(pebs_by_application.items())),
+        "application_pebs_user_samples": dict(sorted(pebs_user_by_application.items())),
+        "application_pebs_kernel_samples": dict(sorted(pebs_kernel_by_application.items())),
         "quality_statistics": quality_statistics,
         "quality_gates": quality_gates,
         "remote_objects_verified": len(remote),

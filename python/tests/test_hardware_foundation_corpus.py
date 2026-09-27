@@ -177,12 +177,21 @@ def test_release_audit_requires_complete_exact_sessions() -> None:
                 "partition": "training" if session == "session-a" else "heldout_session",
                 "session": session, "pt_bytes": 1, "pebs_samples": 0,
                 "instructions": 1, "cycles": 1, "ref_cycles": 1,
+                "pebs_user_samples": 0, "pebs_kernel_samples": 0,
+                "pebs_usable_samples": 0, "pebs_inexact_samples": 0,
+                "pebs_zero_address_samples": 0,
             }
             manifest = {
                 "plan_sha256": plan_digest, "rejections": [],
                 "stopped_at_byte_target": False, "executions": 1,
                 "planned_executions": 1,
-                "subject": {"identity_sha256": "a" * 64},
+                "subject": {
+                    "identity_sha256": "a" * 64,
+                    "subject": {
+                        "scope": "process_user_kernel",
+                        "modalities": ["intel_pt", "memory_loads", "counters"],
+                    },
+                },
                 "entries": [entry], "shards": [],
             }
             release = {
