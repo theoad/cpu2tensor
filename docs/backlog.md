@@ -25,20 +25,22 @@ change does not relabel the old raw-evicted corpus.
 
 ## Current decision: harder held-out effect transfer
 
-The corrected v4 representation now passes a bounded independent-session sensor
-gate. Two 48-row physical sessions separated lawful futex wake from guaranteed
-immediate `EAGAIN`: PT, PMU, timing, and fused mean directions each achieved
-1.000 AUROC on the second session. A frozen d128 v4 encoder with trained head,
-fine-tuned pretrained encoder/head, and jointly trained scratch encoder/head
-also each achieved 1.000 across three seeds. This validates the sensor and
-transfer seam but shows no pretraining advantage because the task is too easy.
-Sparse PEBS separation came entirely from sample availability, not stable
-site/address evidence. See [Hardware futex effect R1](hardware-futex-effect-r1.md).
+The corrected v4 representation first passed the bounded
+[futex sensor gate](hardware-futex-effect-r1.md), which was too easy to show a
+pretraining advantage. The next [held-out effect gate](hardware-heldout-effect-r1.md)
+captured 192 lawful error/control traces without loss. Three benign-only d128
+models independently score `read(..., PROT_NONE)` above the training/resubstitution maximum
+for 16/16 effects and 0/16 controls at 1.000 AUROC on session B. This is the first
+repeat-stable pretrained anomaly signal for a hardware-visible memory-fault path.
 
-Next: retain short cycles, but require family-held-out pathological-effect
-transfer plus independent benign session/intensity calibration. Promotion still
-requires recall in the top 100 at benign FPR at most $10^{-4}$. Do not launch the
-million-execution or 24-hour campaign from this easy proxy.
+It is not operational: each model also flags the same 1/51 benign `memfd` row,
+while open errors only rank well and bad-`fstat` does not transfer. A post-hoc
+fused-plus-PMU conjunction removes that false positive and retains 16/16 effects,
+but needs fresh-session confirmation before it counts. Next: preregister and run
+that confirmation, then increase independent benign calibration and train a
+cross-modal anomaly head without confirmation-label leakage. Promotion still
+requires recall in the top 100 at benign FPR at most $10^{-4}$; the million-run
+and 24-hour campaigns remain **NO-GO**.
 
 ## Closed decision: initial hardware transfer comparison
 
