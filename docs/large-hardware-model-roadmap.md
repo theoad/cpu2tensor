@@ -84,3 +84,8 @@ protocol—without tuning to the effect labels—before paying for more paramete
 or collection. A successful objective must preserve reconstruction scaling and
 recover stable transfer across fixed heads; otherwise the project should report
 grammar compression and task transfer as separate capabilities.
+
+The preregistered [R3 objective ablation](hardware-objective-ablation-r3.md)
+holds scale and data fixed while comparing two-view reconstruction against
+instance contrast and VICReg-style invariance. Three independent pretraining
+seeds and three locked heads per model prevent another single-head conclusion.
