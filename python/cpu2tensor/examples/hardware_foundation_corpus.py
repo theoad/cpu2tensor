@@ -33,7 +33,7 @@ from cpu2tensor.hardware import (
 )
 
 
-PLAN_SCHEMA = "cpu2tensor-hardware-foundation-plan-v1"
+PLAN_SCHEMA = "cpu2tensor-hardware-foundation-plan-v2"
 RAW_SCHEMA = "cpu2tensor-hardware-foundation-raw-v1"
 SHARD_SCHEMA = "cpu2tensor-hardware-foundation-shard-v1"
 MANIFEST_SCHEMA = "cpu2tensor-hardware-foundation-corpus-v1"
@@ -56,11 +56,14 @@ class WorkloadRow:
     application: str
     partition: str
     session: str
+    matched_input_partition: str | None
     input_seed: int
     argv: tuple[str, ...]
     stdin: bytes
     cwd: str
     input_paths: tuple[str, ...]
+    input_sha256: tuple[str, ...]
+    support_paths: tuple[str, ...]
     expected_exit_code: int
     expected_stdout_sha256: str
     expected_stderr_sha256: str
@@ -278,13 +281,43 @@ def load_plan(path: Path) -> tuple[dict[str, object], tuple[WorkloadRow, ...]]:
         if not cwd.is_absolute() or not cwd.is_dir():
             raise ValueError(f"cwd is not an absolute directory: {cwd}")
         input_paths = value.get("input_paths", [])
+        input_sha256 = value.get("input_sha256", [])
+        support_paths = value.get("support_paths", [])
         if (not isinstance(input_paths, list) or
-                any(not isinstance(item, str) for item in input_paths)):
-            raise ValueError("input_paths must be a string list")
-        for item in input_paths:
+                any(not isinstance(item, str) for item in input_paths) or
+                not isinstance(support_paths, list) or
+                any(not isinstance(item, str) for item in support_paths)):
+            raise ValueError("input_paths and support_paths must be string lists")
+        if (not isinstance(input_sha256, list) or
+                len(input_sha256) != len(input_paths) or
+                any(not isinstance(item, str) or SHA256.fullmatch(item) is None
+                    for item in input_sha256)):
+            raise ValueError("input_sha256 must match input_paths exactly")
+        for item, digest in zip(input_paths, input_sha256):
             item_path = Path(item)
             if not item_path.is_absolute() or not item_path.is_file():
                 raise ValueError(f"input is not an absolute file: {item}")
+            if _sha256(item_path) != digest:
+                raise ValueError(f"input content changed after plan creation: {item}")
+        for item in support_paths:
+            item_path = Path(item)
+            if not item_path.is_absolute() or not item_path.is_file():
+                raise ValueError(f"support is not an absolute file: {item}")
+        matched_input_partition = value.get("matched_input_partition")
+        if matched_input_partition is not None and not isinstance(
+                matched_input_partition, str):
+            raise ValueError("matched_input_partition must be a string or null")
+        expected_match = (
+            "familiar_validation" if partition == "heldout_session" else
+            "heldout_application" if (
+                partition == "heldout_application" and session == "session-b"
+            ) else None
+        )
+        if matched_input_partition != expected_match:
+            raise ValueError(
+                f"invalid matched input contract for {execution_id}: "
+                f"{matched_input_partition!r} != {expected_match!r}"
+            )
         expected = tuple(value.get(name) for name in (
             "expected_stdout_sha256", "expected_stderr_sha256",
         ))
@@ -304,11 +337,14 @@ def load_plan(path: Path) -> tuple[dict[str, object], tuple[WorkloadRow, ...]]:
             application=application,
             partition=partition,
             session=session,
+            matched_input_partition=matched_input_partition,
             input_seed=input_seed,
             argv=tuple(argv),
             stdin=_decode_stdin(value.get("stdin_base64", "")),
             cwd=str(cwd),
             input_paths=tuple(input_paths),
+            input_sha256=tuple(input_sha256),
+            support_paths=tuple(support_paths),
             expected_exit_code=exit_code,
             expected_stdout_sha256=expected[0],
             expected_stderr_sha256=expected[1],
@@ -319,6 +355,61 @@ def load_plan(path: Path) -> tuple[dict[str, object], tuple[WorkloadRow, ...]]:
     overlap = training_apps & heldout_apps
     if overlap:
         raise ValueError(f"held-out applications leak into other splits: {sorted(overlap)}")
+    content_by_partition = {
+        partition: {
+            digest
+            for row in rows if row.partition == partition
+            for digest in row.input_sha256
+        }
+        for partition in PARTITIONS
+    }
+    isolated = (
+        "training", "calibration", "familiar_validation",
+        "heldout_application",
+    )
+    for index, left in enumerate(isolated):
+        for right in isolated[index + 1:]:
+            leaked = content_by_partition[left] & content_by_partition[right]
+            if leaked:
+                raise ValueError(
+                    f"input-content leakage between {left} and {right}: "
+                    f"{sorted(leaked)[:3]}"
+                )
+    heldout_session = content_by_partition["heldout_session"]
+    forbidden = (
+        content_by_partition["training"] |
+        content_by_partition["calibration"] |
+        content_by_partition["heldout_application"]
+    )
+    if heldout_session & forbidden:
+        raise ValueError("held-out session inputs leak outside familiar validation")
+    familiar_by_app = {
+        application: {
+            digest
+            for row in rows
+            if row.application == application and
+            row.partition == "familiar_validation"
+            for digest in row.input_sha256
+        }
+        for application in {row.application for row in rows}
+    }
+    session_by_app = {
+        application: {
+            digest
+            for row in rows
+            if row.application == application and row.partition == "heldout_session"
+            for digest in row.input_sha256
+        }
+        for application in {row.application for row in rows}
+    }
+    unmatched = sorted(
+        application for application, digests in session_by_app.items()
+        if digests and not digests.intersection(familiar_by_app[application])
+    )
+    if unmatched:
+        raise ValueError(
+            f"held-out sessions have no matched familiar input: {unmatched}"
+        )
     return payload, tuple(rows)
 
 
@@ -636,6 +727,9 @@ def seal_custody(
         for path in row.input_paths:
             resolved = str(Path(path).resolve())
             candidates.setdefault(resolved, set()).add("input")
+        for path in row.support_paths:
+            resolved = str(Path(path).resolve())
+            candidates.setdefault(resolved, set()).add("support")
     members = []
     for original, member_roles in sorted(candidates.items()):
         source = Path(original)
@@ -754,6 +848,7 @@ def collect_row(
             "environment": dict(sorted(environment.items())),
             "executable": _identity(row.argv[0]),
             "inputs": [_identity(path) for path in row.input_paths],
+            "support": [_identity(path) for path in row.support_paths],
         },
         "result": {
             "exit_code": process.returncode,

@@ -19,9 +19,13 @@ can explain its evaluation results.
 4. Publish the 64 GB release only after independent manifest and object-hash
    verification from a second machine.
 
-Whole applications, not executions, own partitions. An evaluation application,
-input, generated artifact, session, or derivative may not appear in training.
-Long traces are windowed for training but remain grouped by execution and split.
+Application holdout is whole-application. For applications deliberately seen in
+pretraining, training, calibration, and familiar-validation inputs are separate
+content-addressed fixture pools. The second session replays only the
+familiar-validation pool and is explicitly marked as a matched nuisance arm.
+Shared interpreter scripts and fixed inspected binaries are support artifacts,
+not varying inputs; they remain hash-preserved in custody. Long traces are
+windowed for training but remain grouped by execution and split.
 
 ## Remote storage
 
@@ -84,13 +88,21 @@ decode state and custody objects. An independent S3 range read of one indexed
 first exposed the CPU-policy restoration-order bug is retained as failed
 evidence but is not a release and cannot enter training.
 
-The preregistered 8 GB pilot plan contains 26,206 executions, eight deterministic
-fixtures per application, eight whole held-out applications, and a complete
-second-session arm. Counts are inverse-weighted by the calibration median so
-each application contributes approximately 100 MiB per session; minimum input
-coverage raises the estimated total to about 8.97 GiB. Collection backpressures
-when two 256 MiB shards await verified upload, stops below 1 GiB free disk or
-above 85 C, and never exposes the final manifest until CPU policy restoration.
+The first preregistered 8 GB pilot was stopped after its first three remote
+shards because the audit found that train and evaluation rows reused identical
+fixture content. Those objects have no release record and are inadmissible. The
+failed prefix and custody evidence are retained; its final partial shard was
+deleted to reclaim bounded host staging space.
+
+The replacement generator creates four deterministic, content-disjoint fixture
+pools: training, calibration, familiar validation, and held-out application.
+It records every varying-input digest in the plan and refuses content overlap
+even when identical bytes are hidden under different paths. Session B may match
+only the familiar-validation pool. Counts remain inverse-weighted by calibration
+median so each application contributes approximately 100 MiB per session.
+Collection backpressures when two 256 MiB shards await verified upload, stops
+below 1 GiB free disk or above 85 C, and never exposes the final manifest until
+CPU policy restoration.
 
 ## Admission and release gates
 
@@ -105,7 +117,8 @@ above 85 C, and never exposes the final manifest until CPU policy restoration.
   PEBS counts, PMU distributions, and privilege coverage are reported;
 - matched repeats and independent sessions quantify acquisition noise;
 - whole-application/session split audit has zero collisions by content and
-  provenance hashes;
+  provenance hashes, except the explicitly matched familiar-validation/session
+  nuisance arm;
 - every local shard, S3 object, release index, and manifest hash verifies from
   an independent reader before release.
 

@@ -41,11 +41,14 @@ def test_plan_requires_whole_application_holdout_and_exact_inputs() -> None:
             "application": "gzip",
             "partition": "training",
             "session": "session-a",
+            "matched_input_partition": None,
             "input_seed": 17,
             "argv": [str(binary), "-c", str(input_path)],
             "stdin_base64": base64.b64encode(b"").decode(),
             "cwd": str(root),
             "input_paths": [str(input_path)],
+            "input_sha256": [_hash(b"input")],
+            "support_paths": [],
             "expected_exit_code": 0,
             "expected_stdout_sha256": _hash(b"output"),
             "expected_stderr_sha256": _hash(b""),
@@ -65,6 +68,8 @@ def test_plan_requires_whole_application_holdout_and_exact_inputs() -> None:
             **row,
             "execution_id": "gzip-0002",
             "partition": "heldout_application",
+            "session": "session-b",
+            "matched_input_partition": "heldout_application",
         })
         path.write_text(json.dumps(plan))
         try:
@@ -73,6 +78,56 @@ def test_plan_requires_whole_application_holdout_and_exact_inputs() -> None:
             assert "leak" in str(error)
         else:
             raise AssertionError("application leakage was accepted")
+
+
+def test_plan_rejects_input_content_leakage_under_different_paths() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        binary = root / "target"
+        training_input = root / "train-input"
+        calibration_input = root / "calibration-input"
+        binary.write_bytes(b"binary")
+        training_input.write_bytes(b"identical-content")
+        calibration_input.write_bytes(b"identical-content")
+
+        def row(execution_id: str, partition: str, path: Path) -> dict[str, object]:
+            return {
+                "execution_id": execution_id,
+                "family": "compression",
+                "application": "gzip",
+                "partition": partition,
+                "session": "session-a",
+                "matched_input_partition": None,
+                "input_seed": 17,
+                "argv": [str(binary), str(path)],
+                "stdin_base64": "",
+                "cwd": str(root),
+                "input_paths": [str(path)],
+                "input_sha256": [_hash(b"identical-content")],
+                "support_paths": [],
+                "expected_exit_code": 0,
+                "expected_stdout_sha256": _hash(b""),
+                "expected_stderr_sha256": _hash(b""),
+                "timeout_seconds": 2,
+            }
+
+        plan = {
+            "schema": PLAN_SCHEMA,
+            "corpus_id": "leak-test",
+            "environment": {"LANG": "C"},
+            "rows": [
+                row("gzip-train", "training", training_input),
+                row("gzip-calibration", "calibration", calibration_input),
+            ],
+        }
+        path = root / "plan.json"
+        path.write_text(json.dumps(plan))
+        try:
+            load_plan(path)
+        except ValueError as error:
+            assert "input-content leakage" in str(error)
+        else:
+            raise AssertionError("content-identical split inputs were accepted")
 
 
 def test_tar_shards_are_content_addressed_and_range_indexed() -> None:
@@ -115,9 +170,12 @@ def test_custody_deduplicates_inputs_and_preserves_plan() -> None:
         plan.write_text("{}\n")
         row = WorkloadRow(
             execution_id="row-1", family="fixture", application="fixture",
-            partition="training", session="session-a", input_seed=1,
+            partition="training", session="session-a",
+            matched_input_partition=None, input_seed=1,
             argv=(str(binary),), stdin=b"", cwd=str(root),
-            input_paths=(str(input_path), str(input_path)), expected_exit_code=0,
+            input_paths=(str(input_path), str(input_path)),
+            input_sha256=(_hash(b"same"), _hash(b"same")), support_paths=(),
+            expected_exit_code=0,
             expected_stdout_sha256=_hash(b""), expected_stderr_sha256=_hash(b""),
             timeout_seconds=1,
         )

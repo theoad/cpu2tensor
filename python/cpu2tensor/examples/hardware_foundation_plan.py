@@ -41,8 +41,15 @@ class Fixture:
 class Workload:
     family: str
     application: str
-    command: Callable[[Fixture, Path], tuple[tuple[str, ...], tuple[Path, ...]]]
+    command: Callable[[Fixture, Path], "Invocation"]
     expected_exit_code: int = 0
+
+
+@dataclass(frozen=True)
+class Invocation:
+    argv: tuple[str, ...]
+    input_paths: tuple[Path, ...]
+    support_paths: tuple[Path, ...] = ()
 
 
 def _tool(name: str) -> str:
@@ -123,10 +130,12 @@ def make_fixtures(root: Path, *, count: int, seed: int, size: int) -> tuple[Fixt
             "\n".join(functions) + f"\nunsigned run(unsigned x) {{ return {calls}; }}\n"
         ).encode())
         _write(bc, (
-            f"scale=20\ns=0\nfor(i=1;i<={200 + ordinal};i++) s += i^3/(i+1)\ns\n"
+            f"scale=20\ns={input_seed % 997}\n"
+            f"for(i=1;i<={200 + ordinal};i++) s += i^3/(i+1)\ns\n"
         ).encode())
         _write(dc, (
-            f"0 {500 + ordinal} [d 1 - d 0 >a * +]sa la x p\n"
+            f"{input_seed % 991} {500 + ordinal} "
+            "[d 1 - d 0 >a * +]sa la x p\n"
         ).encode())
         samples = hashlib.shake_256(f"wav:{input_seed}".encode()).digest(size)
         pcm = b"".join(bytes((value, value)) for value in samples)
@@ -148,9 +157,9 @@ def make_fixtures(root: Path, *, count: int, seed: int, size: int) -> tuple[Fixt
 def _single(tool: str, *arguments: str, member: str = "binary"):
     executable = _tool(tool)
 
-    def command(fixture: Fixture, _root: Path) -> tuple[tuple[str, ...], tuple[Path, ...]]:
+    def command(fixture: Fixture, _root: Path) -> Invocation:
         path = getattr(fixture, member)
-        return (executable, *arguments, str(path)), (path,)
+        return Invocation((executable, *arguments, str(path)), (path,))
     return command
 
 
@@ -158,8 +167,10 @@ def _fixed(tool: str, *arguments: str, input_tool: str):
     executable = _tool(tool)
     input_path = Path(_tool(input_tool))
 
-    def command(_fixture: Fixture, _root: Path) -> tuple[tuple[str, ...], tuple[Path, ...]]:
-        return (executable, *arguments, str(input_path)), (input_path,)
+    def command(_fixture: Fixture, _root: Path) -> Invocation:
+        return Invocation(
+            (executable, *arguments, str(input_path)), (), (input_path,),
+        )
     return command
 
 
@@ -184,22 +195,26 @@ def workloads() -> tuple[Workload, ...]:
 
     def pair(executable: str, left_flag: Sequence[str] = ()):
         def command(fixture: Fixture, _root: Path):
-            return (
+            return Invocation((
                 executable, *left_flag, str(fixture.left), str(fixture.right),
-            ), (fixture.left, fixture.right)
+            ), (fixture.left, fixture.right))
         return command
 
     def archive(fixture: Fixture, root: Path):
-        return (
+        del root
+        return Invocation((
             tar, "--sort=name", "--mtime=@0", "--owner=0", "--group=0",
-            "--numeric-owner", "-cf", "-", "-C", str(root), fixture.binary.name,
-            fixture.text.name,
-        ), (fixture.binary, fixture.text)
+            "--numeric-owner", "-cf", "-", "-C", str(fixture.binary.parent),
+            fixture.binary.name, fixture.text.name,
+        ), (fixture.binary, fixture.text))
 
     def interpreter(executable: str, script_name: str):
         def command(fixture: Fixture, root: Path):
             script = root / script_name
-            return (executable, str(script), str(fixture.binary)), (script, fixture.binary)
+            return Invocation(
+                (executable, str(script), str(fixture.binary)),
+                (fixture.binary,), (script,),
+            )
         return command
 
     return (
@@ -207,10 +222,10 @@ def workloads() -> tuple[Workload, ...]:
         Workload("hash", "md5sum", _single("md5sum")),
         Workload("hash", "sha512sum", _single("sha512sum")),
         Workload("hash", "cksum", _single("cksum")),
-        Workload("crypto", "openssl-sha3", lambda f, _r: (
+        Workload("crypto", "openssl-sha3", lambda f, _r: Invocation(
             (openssl, "dgst", "-sha3-256", str(f.binary)), (f.binary,),
         )),
-        Workload("crypto", "openssl-aes", lambda f, _r: ((
+        Workload("crypto", "openssl-aes", lambda f, _r: Invocation((
             openssl, "enc", "-aes-256-ctr", "-K", "11" * 32,
             "-iv", "22" * 16, "-in", str(f.binary),
         ), (f.binary,))),
@@ -230,12 +245,12 @@ def workloads() -> tuple[Workload, ...]:
             "rg", "--no-heading", "--no-line-number", "alpha|omega", member="text"
         )),
         Workload("archive", "tar", archive),
-        Workload("object", "git-hash-object", lambda f, _r: (
+        Workload("object", "git-hash-object", lambda f, _r: Invocation(
             (git, "hash-object", str(f.binary)), (f.binary,),
         )),
         Workload("interpreter", "perl-byte-analysis", interpreter(perl, "analyze.pl")),
         Workload("interpreter", "python-byte-analysis", interpreter(python, "analyze.py")),
-        Workload("build-tool", "cmake-sha256", lambda f, _r: (
+        Workload("build-tool", "cmake-sha256", lambda f, _r: Invocation(
             (cmake, "-E", "sha256sum", str(f.binary)), (f.binary,),
         )),
         Workload("binary-analysis", "objdump", _fixed(
@@ -257,24 +272,24 @@ def workloads() -> tuple[Workload, ...]:
         Workload("binary-analysis", "od", _single("od", "-An", "-tx1")),
         Workload("comparison", "diff", pair(diff, ("--label", "left", "--label", "right", "-u")), 1),
         Workload("comparison", "cmp", pair(cmp, ("-l",)), 1),
-        Workload("structured-data", "jq", lambda f, _r: ((
+        Workload("structured-data", "jq", lambda f, _r: Invocation((
             jq, "-c", "[.records[] | select(.score > 1000) | {id,name}]",
             str(f.json),
         ), (f.json,))),
-        Workload("structured-data", "xmllint", lambda f, _r: ((
+        Workload("structured-data", "xmllint", lambda f, _r: Invocation((
             xmllint, "--xpath", "count(/root/record[@score > 1000])", str(f.xml),
         ), (f.xml,))),
-        Workload("compiler", "clang-cc1", lambda f, _r: ((
+        Workload("compiler", "clang-cc1", lambda f, _r: Invocation((
             clang, "-cc1", "-triple", "x86_64-unknown-linux-gnu",
             "-emit-llvm", "-o", "-", str(f.source),
         ), (f.source,))),
-        Workload("numeric", "bc", lambda f, _r: (
+        Workload("numeric", "bc", lambda f, _r: Invocation(
             (bc, "-q", str(f.bc)), (f.bc,),
         )),
-        Workload("numeric", "dc", lambda f, _r: (
+        Workload("numeric", "dc", lambda f, _r: Invocation(
             (dc, str(f.dc)), (f.dc,),
         )),
-        Workload("media", "ffprobe", lambda f, _r: ((
+        Workload("media", "ffprobe", lambda f, _r: Invocation((
             ffprobe, "-v", "error", "-show_entries",
             "format=format_name,duration,size", "-of", "json", str(f.wav),
         ), (f.wav,))),
@@ -325,10 +340,22 @@ def make_plan(
     input_bytes: int, calibration: dict[str, object] | None = None,
     target_pt_bytes_per_application: int | None = None,
 ) -> dict[str, object]:
-    inputs = root / "inputs"
-    inputs.mkdir(parents=True, exist_ok=True)
-    _scripts(inputs)
-    fixtures = make_fixtures(inputs, count=fixture_count, seed=seed, size=input_bytes)
+    support = root / "support"
+    support.mkdir(parents=True, exist_ok=True)
+    _scripts(support)
+    pool_names = (
+        "training", "calibration", "familiar_validation",
+        "heldout_application",
+    )
+    fixture_pools = {
+        name: make_fixtures(
+            root / "fixture-pools" / name,
+            count=fixture_count,
+            seed=seed + (index + 1) * 1_000_000,
+            size=input_bytes,
+        )
+        for index, name in enumerate(pool_names)
+    }
     applications = workloads()
     generator = random.Random(seed)
     heldout_count = max(3, len(applications) // 5)
@@ -380,38 +407,69 @@ def make_plan(
     for session in ("session-a", "session-b"):
         for workload in applications:
             application_repetitions = repetitions_by_application[workload.application]
+            if application_repetitions < 3:
+                raise ValueError(
+                    "plans need at least three repetitions per application"
+                )
+            training_end = max(1, int(application_repetitions * 0.70))
+            calibration_end = max(
+                training_end + 1, int(application_repetitions * 0.85),
+            )
+            calibration_end = min(calibration_end, application_repetitions - 1)
             for repetition in range(application_repetitions):
-                fixture = fixtures[repetition % len(fixtures)]
-                argv, paths = workload.command(fixture, inputs)
-                cache_key = (workload.application, fixture.ordinal)
+                if workload.application in heldout:
+                    partition = "heldout_application"
+                    matched_input_partition = (
+                        "heldout_application" if session == "session-b" else None
+                    )
+                elif session == "session-b":
+                    partition = "heldout_session"
+                    matched_input_partition = "familiar_validation"
+                else:
+                    partition = (
+                        "training" if repetition < training_end else
+                        "calibration" if repetition < calibration_end else
+                        "familiar_validation"
+                    )
+                    matched_input_partition = None
+                pool_name = (
+                    matched_input_partition if partition == "heldout_session"
+                    else partition
+                )
+                assert pool_name is not None
+                fixtures = fixture_pools[pool_name]
+                fixture_ordinal = (
+                    calibration_end + repetition
+                    if partition == "heldout_session" else repetition
+                )
+                fixture = fixtures[fixture_ordinal % len(fixtures)]
+                invocation = workload.command(fixture, support)
+                cache_key = (workload.application, fixture.seed)
                 if cache_key not in expectations:
                     expectations[cache_key] = _run_twice(
-                        argv, cwd=inputs, environment=environment,
+                        invocation.argv, cwd=support, environment=environment,
                         exit_code=workload.expected_exit_code,
                     )
                 stdout_hash, stderr_hash = expectations[cache_key]
-                if workload.application in heldout:
-                    partition = "heldout_application"
-                elif session == "session-b":
-                    partition = "heldout_session"
-                else:
-                    fraction = repetition / application_repetitions
-                    partition = (
-                        "training" if fraction < 0.70 else
-                        "calibration" if fraction < 0.85 else
-                        "familiar_validation"
-                    )
                 rows.append({
                     "execution_id": f"{workload.application}-{session[-1]}-{repetition:06d}",
                     "family": workload.family,
                     "application": workload.application,
                     "partition": partition,
                     "session": session,
+                    "matched_input_partition": matched_input_partition,
                     "input_seed": fixture.seed,
-                    "argv": list(argv),
+                    "argv": list(invocation.argv),
                     "stdin_base64": base64.b64encode(b"").decode(),
-                    "cwd": str(inputs),
-                    "input_paths": [str(path) for path in paths],
+                    "cwd": str(support),
+                    "input_paths": [str(path) for path in invocation.input_paths],
+                    "input_sha256": [
+                        hashlib.sha256(path.read_bytes()).hexdigest()
+                        for path in invocation.input_paths
+                    ],
+                    "support_paths": [
+                        str(path) for path in invocation.support_paths
+                    ],
                     "expected_exit_code": workload.expected_exit_code,
                     "expected_stdout_sha256": stdout_hash,
                     "expected_stderr_sha256": stderr_hash,
@@ -427,6 +485,13 @@ def make_plan(
         ),
         "generator_seed": seed,
         "fixture_count": fixture_count,
+        "fixture_pools": {
+            name: {
+                "count": len(fixtures),
+                "seeds": [fixture.seed for fixture in fixtures],
+            }
+            for name, fixtures in fixture_pools.items()
+        },
         "input_bytes": input_bytes,
         "calibration_content_sha256": calibration_hash,
         "calibrated_pt_bytes_per_execution": calibrated_pt_bytes,
