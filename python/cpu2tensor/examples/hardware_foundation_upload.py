@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 from pathlib import Path
@@ -118,13 +119,18 @@ class S3CorpusStore:
         root = artifact / "custody"
         manifest_path = root / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
-        uploaded = []
-        for item in manifest.get("unique_objects", []):
+        def upload_item(item: dict[str, object]) -> dict[str, object]:
             digest = item["sha256"]
             path = root / item["path"]
             key = f"objects/custody/sha256/{digest[:2]}/{digest}"
             self.put_verified(path, key, digest)
-            uploaded.append({**item, "key": key})
+            return {**item, "key": key}
+
+        items = manifest.get("unique_objects", [])
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise ValueError("custody manifest objects are invalid")
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            uploaded = list(pool.map(upload_item, items))
         for name, kind in (("plan", "plan"), ("package_inventory", "packages")):
             item = manifest[name]
             digest = item["sha256"]
