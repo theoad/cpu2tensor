@@ -32,6 +32,8 @@ collect-only/train-only split supports capture on Linux x86 and training on MPS.
 [scratch/frozen/fine-tuned comparison](../../../docs/hardware-transfer-r1.md).
 `hardware_transfer_experiment` owns its architecture, losses, and training loop;
 it does not collect new traces or update a detector during inference.
+`hardware_anchor_repeat_audit` verifies two sealed, exact-plan benign sessions
+and reports per-modality repeat stability without fitting a classifier.
 `hardware_anomaly_bundle` turns one retained score into the replay, localization,
 confidence, PEBS semantic, and optional exact-boot symbol evidence described in
 the [LLM handoff contract](../../../docs/hardware-anomaly-evidence.md).
