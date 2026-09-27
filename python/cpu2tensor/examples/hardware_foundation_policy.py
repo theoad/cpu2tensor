@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import time
 
 
 NO_TURBO = Path("/sys/devices/system/cpu/intel_pstate/no_turbo")
+LOCK_PATH = Path("/run/lock/cpu2tensor-foundation-capture.lock")
 
 
 def _maximum(cpu: int) -> Path:
@@ -25,9 +27,12 @@ def _read(path: Path) -> str:
 
 
 def _write(path: Path, value: str) -> None:
-    path.write_text(value + "\n")
-    if _read(path) != value:
-        raise RuntimeError(f"CPU policy write did not stick: {path}")
+    for _ in range(20):
+        path.write_text(value + "\n")
+        if _read(path) == value:
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"CPU policy write did not stick: {path}")
 
 
 def _atomic_json(path: Path, payload: object) -> None:
@@ -48,6 +53,12 @@ def run(args: argparse.Namespace) -> int:
         raise RuntimeError("foundation policy wrapper requires root")
     if not args.command:
         raise ValueError("policy wrapper needs a collector command after --")
+    lock_descriptor = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        os.close(lock_descriptor)
+        raise RuntimeError("another foundation collector owns the CPU policy") from error
     maximum = _maximum(args.cpu)
     original = {"no_turbo": _read(NO_TURBO), "maximum_khz": _read(maximum)}
     if original["no_turbo"] not in ("0", "1") or not original["maximum_khz"].isdigit():
@@ -85,16 +96,24 @@ def run(args: argparse.Namespace) -> int:
     finally:
         # Re-enable turbo before restoring a maximum above the non-turbo
         # ceiling; intel_pstate otherwise clamps the write to base frequency.
-        _write(NO_TURBO, original["no_turbo"])
-        _write(maximum, original["maximum_khz"])
+        restore_error: BaseException | None = None
+        try:
+            _write(NO_TURBO, original["no_turbo"])
+            _write(maximum, original["maximum_khz"])
+        except BaseException as error:
+            restore_error = error
         receipt["ended_unix_ns"] = time.time_ns()
-        receipt["restored"] = True
+        receipt["restored"] = (
+            _read(NO_TURBO) == original["no_turbo"] and
+            _read(maximum) == original["maximum_khz"]
+        )
         receipt["return_code"] = None if process is None else process.poll()
         _atomic_json(args.receipt, receipt)
         if args.publish_artifact is not None:
             pending = args.publish_artifact / "capture-manifest.pending.json"
             published = args.publish_artifact / "capture-manifest.json"
-            if receipt["return_code"] == 0 and pending.exists():
+            if (receipt["return_code"] == 0 and receipt["restored"] and
+                    pending.exists()):
                 manifest = json.loads(pending.read_text())
                 manifest["cpu_policy_receipt"] = {
                     "content": receipt,
@@ -108,6 +127,9 @@ def run(args: argparse.Namespace) -> int:
                 pending.unlink()
         signal.signal(signal.SIGTERM, old_term)
         signal.signal(signal.SIGINT, old_int)
+        os.close(lock_descriptor)
+        if restore_error is not None:
+            raise restore_error
 
 
 def parser() -> argparse.ArgumentParser:
