@@ -49,12 +49,22 @@ cleanly collected all rows but failed its zero-alert gate: frozen seeds 2801,
 seed-2801 alert. The 30,000-row calibration is therefore blocked, and no
 threshold or ensemble rule will be selected post hoc on these data.
 
-Next: use the pilot as development data for a lightweight cross-modal anomaly
-head that conditions out family/intensity nuisance, while keeping the pretrained
-encoder and a new physical session untouched for prospective evaluation. Train
-effect discrimination only on disjoint lawful error/control pairs. Promotion
-still requires recall in the top 100 at benign FPR at most $10^{-4}$; the
-million-run and 24-hour campaigns remain **NO-GO**.
+The [paired few-shot transfer probe](hardware-fewshot-transfer-r1.md) changes the
+research decision. A head trained only on `fstat` and `openat` labels transfers
+to unseen `read_efault` with median AUROC 1.000 for the frozen pretrained encoder
+at 1, 2, and 4 shots, versus 0.496, 0, and 0 for an identically trained random
+encoder. Both pretrained arms win all three paired seeds without increasing
+median benign alerts. This is the first clear sample-efficiency advantage over
+scratch and evidence for emergent cross-family structure.
+
+It is not an operational detector: the benign-calibration maximum remains above
+all held-out effect scores, and benign tails are not yet controlled. The primary
+next program is therefore the [Large Hardware Model scaling roadmap](large-hardware-model-roadmap.md):
+measure self-supervised loss and transfer against model size, data volume,
+workload diversity, modality diversity, and compute before task post-training.
+Anomaly heads remain probes. Promotion still requires recall in the top 100 at
+benign FPR at most $10^{-4}$; the million-run and 24-hour campaigns remain
+**NO-GO**.
 
 ## Closed decision: initial hardware transfer comparison
 

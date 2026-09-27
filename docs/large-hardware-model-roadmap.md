@@ -56,3 +56,9 @@ value only if a pretrained arm beats scratch by at least 0.10 median held-out
 seeds, and does not increase the median benign alert rate. Otherwise the result
 is evidence that the current pretraining objective or scale has not produced
 useful task transfer.
+
+The [R1 result](hardware-fewshot-transfer-r1.md) passes this rule: the frozen
+pretrained encoder reaches median cross-family AUROC 1.000 at 1--4 shots, while
+scratch reaches 0.496 at one shot and 0 at two and four shots. Absolute tail
+calibration still fails, so this promotes the scaling-law program rather than a
+detector.
