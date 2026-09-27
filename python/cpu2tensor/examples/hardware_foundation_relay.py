@@ -63,8 +63,9 @@ class CorpusRelay:
     def ready_descriptors(self) -> tuple[str, ...]:
         ready = self.remote / "shards/ready"
         command = (
+            f"if test -d {shlex.quote(str(ready))}; then "
             f"find {shlex.quote(str(ready))} -maxdepth 1 -type f "
-            "-name '*.json' -printf '%f\\n'"
+            "-name '*.json' -printf '%f\\n'; fi"
         )
         return tuple(sorted(line for line in self._ssh(command).splitlines() if line))
 
@@ -116,6 +117,15 @@ class CorpusRelay:
         )
         return result.returncode == 0
 
+    def capture_failure(self) -> str | None:
+        failure = self.remote / "capture-failed.json"
+        command = (
+            f"if test -f {shlex.quote(str(failure))}; then "
+            f"cat {shlex.quote(str(failure))}; fi"
+        )
+        value = self._ssh(command).strip()
+        return value or None
+
     def finalize(self) -> dict[str, object]:
         artifact = self.staging / "final"
         artifact.mkdir(parents=True, exist_ok=True)
@@ -140,6 +150,9 @@ class CorpusRelay:
         while True:
             for name in self.ready_descriptors():
                 self.relay_one(name)
+            failure = self.capture_failure()
+            if failure is not None:
+                raise RuntimeError(f"remote capture failed: {failure}")
             if self.capture_finished() and not self.ready_descriptors():
                 return self.finalize()
             time.sleep(poll_seconds)

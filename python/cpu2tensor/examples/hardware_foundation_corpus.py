@@ -385,14 +385,23 @@ def _validate_capture(
     pebs_samples = 0
     pebs_user = 0
     pebs_kernel = 0
+    pebs_inexact = 0
+    pebs_zero_address = 0
+    pebs_usable = 0
     if batch.pebs is not None:
         pebs_samples = batch.pebs.ip.numel()
         if pebs_samples:
             if (set(batch.pebs.tid.tolist()) != {pid} or
-                    set(batch.pebs.cpu.tolist()) != {cpu} or
-                    not bool(batch.pebs.exact_ip.all()) or
-                    int((batch.pebs.address != 0).sum()) != pebs_samples):
-                raise HardwareCaptureError("PEBS attribution or precision is invalid")
+                    set(batch.pebs.cpu.tolist()) != {cpu}):
+                raise HardwareCaptureError("PEBS task or CPU attribution is invalid")
+            # Keep raw samples exactly as emitted.  Inexact-IP and zero-address
+            # rows are explicit missingness for derived views, not a reason to
+            # retry into a biased distribution or discard the PT execution.
+            pebs_inexact = int((~batch.pebs.exact_ip).sum())
+            pebs_zero_address = int((batch.pebs.address == 0).sum())
+            pebs_usable = int((
+                batch.pebs.exact_ip & (batch.pebs.address != 0)
+            ).sum())
             # Kernel canonical addresses have the sign bit set on x86-64.  The
             # tensor stores the same bits as signed int64, so avoid uint64 ops
             # that are not implemented by every PyTorch backend.
@@ -407,6 +416,9 @@ def _validate_capture(
         "pebs_samples": pebs_samples,
         "pebs_user_samples": pebs_user,
         "pebs_kernel_samples": pebs_kernel,
+        "pebs_inexact_samples": pebs_inexact,
+        "pebs_zero_address_samples": pebs_zero_address,
+        "pebs_usable_samples": pebs_usable,
         "instructions": int(batch.counters.values[0]),
         "cycles": int(batch.counters.values[1]),
         "ref_cycles": int(batch.counters.values[2]),
@@ -845,7 +857,17 @@ def main() -> None:
         raise SystemExit("target and controller CPUs must differ")
     if args.shard_bytes < 1024 * 1024:
         raise SystemExit("shards smaller than one MiB are unsupported")
-    print(json.dumps(collect(args), sort_keys=True))
+    try:
+        print(json.dumps(collect(args), sort_keys=True))
+    except BaseException as error:
+        artifact = args.artifact.resolve()
+        if artifact.exists():
+            _atomic_json(artifact / "capture-failed.json", {
+                "schema": "cpu2tensor-hardware-foundation-failure-v1",
+                "error_type": type(error).__name__,
+                "error": str(error),
+            })
+        raise
 
 
 if __name__ == "__main__":
