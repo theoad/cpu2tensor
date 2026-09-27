@@ -165,6 +165,7 @@ def _subject_manifest(
 ) -> dict[str, object]:
     runner = Path(__file__).resolve()
     hardware = runner.parents[1] / "hardware.py"
+    policy = runner.with_name("hardware_foundation_policy.py")
     cpu_root = Path(f"/sys/devices/system/cpu/cpu{target_cpu}")
     cache_paths: list[Path] = []
     for index in sorted((cpu_root / "cache").glob("index*")):
@@ -194,6 +195,7 @@ def _subject_manifest(
     build = {
         "runner": _identity(str(runner)),
         "capture_module": _identity(str(hardware)),
+        "policy_wrapper": _identity(str(policy)),
         "gate": _identity(str(gate)),
     }
     subject = {
@@ -584,8 +586,10 @@ def seal_custody(
     roles: dict[str, set[str]] = {}
     runner = Path(__file__).resolve()
     hardware = runner.parents[1] / "hardware.py"
+    policy = runner.with_name("hardware_foundation_policy.py")
     for role, path in (
-        ("collector", runner), ("capture_module", hardware), ("gate", gate),
+        ("collector", runner), ("capture_module", hardware),
+        ("policy_wrapper", policy), ("gate", gate),
     ):
         resolved = str(path.resolve())
         candidates.setdefault(resolved, set()).add(role)
@@ -848,8 +852,12 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         ],
     }
     manifest["manifest_content_sha256"] = _json_hash(manifest)
-    _atomic_json(artifact / "capture-manifest.json", manifest)
-    os.chown(artifact / "capture-manifest.json", *artifact_owner)
+    manifest_name = (
+        "capture-manifest.pending.json" if args.defer_manifest else
+        "capture-manifest.json"
+    )
+    _atomic_json(artifact / manifest_name, manifest)
+    os.chown(artifact / manifest_name, *artifact_owner)
     return manifest
 
 
@@ -868,6 +876,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--shard-bytes", type=int, default=256 * 1024 * 1024)
     result.add_argument("--max-shard-bytes", type=int, default=0)
     result.add_argument("--allow-rejections", action="store_true")
+    result.add_argument("--defer-manifest", action="store_true")
     return result
 
 
