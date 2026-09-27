@@ -18,6 +18,7 @@ from cpu2tensor.examples.hardware_foundation_corpus import (
     load_plan,
     seal_custody,
 )
+from cpu2tensor.examples.hardware_foundation_audit import audit
 from cpu2tensor.hardware import (
     HardwareBatch, HardwareCaptureEnvelope, HardwareCounterBatch,
     HardwareMultimodalBatch, HardwareSourceStatus,
@@ -128,6 +129,75 @@ def test_plan_rejects_input_content_leakage_under_different_paths() -> None:
             assert "input-content leakage" in str(error)
         else:
             raise AssertionError("content-identical split inputs were accepted")
+
+
+def test_release_audit_requires_complete_exact_sessions() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        binary = root / "target"
+        binary.write_bytes(b"binary")
+
+        def row(execution_id: str, session: str) -> dict[str, object]:
+            heldout = session == "session-b"
+            return {
+                "execution_id": execution_id,
+                "family": "primitive",
+                "application": "fixture",
+                "partition": "heldout_session" if heldout else "training",
+                "session": session,
+                "matched_input_partition": "familiar_validation" if heldout else None,
+                "input_seed": 1,
+                "argv": [str(binary)],
+                "stdin_base64": "",
+                "cwd": str(root),
+                "input_paths": [],
+                "input_sha256": [],
+                "support_paths": [],
+                "expected_exit_code": 0,
+                "expected_stdout_sha256": _hash(b""),
+                "expected_stderr_sha256": _hash(b""),
+                "timeout_seconds": 1,
+            }
+
+        plan = {
+            "schema": PLAN_SCHEMA, "corpus_id": "audit-fixture",
+            "environment": {"LANG": "C"},
+            "rows": [row("fixture-a", "session-a"), row("fixture-b", "session-b")],
+        }
+        plan_path = root / "plan.json"
+        plan_path.write_text(json.dumps(plan))
+        plan_digest = _hash(plan_path.read_bytes())
+        releases = []
+        for session, execution_id in (
+            ("session-a", "fixture-a"), ("session-b", "fixture-b"),
+        ):
+            entry = {
+                "execution_id": execution_id, "family": "primitive",
+                "application": "fixture",
+                "partition": "training" if session == "session-a" else "heldout_session",
+                "session": session, "pt_bytes": 1, "pebs_samples": 0,
+            }
+            manifest = {
+                "plan_sha256": plan_digest, "rejections": [],
+                "stopped_at_byte_target": False, "executions": 1,
+                "planned_executions": 1,
+                "subject": {"identity_sha256": "a" * 64},
+                "entries": [entry], "shards": [],
+            }
+            release = {
+                "schema": "cpu2tensor-hardware-foundation-release-v1",
+                "corpus_id": "audit-fixture", "session": session,
+                "capture_manifest": manifest, "shards": [],
+            }
+            path = root / f"{session}.json"
+            path.write_text(json.dumps(release))
+            releases.append(path)
+        report = audit(
+            plan_path, releases, minimum_bytes=0,
+            minimum_application_pt_bytes=0, bucket=None, region="us-east-1",
+        )
+        assert report["accepted"] is True
+        assert report["executions"] == 2
 
 
 def test_tar_shards_are_content_addressed_and_range_indexed() -> None:

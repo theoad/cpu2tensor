@@ -72,6 +72,18 @@ temporary read-only credentials. Mounting is optional: the raw index gives the
 exact byte range and SHA-256 of every tar member, and training views are already
 independently sampleable objects.
 
+The independent release gate is executable rather than a prose checklist:
+
+```bash
+python -m cpu2tensor.examples.hardware_foundation_audit plan.json \
+  session-a.json session-b.json \
+  --bucket alphaflow-hardware-corpus-403339561360-us-east-1
+```
+
+It revalidates the plan's content splits, complete execution set, subject and
+plan identity, per-application PT quota, every S3 checksum/version, and one
+indexed byte-range member from each session.
+
 ## Current qualification evidence
 
 The exact `80f0506` collector calibration on `iseeyou` admitted 164/164
