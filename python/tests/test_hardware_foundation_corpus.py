@@ -14,8 +14,13 @@ from cpu2tensor.examples.hardware_foundation_corpus import (
     PLAN_SCHEMA,
     TarShardWriter,
     WorkloadRow,
+    _validate_capture,
     load_plan,
     seal_custody,
+)
+from cpu2tensor.hardware import (
+    HardwareBatch, HardwareCaptureEnvelope, HardwareCounterBatch,
+    HardwareMultimodalBatch, HardwareSourceStatus,
 )
 
 
@@ -126,3 +131,40 @@ def test_custody_deduplicates_inputs_and_preserves_plan() -> None:
             for item in manifest["unique_objects"]
         ) == 1
         assert (artifact / "custody/plan.json").read_text() == "{}\n"
+
+
+def test_inexact_pebs_is_retained_and_counted_without_unsigned_underflow() -> None:
+    empty = torch.empty(0, dtype=torch.int64)
+    pt = HardwareBatch(
+        source=77, signal="intel_pt", ip=empty, pid=empty, tid=empty,
+        time=empty, cpu=empty, period=empty, address=empty, weight=empty,
+        data_source=empty, exact_ip=torch.empty(0, dtype=torch.bool),
+        trace_bytes=torch.tensor([1], dtype=torch.uint8),
+        perf_records=torch.empty(0, dtype=torch.uint8),
+    )
+    pebs = HardwareBatch(
+        source=77, signal="memory_loads", ip=torch.tensor([1]),
+        pid=torch.tensor([77]), tid=torch.tensor([77]), time=torch.tensor([1]),
+        cpu=torch.tensor([2]), period=torch.tensor([10_000]),
+        address=torch.tensor([0]), weight=torch.tensor([1]),
+        data_source=torch.tensor([1]), exact_ip=torch.tensor([False]),
+        trace_bytes=empty, perf_records=None,
+    )
+    counters = HardwareCounterBatch(
+        77, 77, -1, ("instructions", "cycles", "ref_cycles"),
+        torch.tensor([1, 2, 3]), 10, 10, True, False,
+    )
+    batch = HardwareMultimodalBatch(
+        77, 77, -1, HardwareCaptureEnvelope("CLOCK_MONOTONIC_RAW", 1, 2, 3, 4),
+        (
+            HardwareSourceStatus("intel_pt", True, True, False),
+            HardwareSourceStatus("memory_loads", True, True, False, 10, 10),
+            HardwareSourceStatus("counters", True, True, False, 10, 10),
+        ),
+        pt, pebs, counters,
+    )
+    counts = _validate_capture((batch,), 77, 2)
+    assert counts["pebs_samples"] == 1
+    assert counts["pebs_inexact_samples"] == 1
+    assert counts["pebs_zero_address_samples"] == 1
+    assert counts["pebs_usable_samples"] == 0

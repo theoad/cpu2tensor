@@ -136,13 +136,22 @@ def _cpu_identity() -> dict[str, object]:
         if ":" in line:
             key, value = line.split(":", 1)
             first[key.strip()] = value.strip()
+    stable_keys = (
+        "vendor_id", "cpu family", "model", "model name", "stepping",
+        "microcode", "cache size", "physical id", "siblings", "core id",
+        "cpu cores", "apicid", "initial apicid", "fpu", "fpu_exception",
+        "cpuid level", "wp", "flags", "vmx flags", "bugs",
+        "clflush size", "cache_alignment", "address sizes",
+    )
+    static = {key: first.get(key) for key in stable_keys}
     return {
         "vendor": first.get("vendor_id"),
         "family": first.get("cpu family"),
         "model": first.get("model"),
         "stepping": first.get("stepping"),
         "model_name": first.get("model name"),
-        "cpuinfo_sha256": hashlib.sha256(text.encode()).hexdigest(),
+        "static_cpuinfo_sha256": _json_hash(static),
+        "static_cpuinfo": static,
     }
 
 
@@ -397,10 +406,11 @@ def _validate_capture(
             # Keep raw samples exactly as emitted.  Inexact-IP and zero-address
             # rows are explicit missingness for derived views, not a reason to
             # retry into a biased distribution or discard the PT execution.
-            pebs_inexact = int((~batch.pebs.exact_ip).sum())
+            exact = batch.pebs.exact_ip.bool()
+            pebs_inexact = pebs_samples - int(exact.sum())
             pebs_zero_address = int((batch.pebs.address == 0).sum())
             pebs_usable = int((
-                batch.pebs.exact_ip & (batch.pebs.address != 0)
+                exact & (batch.pebs.address != 0)
             ).sum())
             # Kernel canonical addresses have the sign bit set on x86-64.  The
             # tensor stores the same bits as signed int64, so avoid uint64 ops
@@ -758,6 +768,7 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
     )
     entries = []
     rejections: list[dict[str, object]] = []
+    stopped_at_byte_target = False
     try:
         os.sched_setaffinity(0, {args.controller_cpu})
         for row in rows:
@@ -798,6 +809,11 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
             }
             writer.add(temporary, metadata)
             entries.append(metadata)
+            if (args.max_shard_bytes > 0 and
+                    sum(int(item["bytes"]) for item in writer.published) >=
+                    args.max_shard_bytes):
+                stopped_at_byte_target = True
+                break
     finally:
         writer.close()
         os.sched_setaffinity(0, original_affinity)
@@ -814,6 +830,9 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         },
         "session": args.session,
         "executions": len(entries),
+        "planned_executions": len(rows),
+        "stopped_at_byte_target": stopped_at_byte_target,
+        "max_shard_bytes": args.max_shard_bytes,
         "rejections": rejections,
         "pt_bytes": sum(int(row["pt_bytes"]) for row in entries),
         "pebs_samples": sum(int(row["pebs_samples"]) for row in entries),
@@ -847,6 +866,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--data-pages", type=int, default=1024)
     result.add_argument("--aux-pages", type=int, default=8192)
     result.add_argument("--shard-bytes", type=int, default=256 * 1024 * 1024)
+    result.add_argument("--max-shard-bytes", type=int, default=0)
     result.add_argument("--allow-rejections", action="store_true")
     return result
 

@@ -8,6 +8,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import shlex
+import shutil
 import subprocess
 import time
 
@@ -22,7 +23,7 @@ class CorpusRelay:
 
     def __init__(
         self, *, host: str, remote: PurePosixPath, staging: Path,
-        store: S3CorpusStore,
+        store: S3CorpusStore, identity: Path | None = None,
     ) -> None:
         if not host or any(character.isspace() for character in host):
             raise ValueError("remote host must be one SSH token")
@@ -32,6 +33,7 @@ class CorpusRelay:
         self.remote = remote
         self.staging = staging
         self.store = store
+        self.identity = identity
         self.staging.mkdir(parents=True, exist_ok=True)
         self.state_path = staging / "relay-state.json"
         self.state = self._load_state()
@@ -47,8 +49,11 @@ class CorpusRelay:
         temporary.replace(self.state_path)
 
     def _ssh(self, command: str, *, capture: bool = True) -> str:
+        ssh = ["ssh"]
+        if self.identity is not None:
+            ssh.extend(("-i", str(self.identity)))
         result = subprocess.run(
-            ("ssh", self.host, command), check=True,
+            (*ssh, self.host, command), check=True,
             stdout=subprocess.PIPE if capture else None,
             stderr=subprocess.PIPE, text=True,
         )
@@ -58,7 +63,10 @@ class CorpusRelay:
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("relay paths must remain below the artifact")
         source = f"{self.host}:{self.remote / relative}"
-        subprocess.run(("rsync", "-a", source, str(destination)), check=True)
+        command = ["rsync", "-a"]
+        if self.identity is not None:
+            command.extend(("-e", f"ssh -i {shlex.quote(str(self.identity))}"))
+        subprocess.run((*command, source, str(destination)), check=True)
 
     def ready_descriptors(self) -> tuple[str, ...]:
         ready = self.remote / "shards/ready"
@@ -112,7 +120,10 @@ class CorpusRelay:
     def capture_finished(self) -> bool:
         manifest = self.remote / "capture-manifest.json"
         result = subprocess.run(
-            ("ssh", self.host, f"test -f {shlex.quote(str(manifest))}"),
+            (("ssh", "-i", str(self.identity), self.host,
+              f"test -f {shlex.quote(str(manifest))}")
+             if self.identity is not None else
+             ("ssh", self.host, f"test -f {shlex.quote(str(manifest))}")),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         return result.returncode == 0
@@ -133,18 +144,29 @@ class CorpusRelay:
         for directory in ("decode", "custody"):
             destination = artifact / directory
             destination.mkdir(parents=True, exist_ok=True)
-            subprocess.run((
-                "rsync", "-a", f"{self.host}:{self.remote / directory}/",
-                f"{destination}/",
+            command = ["rsync", "-a"]
+            if self.identity is not None:
+                command.extend(("-e", f"ssh -i {shlex.quote(str(self.identity))}"))
+            subprocess.run((*command,
+                f"{self.host}:{self.remote / directory}/", f"{destination}/",
             ), check=True)
         uploaded_decode = [
             self.store.upload_decode_state(path)
             for path in sorted((artifact / "decode").glob("kernel-*.pt"))
         ]
         uploaded_custody = self.store.upload_custody(artifact)
-        return self.store.publish_release(
+        release = self.store.publish_release(
             artifact, self.state["shards"], uploaded_decode, uploaded_custody,
         )
+        self.state["release"] = {
+            key: release[key] for key in ("key", "sha256")
+        }
+        self._save_state()
+        shutil.rmtree(artifact)
+        current = self.staging / "current"
+        if current.exists():
+            shutil.rmtree(current)
+        return release
 
     def run(self, *, poll_seconds: float) -> dict[str, object]:
         while True:
@@ -165,6 +187,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--staging", type=Path, required=True)
     result.add_argument("--bucket", required=True)
     result.add_argument("--region", default="us-east-1")
+    result.add_argument("--identity", type=Path)
     result.add_argument("--poll-seconds", type=float, default=2.0)
     return result
 
@@ -174,6 +197,7 @@ def main() -> None:
     relay = CorpusRelay(
         host=args.host, remote=args.remote, staging=args.staging.resolve(),
         store=S3CorpusStore(args.bucket, region=args.region),
+        identity=None if args.identity is None else args.identity.expanduser().resolve(),
     )
     print(json.dumps(relay.run(poll_seconds=args.poll_seconds), sort_keys=True))
 

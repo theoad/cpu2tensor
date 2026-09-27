@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import random
 import shutil
+import statistics
 import subprocess
 from typing import Callable, Sequence
 
@@ -28,6 +29,12 @@ class Fixture:
     csv: Path
     left: Path
     right: Path
+    json: Path
+    xml: Path
+    source: Path
+    bc: Path
+    dc: Path
+    wav: Path
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,12 @@ def make_fixtures(root: Path, *, count: int, seed: int, size: int) -> tuple[Fixt
         csv = root / f"table-{ordinal:03d}.csv"
         left = root / f"left-{ordinal:03d}.txt"
         right = root / f"right-{ordinal:03d}.txt"
+        json_path = root / f"records-{ordinal:03d}.json"
+        xml = root / f"records-{ordinal:03d}.xml"
+        source = root / f"source-{ordinal:03d}.c"
+        bc = root / f"program-{ordinal:03d}.bc"
+        dc = root / f"program-{ordinal:03d}.dc"
+        wav = root / f"audio-{ordinal:03d}.wav"
         raw = hashlib.shake_256(f"binary:{input_seed}".encode()).digest(size)
         words = []
         cursor = 0
@@ -88,8 +101,46 @@ def make_fixtures(root: Path, *, count: int, seed: int, size: int) -> tuple[Fixt
         if changed:
             changed[len(changed) // 2] += " changed"
         _write(right, ("\n".join(changed) + "\n").encode())
+        records = [
+            {"id": index, "name": line.split()[1],
+             "score": int(hashlib.sha256(line.encode()).hexdigest()[:8], 16)}
+            for index, line in enumerate(lines)
+        ]
+        _write(json_path, json.dumps(
+            {"records": records}, sort_keys=True, separators=(",", ":")
+        ).encode())
+        xml_rows = "".join(
+            f'<record id="{item["id"]}" name="{item["name"]}" score="{item["score"]}"/>'
+            for item in records
+        )
+        _write(xml, f"<root>{xml_rows}</root>\n".encode())
+        functions = [
+            f"static unsigned f{index}(unsigned x) {{ return (x * {index + 3}u) ^ {item['score']}u; }}"
+            for index, item in enumerate(records[:max(32, min(len(records), 512))])
+        ]
+        calls = " + ".join(f"f{index}(x)" for index in range(len(functions)))
+        _write(source, (
+            "\n".join(functions) + f"\nunsigned run(unsigned x) {{ return {calls}; }}\n"
+        ).encode())
+        _write(bc, (
+            f"scale=20\ns=0\nfor(i=1;i<={200 + ordinal};i++) s += i^3/(i+1)\ns\n"
+        ).encode())
+        _write(dc, (
+            f"0 {500 + ordinal} [d 1 - d 0 >a * +]sa la x p\n"
+        ).encode())
+        samples = hashlib.shake_256(f"wav:{input_seed}".encode()).digest(size)
+        pcm = b"".join(bytes((value, value)) for value in samples)
+        wave_header = (
+            b"RIFF" + (36 + len(pcm)).to_bytes(4, "little") + b"WAVEfmt " +
+            (16).to_bytes(4, "little") + (1).to_bytes(2, "little") +
+            (1).to_bytes(2, "little") + (8000).to_bytes(4, "little") +
+            (16000).to_bytes(4, "little") + (2).to_bytes(2, "little") +
+            (16).to_bytes(2, "little") + b"data" + len(pcm).to_bytes(4, "little")
+        )
+        _write(wav, wave_header + pcm)
         fixtures.append(Fixture(
             ordinal, input_seed, binary, text, sorted_text, csv, left, right,
+            json_path, xml, source, bc, dc, wav,
         ))
     return tuple(fixtures)
 
@@ -124,6 +175,12 @@ def workloads() -> tuple[Workload, ...]:
     paste = _tool("paste")
     diff = _tool("diff")
     cmp = _tool("cmp")
+    jq = _tool("jq")
+    xmllint = _tool("xmllint")
+    clang = _tool("clang")
+    bc = _tool("bc")
+    dc = _tool("dc")
+    ffprobe = _tool("ffprobe")
 
     def pair(executable: str, left_flag: Sequence[str] = ()):
         def command(fixture: Fixture, _root: Path):
@@ -200,6 +257,27 @@ def workloads() -> tuple[Workload, ...]:
         Workload("binary-analysis", "od", _single("od", "-An", "-tx1")),
         Workload("comparison", "diff", pair(diff, ("--label", "left", "--label", "right", "-u")), 1),
         Workload("comparison", "cmp", pair(cmp, ("-l",)), 1),
+        Workload("structured-data", "jq", lambda f, _r: ((
+            jq, "-c", "[.records[] | select(.score > 1000) | {id,name}]",
+            str(f.json),
+        ), (f.json,))),
+        Workload("structured-data", "xmllint", lambda f, _r: ((
+            xmllint, "--xpath", "count(/root/record[@score > 1000])", str(f.xml),
+        ), (f.xml,))),
+        Workload("compiler", "clang-cc1", lambda f, _r: ((
+            clang, "-cc1", "-triple", "x86_64-unknown-linux-gnu",
+            "-emit-llvm", "-o", "-", str(f.source),
+        ), (f.source,))),
+        Workload("numeric", "bc", lambda f, _r: (
+            (bc, "-q", str(f.bc)), (f.bc,),
+        )),
+        Workload("numeric", "dc", lambda f, _r: (
+            (dc, str(f.dc)), (f.dc,),
+        )),
+        Workload("media", "ffprobe", lambda f, _r: ((
+            ffprobe, "-v", "error", "-show_entries",
+            "format=format_name,duration,size", "-of", "json", str(f.wav),
+        ), (f.wav,))),
     )
 
 
@@ -244,7 +322,8 @@ def _run_twice(
 
 def make_plan(
     root: Path, *, fixture_count: int, repetitions: int, seed: int,
-    input_bytes: int,
+    input_bytes: int, calibration: dict[str, object] | None = None,
+    target_pt_bytes_per_application: int | None = None,
 ) -> dict[str, object]:
     inputs = root / "inputs"
     inputs.mkdir(parents=True, exist_ok=True)
@@ -256,6 +335,38 @@ def make_plan(
     heldout = {
         item.application for item in generator.sample(list(applications), heldout_count)
     }
+    repetitions_by_application = {
+        workload.application: repetitions for workload in applications
+    }
+    calibration_hash = None
+    calibrated_pt_bytes: dict[str, int] = {}
+    if calibration is not None:
+        if target_pt_bytes_per_application is None or target_pt_bytes_per_application <= 0:
+            raise ValueError("calibrated plans need a positive per-application byte target")
+        samples: dict[str, list[int]] = {}
+        for row in calibration.get("entries", []):
+            if not isinstance(row, dict):
+                raise ValueError("calibration entries must be objects")
+            application = row.get("application")
+            pt_bytes = row.get("pt_bytes")
+            if isinstance(application, str) and isinstance(pt_bytes, int) and pt_bytes > 0:
+                samples.setdefault(application, []).append(pt_bytes)
+        missing = sorted(
+            workload.application for workload in applications
+            if workload.application not in samples
+        )
+        if missing:
+            raise ValueError(f"calibration omitted applications: {missing}")
+        for workload in applications:
+            typical = int(statistics.median(samples[workload.application]))
+            calibrated_pt_bytes[workload.application] = typical
+            repetitions_by_application[workload.application] = max(
+                fixture_count,
+                (target_pt_bytes_per_application + typical - 1) // typical,
+            )
+        calibration_hash = hashlib.sha256(json.dumps(
+            calibration, sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest()
     environment = {
         "HOME": "/nonexistent",
         "LANG": "C",
@@ -268,7 +379,8 @@ def make_plan(
     rows = []
     for session in ("session-a", "session-b"):
         for workload in applications:
-            for repetition in range(repetitions):
+            application_repetitions = repetitions_by_application[workload.application]
+            for repetition in range(application_repetitions):
                 fixture = fixtures[repetition % len(fixtures)]
                 argv, paths = workload.command(fixture, inputs)
                 cache_key = (workload.application, fixture.ordinal)
@@ -283,7 +395,7 @@ def make_plan(
                 elif session == "session-b":
                     partition = "heldout_session"
                 else:
-                    fraction = repetition / repetitions
+                    fraction = repetition / application_repetitions
                     partition = (
                         "training" if fraction < 0.70 else
                         "calibration" if fraction < 0.85 else
@@ -309,12 +421,17 @@ def make_plan(
     payload = {
         "schema": PLAN_SCHEMA,
         "corpus_id": (
-            f"intel-x86-foundation-s{seed}-f{fixture_count}"
-            f"-b{input_bytes}-r{repetitions}"
+            f"intel-x86-foundation-s{seed}-f{fixture_count}-b{input_bytes}"
+            + (f"-q{target_pt_bytes_per_application}-c{calibration_hash[:12]}"
+               if calibration_hash is not None else f"-r{repetitions}")
         ),
         "generator_seed": seed,
         "fixture_count": fixture_count,
         "input_bytes": input_bytes,
+        "calibration_content_sha256": calibration_hash,
+        "calibrated_pt_bytes_per_execution": calibrated_pt_bytes,
+        "target_pt_bytes_per_application_per_session": target_pt_bytes_per_application,
+        "repetitions_by_application": repetitions_by_application,
         "heldout_applications": sorted(heldout),
         "environment": environment,
         "rows": rows,
@@ -329,6 +446,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--repetitions", type=int, default=400)
     result.add_argument("--seed", type=int, default=20260928)
     result.add_argument("--input-bytes", type=int, default=256 * 1024)
+    result.add_argument("--calibration-manifest", type=Path)
+    result.add_argument("--target-pt-bytes-per-application", type=int)
     return result
 
 
@@ -336,9 +455,14 @@ def main() -> None:
     args = parser().parse_args()
     root = args.root.resolve()
     root.mkdir(parents=True, exist_ok=True)
+    calibration = (
+        None if args.calibration_manifest is None else
+        json.loads(args.calibration_manifest.read_text())
+    )
     payload = make_plan(
         root, fixture_count=args.fixture_count, repetitions=args.repetitions,
-        seed=args.seed, input_bytes=args.input_bytes,
+        seed=args.seed, input_bytes=args.input_bytes, calibration=calibration,
+        target_pt_bytes_per_application=args.target_pt_bytes_per_application,
     )
     path = root / "plan.json"
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
