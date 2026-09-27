@@ -28,11 +28,12 @@ change does not relabel the old raw-evicted corpus.
 The corrected v4 representation now passes a bounded independent-session sensor
 gate. Two 48-row physical sessions separated lawful futex wake from guaranteed
 immediate `EAGAIN`: PT, PMU, timing, and fused mean directions each achieved
-1.000 AUROC on the second session. A frozen d128 v4 encoder, fine-tuned encoder,
-and random encoder also each achieved 1.000 across three seeds. This validates
-the sensor and transfer seam but shows no pretraining advantage because the task
-is too easy. Sparse PEBS separation came entirely from sample availability, not
-stable site/address evidence. See [Hardware futex effect R1](hardware-futex-effect-r1.md).
+1.000 AUROC on the second session. A frozen d128 v4 encoder with trained head,
+fine-tuned pretrained encoder/head, and jointly trained scratch encoder/head
+also each achieved 1.000 across three seeds. This validates the sensor and
+transfer seam but shows no pretraining advantage because the task is too easy.
+Sparse PEBS separation came entirely from sample availability, not stable
+site/address evidence. See [Hardware futex effect R1](hardware-futex-effect-r1.md).
 
 Next: retain short cycles, but require family-held-out pathological-effect
 transfer plus independent benign session/intensity calibration. Promotion still

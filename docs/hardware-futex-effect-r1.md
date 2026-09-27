@@ -69,10 +69,11 @@ It does not demonstrate transfer of PEBS site or data-address coordinates.
 
 A d128 v4 masked model pretrained for 60 steps on 51 benign rows from the prior
 anchor session; reconstruction loss fell from 0.4038 to 0.1150. Three fixed
-seeds then compared the same 80-step head schedule for a random encoder, frozen
-pretrained encoder, and fine-tuned pretrained encoder. Training used only effect
-session A. Every arm and every seed obtained 1.000 AUROC and all 256 cross-class
-wins on independent session B.
+seeds then compared the same 80-step row schedule for a jointly trained
+scratch encoder/head, frozen pretrained encoder with a trained head, and
+fine-tuned pretrained encoder/head. Training used only effect session A. Every
+arm and every seed obtained 1.000 AUROC and all 256 cross-class wins on
+independent session B.
 
 The positive result validates the representation-to-head seam and shows that a
 frozen pretrained embedding retains the effect. It does **not** demonstrate a
