@@ -83,8 +83,10 @@ def run(args: argparse.Namespace) -> int:
             return_code = 128 + signal.SIGTERM
         return return_code
     finally:
-        _write(maximum, original["maximum_khz"])
+        # Re-enable turbo before restoring a maximum above the non-turbo
+        # ceiling; intel_pstate otherwise clamps the write to base frequency.
         _write(NO_TURBO, original["no_turbo"])
+        _write(maximum, original["maximum_khz"])
         receipt["ended_unix_ns"] = time.time_ns()
         receipt["restored"] = True
         receipt["return_code"] = None if process is None else process.poll()
