@@ -238,7 +238,9 @@ def _decode_stdin(value: object) -> bytes:
         raise ValueError("stdin_base64 is not canonical base64") from error
 
 
-def load_plan(path: Path) -> tuple[dict[str, object], tuple[WorkloadRow, ...]]:
+def load_plan(
+    path: Path, *, verify_local_files: bool = True,
+) -> tuple[dict[str, object], tuple[WorkloadRow, ...]]:
     payload = json.loads(path.read_text())
     if payload.get("schema") != PLAN_SCHEMA:
         raise ValueError("unknown foundation corpus plan schema")
@@ -275,10 +277,11 @@ def load_plan(path: Path) -> tuple[dict[str, object], tuple[WorkloadRow, ...]]:
                 any(not isinstance(item, str) or "\0" in item for item in argv)):
             raise ValueError("argv must be a nonempty string list")
         executable = Path(argv[0])
-        if not executable.is_absolute() or not executable.is_file():
+        if (not executable.is_absolute() or
+                (verify_local_files and not executable.is_file())):
             raise ValueError(f"executable is not an absolute file: {argv[0]}")
         cwd = Path(value.get("cwd", "/"))
-        if not cwd.is_absolute() or not cwd.is_dir():
+        if not cwd.is_absolute() or (verify_local_files and not cwd.is_dir()):
             raise ValueError(f"cwd is not an absolute directory: {cwd}")
         input_paths = value.get("input_paths", [])
         input_sha256 = value.get("input_sha256", [])
@@ -295,13 +298,15 @@ def load_plan(path: Path) -> tuple[dict[str, object], tuple[WorkloadRow, ...]]:
             raise ValueError("input_sha256 must match input_paths exactly")
         for item, digest in zip(input_paths, input_sha256):
             item_path = Path(item)
-            if not item_path.is_absolute() or not item_path.is_file():
+            if (not item_path.is_absolute() or
+                    (verify_local_files and not item_path.is_file())):
                 raise ValueError(f"input is not an absolute file: {item}")
-            if _sha256(item_path) != digest:
+            if verify_local_files and _sha256(item_path) != digest:
                 raise ValueError(f"input content changed after plan creation: {item}")
         for item in support_paths:
             item_path = Path(item)
-            if not item_path.is_absolute() or not item_path.is_file():
+            if (not item_path.is_absolute() or
+                    (verify_local_files and not item_path.is_file())):
                 raise ValueError(f"support is not an absolute file: {item}")
         matched_input_partition = value.get("matched_input_partition")
         if matched_input_partition is not None and not isinstance(

@@ -77,7 +77,9 @@ def audit(
     plan_path: Path, release_paths: Sequence[Path], *, minimum_bytes: int,
     minimum_application_pt_bytes: int, bucket: str | None, region: str,
 ) -> dict[str, object]:
-    plan, rows = load_plan(plan_path)
+    # The plan is audited off-host after collection. Its content hashes remain
+    # authoritative, while its collector-local absolute paths need not exist.
+    plan, rows = load_plan(plan_path, verify_local_files=False)
     expected = {row.execution_id: row for row in rows}
     releases = [json.loads(path.read_text()) for path in release_paths]
     if len(releases) < 2:

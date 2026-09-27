@@ -192,6 +192,7 @@ def test_release_audit_requires_complete_exact_sessions() -> None:
             path = root / f"{session}.json"
             path.write_text(json.dumps(release))
             releases.append(path)
+        binary.unlink()  # The independent auditor runs away from collector paths.
         report = audit(
             plan_path, releases, minimum_bytes=0,
             minimum_application_pt_bytes=0, bucket=None, region="us-east-1",
