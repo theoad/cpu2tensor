@@ -33,12 +33,18 @@ models independently score `read(..., PROT_NONE)` above the training/resubstitut
 for 16/16 effects and 0/16 controls at 1.000 AUROC on session B. This is the first
 repeat-stable pretrained anomaly signal for a hardware-visible memory-fault path.
 
-It is not operational: each model also flags the same 1/51 benign `memfd` row,
-while open errors only rank well and bad-`fstat` does not transfer. A post-hoc
-fused-plus-PMU conjunction removes that false positive and retains 16/16 effects,
-but needs fresh-session confirmation before it counts. Next: preregister and run
-that confirmation, then increase independent benign calibration and train a
-cross-modal anomaly head without confirmation-label leakage. Promotion still
+The raw fused score was not operational: each model also flagged the same 1/51
+benign `memfd` row, while open errors only ranked well and bad-`fstat` did not
+transfer. The [preregistered fresh-session confirmation](hardware-effect-confirmation-r1.md)
+of the fused-plus-PMU conjunction now passes unchanged for all three models:
+48/48 aggregate `read_efault` detections and 0/201 aggregate ordinary-benign and
+control alerts. All 83 fresh physical executions were first-attempt, lossless,
+and copied off-host with every raw and derived hash verified.
+
+This confirms a reusable hardware-visible proxy, not vulnerability sensitivity
+or the target false-positive rate. Next: freeze this detector for a 30,000-row
+independent benign calibration gate, while training a cross-modal anomaly head
+on disjoint lawful effects without confirmation-label leakage. Promotion still
 requires recall in the top 100 at benign FPR at most $10^{-4}$; the million-run
 and 24-hour campaigns remain **NO-GO**.
 
