@@ -376,6 +376,43 @@ def _record_kinds(records: torch.Tensor) -> tuple[int, ...]:
     return tuple(kinds)
 
 
+def _temperature_millic() -> int:
+    values = []
+    for path in Path("/sys/class/thermal").glob("thermal_zone*/temp"):
+        value = _read_text(str(path))
+        if value is not None and value.lstrip("-").isdigit():
+            values.append(int(value))
+    return max(values, default=0)
+
+
+def wait_for_relay_capacity(
+    artifact: Path, *, maximum_ready_bytes: int, minimum_free_bytes: int,
+    maximum_temperature_millic: int, timeout_seconds: float,
+) -> dict[str, int]:
+    """Apply disk backpressure without changing which execution is captured."""
+    started = time.monotonic()
+    waited = 0
+    while True:
+        ready = sum(
+            path.stat().st_size
+            for path in (artifact / "shards/ready").glob("*.tar")
+        )
+        free = shutil.disk_usage(artifact).free
+        temperature = _temperature_millic()
+        if free < minimum_free_bytes:
+            raise RuntimeError("collector disk free space crossed the safety floor")
+        if temperature > maximum_temperature_millic:
+            raise RuntimeError("collector temperature crossed the safety ceiling")
+        if ready <= maximum_ready_bytes:
+            return {"ready_bytes": ready, "free_bytes": free,
+                    "temperature_millic": temperature,
+                    "waited_seconds": waited}
+        if time.monotonic() - started >= timeout_seconds:
+            raise RuntimeError("verified remote relay did not drain staged shards")
+        time.sleep(1)
+        waited += 1
+
+
 def _validate_capture(
     batches: Sequence[HardwareMultimodalBatch], pid: int, cpu: int,
 ) -> dict[str, int]:
@@ -773,9 +810,21 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
     entries = []
     rejections: list[dict[str, object]] = []
     stopped_at_byte_target = False
+    relay_wait_seconds = 0
+    maximum_temperature_millic = 0
     try:
         os.sched_setaffinity(0, {args.controller_cpu})
         for row in rows:
+            health = wait_for_relay_capacity(
+                artifact, maximum_ready_bytes=args.max_ready_bytes,
+                minimum_free_bytes=args.min_free_bytes,
+                maximum_temperature_millic=args.max_temperature_millic,
+                timeout_seconds=args.relay_timeout_seconds,
+            )
+            relay_wait_seconds += health["waited_seconds"]
+            maximum_temperature_millic = max(
+                maximum_temperature_millic, health["temperature_millic"]
+            )
             temporary = artifact / "current" / f"{row.execution_id}.pt"
             try:
                 payload, counts = collect_row(
@@ -837,6 +886,8 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         "planned_executions": len(rows),
         "stopped_at_byte_target": stopped_at_byte_target,
         "max_shard_bytes": args.max_shard_bytes,
+        "relay_wait_seconds": relay_wait_seconds,
+        "maximum_temperature_millic": maximum_temperature_millic,
         "rejections": rejections,
         "pt_bytes": sum(int(row["pt_bytes"]) for row in entries),
         "pebs_samples": sum(int(row["pebs_samples"]) for row in entries),
@@ -875,8 +926,13 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--aux-pages", type=int, default=8192)
     result.add_argument("--shard-bytes", type=int, default=256 * 1024 * 1024)
     result.add_argument("--max-shard-bytes", type=int, default=0)
+    result.add_argument("--max-ready-bytes", type=int, default=512 * 1024 * 1024)
+    result.add_argument("--min-free-bytes", type=int, default=1024 * 1024 * 1024)
+    result.add_argument("--max-temperature-millic", type=int, default=85_000)
+    result.add_argument("--relay-timeout-seconds", type=float, default=1800)
     result.add_argument("--allow-rejections", action="store_true")
     result.add_argument("--defer-manifest", action="store_true")
+    result.add_argument("--quiet", action="store_true")
     return result
 
 
@@ -887,7 +943,9 @@ def main() -> None:
     if args.shard_bytes < 1024 * 1024:
         raise SystemExit("shards smaller than one MiB are unsupported")
     try:
-        print(json.dumps(collect(args), sort_keys=True))
+        manifest = collect(args)
+        if not args.quiet:
+            print(json.dumps(manifest, sort_keys=True))
     except BaseException as error:
         artifact = args.artifact.resolve()
         if artifact.exists():
