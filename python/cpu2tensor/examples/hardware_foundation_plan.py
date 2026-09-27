@@ -103,6 +103,15 @@ def _single(tool: str, *arguments: str, member: str = "binary"):
     return command
 
 
+def _fixed(tool: str, *arguments: str, input_tool: str):
+    executable = _tool(tool)
+    input_path = Path(_tool(input_tool))
+
+    def command(_fixture: Fixture, _root: Path) -> tuple[tuple[str, ...], tuple[Path, ...]]:
+        return (executable, *arguments, str(input_path)), (input_path,)
+    return command
+
+
 def workloads() -> tuple[Workload, ...]:
     openssl = _tool("openssl")
     tar = _tool("tar")
@@ -173,7 +182,12 @@ def workloads() -> tuple[Workload, ...]:
         Workload("build-tool", "cmake-sha256", lambda f, _r: (
             (cmake, "-E", "sha256sum", str(f.binary)), (f.binary,),
         )),
-        Workload("binary-analysis", "objdump", _single("objdump", "-d")),
+        Workload("binary-analysis", "objdump", _fixed(
+            "objdump", "-d", input_tool="sha256sum"
+        )),
+        Workload("binary-analysis", "readelf", _fixed(
+            "readelf", "-a", input_tool="sha256sum"
+        )),
         Workload("binary-analysis", "strings", _single("strings")),
         Workload("encoding", "base64", _single("base64")),
         Workload("encoding", "base32", _single("base32")),

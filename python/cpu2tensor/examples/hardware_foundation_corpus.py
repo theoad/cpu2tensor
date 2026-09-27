@@ -662,17 +662,35 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         artifact / "shards", args.shard_bytes, artifact_owner
     )
     entries = []
+    rejections: list[dict[str, object]] = []
     try:
         os.sched_setaffinity(0, {args.controller_cpu})
         for row in rows:
             temporary = artifact / "current" / f"{row.execution_id}.pt"
-            payload, counts = collect_row(
-                row, gate=args.gate.resolve(), environment=environment,
-                target_cpu=args.target_cpu, target_user=args.target_user,
-                data_pages=args.data_pages, aux_pages=args.aux_pages,
-                pebs_period=args.pebs_period, artifact=artifact,
-                artifact_owner=artifact_owner,
-            )
+            try:
+                payload, counts = collect_row(
+                    row, gate=args.gate.resolve(), environment=environment,
+                    target_cpu=args.target_cpu, target_user=args.target_user,
+                    data_pages=args.data_pages, aux_pages=args.aux_pages,
+                    pebs_period=args.pebs_period, artifact=artifact,
+                    artifact_owner=artifact_owner,
+                )
+            except (HardwareCaptureError, RuntimeError, subprocess.TimeoutExpired) as error:
+                rejection = {
+                    "execution_id": row.execution_id,
+                    "family": row.family,
+                    "application": row.application,
+                    "partition": row.partition,
+                    "session": row.session,
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+                rejections.append(rejection)
+                _atomic_json(artifact / "rejections.json", rejections)
+                os.chown(artifact / "rejections.json", *artifact_owner)
+                if args.allow_rejections:
+                    continue
+                raise
             raw_hash = _atomic_torch(temporary, payload)
             metadata = {
                 "execution_id": row.execution_id,
@@ -685,8 +703,8 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
             }
             writer.add(temporary, metadata)
             entries.append(metadata)
-        writer.close()
     finally:
+        writer.close()
         os.sched_setaffinity(0, original_affinity)
     manifest = {
         "schema": MANIFEST_SCHEMA,
@@ -696,6 +714,7 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         "subject": subject,
         "session": args.session,
         "executions": len(entries),
+        "rejections": rejections,
         "pt_bytes": sum(int(row["pt_bytes"]) for row in entries),
         "pebs_samples": sum(int(row["pebs_samples"]) for row in entries),
         "entries": entries,
@@ -728,6 +747,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--data-pages", type=int, default=1024)
     result.add_argument("--aux-pages", type=int, default=8192)
     result.add_argument("--shard-bytes", type=int, default=256 * 1024 * 1024)
+    result.add_argument("--allow-rejections", action="store_true")
     return result
 
 
