@@ -94,6 +94,14 @@ WORKLOAD_LOOPS = {
     "fork": 100,
 }
 
+# These lawful, finite target paths are reserved for sensor/transfer validation.
+# They never enter the default benign-pretraining or seeded-capture plans.
+DEVELOPMENT_EFFECT_LOOPS = {
+    "futex_wake": 5_000,
+    "futex_mismatch": 5_000,
+}
+ALLOWED_WORKLOAD_LOOPS = {**WORKLOAD_LOOPS, **DEVELOPMENT_EFFECT_LOOPS}
+
 
 @dataclass(frozen=True)
 class PlannedExecution:
@@ -295,7 +303,7 @@ def make_plan(
     families = tuple(families)
     if not families or len(set(families)) != len(families):
         raise ValueError("families must be nonempty and distinct")
-    if any(family not in WORKLOAD_LOOPS for family in families):
+    if any(family not in ALLOWED_WORKLOAD_LOOPS for family in families):
         raise ValueError("only gated hardware_kernel_workload families are allowed")
     if repetitions <= training_rows + calibration_rows:
         raise ValueError("repetitions must leave familiar validation executions")
@@ -361,7 +369,11 @@ def planned_loops(
         f"{seed}\0{execution.execution_id}".encode("utf-8")
     ).digest()
     choice = int.from_bytes(digest[:8], "big") % len(loop_divisors)
-    return max(1, WORKLOAD_LOOPS[execution.family] * loop_scale // loop_divisors[choice])
+    return max(
+        1,
+        ALLOWED_WORKLOAD_LOOPS[execution.family] * loop_scale
+        // loop_divisors[choice],
+    )
 
 
 def planned_input_seed(execution: PlannedExecution, *, seed: int) -> int:
@@ -1951,7 +1963,7 @@ def parser() -> argparse.ArgumentParser:
     mode = result.add_mutually_exclusive_group()
     mode.add_argument("--collect-only", action="store_true")
     mode.add_argument("--train-only", action="store_true")
-    result.add_argument("--families", nargs="+", choices=tuple(WORKLOAD_LOOPS),
+    result.add_argument("--families", nargs="+", choices=tuple(ALLOWED_WORKLOAD_LOOPS),
                         default=tuple(WORKLOAD_LOOPS))
     result.add_argument("--target-cpu", type=int, default=2)
     result.add_argument("--controller-cpu", type=int, default=3)

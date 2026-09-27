@@ -91,6 +91,21 @@ static int run_futex(uint64_t loops, uint64_t *result) {
     return 0;
 }
 
+// Lawful, finite validation sibling for the futex wake path. The mismatched
+// expected value guarantees FUTEX_WAIT_PRIVATE returns EAGAIN without sleeping.
+static int run_futex_mismatch(uint64_t loops, uint64_t *result) {
+    int word = 0;
+    for (uint64_t index = 0; index < loops; ++index) {
+        errno = 0;
+        long value = syscall(SYS_futex, &word, FUTEX_WAIT_PRIVATE, 1, NULL, NULL, 0);
+        if (value != -1 || errno != EAGAIN) {
+            return -1;
+        }
+        *result += (uint64_t)word;
+    }
+    return 0;
+}
+
 static int run_openat(uint64_t loops, uint64_t *result, uint64_t seed, int seeded) {
     for (uint64_t index = 0; index < loops; ++index) {
         const char *path = seeded && (seeded_byte(seed, index) & 1) ?
@@ -321,6 +336,12 @@ static int run_family(const char *family, uint64_t loops, uint64_t *result,
     }
     if (strcmp(family, "futex") == 0) {
         return run_futex(loops, result);
+    }
+    if (strcmp(family, "futex_wake") == 0) {
+        return run_futex(loops, result);
+    }
+    if (strcmp(family, "futex_mismatch") == 0) {
+        return run_futex_mismatch(loops, result);
     }
     if (strcmp(family, "openat") == 0) {
         return run_openat(loops, result, seed, seeded);

@@ -268,6 +268,28 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
             ),
         )
 
+    def test_development_effect_paths_are_opt_in(self) -> None:
+        self.assertNotIn("futex_wake", experiment.WORKLOAD_LOOPS)
+        self.assertNotIn("futex_mismatch", experiment.WORKLOAD_LOOPS)
+        self.assertEqual(experiment.DEVELOPMENT_EFFECT_LOOPS, {
+            "futex_wake": 5_000,
+            "futex_mismatch": 5_000,
+        })
+        plan, _ = experiment.make_plan(
+            ("getpid", "futex_wake", "futex_mismatch"),
+            repetitions=4, training_rows=1, calibration_rows=1,
+            heldout_family_count=1, seed=23,
+        )
+        self.assertEqual({row.family for row in plan}, {
+            "getpid", "futex_wake", "futex_mismatch",
+        })
+        effect = experiment.PlannedExecution(
+            "futex-mismatch", "futex_mismatch", 0, "training",
+        )
+        self.assertEqual(experiment.planned_loops(
+            effect, seed=1, loop_scale=1, loop_divisors=(1,),
+        ), 5_000)
+
     def test_raw_retention_is_preregistered_and_content_independent(self) -> None:
         first = experiment.retain_raw_execution(
             "dataset", "execution", seed=7, fraction=0.5,
