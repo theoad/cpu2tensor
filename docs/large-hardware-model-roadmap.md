@@ -103,3 +103,13 @@ The [R4 latent-geometry audit](hardware-latent-geometry-r4.md) therefore freezes
 all nine R3 encoders and uses only benign sessions to measure family/intensity
 retrieval, masked-view identity, centroid drift, and effective rank. It has no
 promotion threshold and cannot select the exceptional VICReg seed.
+
+R4 shows stable, nontrivial benign geometry. VICReg has median effective rank
+14.95 versus 4.11 for reconstruction, raises cross-session family retrieval from
+about 91.9% to 96.5%, intensity retrieval from 46.8% to 61.2%, and masked-view
+identity from 54.1% to 63.5%. All three VICReg seeds are tightly grouped; its
+single perfect effect-transfer seed is not generically exceptional. The correct
+program boundary is now clearer: confirm the generic result on a fresh benign
+session, then evaluate task post-training sample efficiency over scratch across
+multiple effect-family splits. Zero-shot effect orientation is not a reliable
+proxy for the quality of foundation pretraining.

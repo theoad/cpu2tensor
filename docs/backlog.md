@@ -91,6 +91,16 @@ geometry. Next: score all retained encoders on benign-only cross-session family
 and intensity retrieval, view agreement, and effective rank; keep the effect
 labels sealed until a generic metric predicts reproducibility.
 
+The [R4 benign-only geometry audit](hardware-latent-geometry-r4.md) rules out
+collapse as that explanation. VICReg raises median effective rank from 4.11 to
+14.95, cross-session family retrieval from about 91.9% to 96.5%, intensity
+retrieval from 46.8% to 61.2%, and masked-view identity from 54.1% to 63.5%.
+All three VICReg seeds are tightly grouped; the one perfect R3 effect seed is not
+a generic outlier. The stable frontier therefore separates foundation learning
+from task semantics. Next: prospective fresh-session confirmation of these
+locked benign metrics, followed by a paired sample-efficiency comparison of
+task post-training versus scratch across multiple held-out effect families.
+
 ## Closed decision: initial hardware transfer comparison
 
 The previous sprint is closed NO-GO and its heartbeat is paused. The accepted
