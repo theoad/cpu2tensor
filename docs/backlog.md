@@ -7,6 +7,17 @@ MPS. Mixed frames, bounded multiworker collation and packed MPS uploads are now
 measured. AWS/CUDA and sustained multi-host scaling remain open.
 Later milestones are outcomes, not schedule promises.
 
+## PEBS coordinate correctness: issue 28
+
+The isolated generic fix uses retained runtime core `_text`/`_etext` bounds,
+page-local data-address summaries, and an explicit v4 feature schema. Derived-v2
+rows bind their anchor to their own retained decode state; legacy v3 remains
+readable without mixing schemas. [PEBS anchors](pebs-anchors.md) defines the
+contract. Thirty-seven feature/model/collector/seeded-plan tests pass on Mac CPU.
+The physical same-boot two-session benign audit and featurization-cost measurement
+remain pending. The experiment coordinator owns privileged policy setup and
+restoration; this change does not relabel the old raw-evicted corpus.
+
 ## Current decision: short hardware transfer comparison
 
 The previous sprint is closed NO-GO and its heartbeat is paused. The accepted

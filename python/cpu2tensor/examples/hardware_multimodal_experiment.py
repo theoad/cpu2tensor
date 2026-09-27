@@ -42,6 +42,7 @@ from cpu2tensor.examples.hardware_multimodal import (
 )
 from cpu2tensor.examples.hardware_multimodal_features import (
     HardwareFeatureError,
+    KernelTextAnchor,
     MULTIMODAL_FEATURE_SCHEMA,
 )
 from cpu2tensor.hardware import (
@@ -58,7 +59,14 @@ from cpu2tensor.hardware import (
 
 SCHEMA = "cpu2tensor-kernel-multimodal-experiment-v1"
 RAW_SCHEMA = "cpu2tensor-kernel-multimodal-raw-v3"
-DERIVED_SCHEMA = "cpu2tensor-kernel-multimodal-derived-v1"
+DERIVED_SCHEMA = "cpu2tensor-kernel-multimodal-derived-v2"
+LEGACY_DERIVED_SCHEMA = "cpu2tensor-kernel-multimodal-derived-v1"
+FEATURE_WIDTHS = {
+    "cpu2tensor-hardware-multimodal-features-v1": 24,
+    "cpu2tensor-hardware-multimodal-features-v2": 24,
+    "cpu2tensor-hardware-multimodal-features-v3": 136,
+    MULTIMODAL_FEATURE_SCHEMA: 140,
+}
 SCOPE = "process_kernel"
 PEBS_PERIOD = 10_000
 MODALITIES = ("intel_pt", "memory_loads", "counters")
@@ -679,6 +687,8 @@ class PtPcaBaseline:
 def _featurize_capture(
     batches: Sequence[HardwareMultimodalBatch],
     phase_costs_ns: dict[str, int] | None = None,
+    *,
+    kernel_anchor: KernelTextAnchor,
 ) -> tuple[ModelBatch, tuple[object, ...]]:
     # Imported lazily so custody and train-only inspection remain usable on a
     # checkout made before the independently developed featurizer is integrated.
@@ -686,7 +696,7 @@ def _featurize_capture(
         featurize_hardware_capture,
     )
     features = featurize_hardware_capture(
-        batches, phase_costs_ns=phase_costs_ns
+        batches, kernel_anchor=kernel_anchor, phase_costs_ns=phase_costs_ns
     )
     return features.batch, features.lanes
 
@@ -1052,6 +1062,7 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
     missing_modalities = {"pt": 0, "pebs": 0, "pmu": 0}
     censored_tokens = {"pt": 0, "pebs": 0, "pmu": 0}
     kernel_decode_states: dict[str, dict[str, str]] = {}
+    kernel_anchors: dict[str, KernelTextAnchor] = {}
     for execution in plan:
         if explicit_plan is None:
             loops = planned_loops(
@@ -1079,8 +1090,15 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
                 )
                 feature_phases_ns: dict[str, int] = {}
                 feature_started = time.perf_counter()
+                state_id = captured.decode_sideband.kernel_state_sha256
+                if state_id not in kernel_anchors:
+                    kernel_anchors[state_id] = KernelTextAnchor.from_sideband(
+                        captured.decode_sideband
+                    )
+                kernel_anchor = kernel_anchors[state_id]
                 model_batch, lanes = _featurize_capture(
-                    _model_capture(captured.batches), feature_phases_ns
+                    _model_capture(captured.batches), feature_phases_ns,
+                    kernel_anchor=kernel_anchor,
                 )
                 feature_seconds += time.perf_counter() - feature_started
                 lane_counts = _validate_lanes(
@@ -1171,6 +1189,8 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
         derived_hash = _atomic_torch_save(derived_path, {
             "schema": DERIVED_SCHEMA,
             "feature_schema": MULTIMODAL_FEATURE_SCHEMA,
+            "kernel_anchor": asdict(kernel_anchor),
+            "kernel_decode_state": dict(kernel_decode_state),
             "execution": asdict(execution),
             "raw_sha256": raw_hash,
             "batch": _model_payload(model_batch),
@@ -1204,6 +1224,7 @@ def _collect_pinned(args: argparse.Namespace) -> dict[str, object]:
             "raw_sha256": raw_hash,
             "raw_retained": raw_retained,
             "raw_retention_reason": retention_reason,
+            "kernel_decode_state": dict(kernel_decode_state),
             "derived_path": str(derived_path.relative_to(artifact)),
             "derived_sha256": derived_hash,
             "stdout_base64": base64.b64encode(captured.output).decode("ascii"),
@@ -1338,8 +1359,11 @@ def load_dataset(artifact: Path) -> tuple[dict[str, object], dict[str, ModelBatc
     if manifest.get("schema") != SCHEMA:
         raise ValueError("unsupported kernel multimodal manifest")
     feature_schema = manifest.get("feature_schema")
-    if feature_schema is not None and feature_schema != MULTIMODAL_FEATURE_SCHEMA:
+    resolved_schema = feature_schema or "cpu2tensor-hardware-multimodal-features-v1"
+    if resolved_schema not in FEATURE_WIDTHS:
         raise ValueError("unsupported multimodal feature schema")
+    current = resolved_schema == MULTIMODAL_FEATURE_SCHEMA
+    derived_schema = DERIVED_SCHEMA if current else LEGACY_DERIVED_SCHEMA
     event = manifest.get("event", {})
     pebs_signal = event.get("pebs_event", "memory_loads")
     if (event.get("scope") != SCOPE or
@@ -1355,6 +1379,31 @@ def load_dataset(artifact: Path) -> tuple[dict[str, object], dict[str, ModelBatc
         raise ValueError("capture manifest content hash does not match")
     manifest["manifest_content_sha256"] = expected_content_hash
 
+    anchors: dict[str, KernelTextAnchor] = {}
+    state_references: dict[str, dict[str, str]] = {}
+    if current:
+        for reference in manifest.get("kernel_decode_states", ()):
+            path = (artifact / reference["path"]).resolve()
+            if (not path.is_relative_to(artifact.resolve()) or
+                    _sha256(path) != reference["sha256"]):
+                raise ValueError("kernel anchor sideband custody mismatch")
+            state = torch.load(path, map_location="cpu", weights_only=True)
+            state_id = reference["kernel_state_sha256"]
+            if (state.get("schema") != "cpu2tensor-kernel-decode-state-v1" or
+                    state.get("kernel_state_sha256") != state_id):
+                raise ValueError("kernel anchor state identity mismatch")
+            symbols = state["kernel_symbols"]
+            if symbols.dtype != torch.uint8 or symbols.ndim != 1:
+                raise ValueError("kernel anchor symbols have an invalid schema")
+            if state_id in anchors:
+                raise ValueError("duplicate kernel anchor state identity")
+            state_references[state_id] = reference
+            anchors[state_id] = KernelTextAnchor.from_symbols(
+                symbols.numpy().tobytes(), state_id
+            )
+        if not anchors:
+            raise ValueError("v4 dataset has no exact-boot kernel anchor")
+
     rows = {}
     for entry in manifest["entries"]:
         raw_path = artifact / entry["raw_path"]
@@ -1365,9 +1414,8 @@ def load_dataset(artifact: Path) -> tuple[dict[str, object], dict[str, ModelBatc
         if _sha256(derived_path) != entry["derived_sha256"]:
             raise ValueError(f"derived tensor hash mismatch for {entry['execution_id']}")
         payload = torch.load(derived_path, map_location="cpu", weights_only=True)
-        if (payload.get("schema") != DERIVED_SCHEMA or
-                (feature_schema is not None and
-                 payload.get("feature_schema") != feature_schema) or
+        if (payload.get("schema") != derived_schema or
+                payload.get("feature_schema") != feature_schema or
                 payload.get("raw_sha256") != entry["raw_sha256"] or
                 payload.get("execution") != {
                     name: entry[name] for name in (
@@ -1375,7 +1423,29 @@ def load_dataset(artifact: Path) -> tuple[dict[str, object], dict[str, ModelBatc
                     )
                 }):
             raise ValueError(f"derived tensor identity mismatch for {entry['execution_id']}")
-        rows[entry["execution_id"]] = _model_batch(payload["batch"])
+        batch = _model_batch(payload["batch"])
+        if batch.pebs.shape[-1] != FEATURE_WIDTHS[resolved_schema]:
+            raise ValueError("derived PEBS width differs from its feature schema")
+        if current:
+            saved_anchor = payload.get("kernel_anchor", {})
+            state_id = saved_anchor.get("kernel_state_sha256")
+            if state_id not in anchors or saved_anchor != asdict(anchors[state_id]):
+                raise ValueError("derived kernel anchor differs from retained sideband")
+            reference = state_references[state_id]
+            if (entry.get("kernel_decode_state") != reference or
+                    payload.get("kernel_decode_state") != reference):
+                raise ValueError("execution kernel anchor state reference differs")
+            if entry.get("raw_retained", True):
+                # Map retained storage rather than copying large PT/AUX tensors
+                # merely to inspect their small decode-state reference.
+                raw = torch.load(
+                    raw_path, map_location="cpu", weights_only=True, mmap=True
+                )
+                if (raw.get("schema") != RAW_SCHEMA or
+                        raw.get("decode_sideband", {}).get("kernel_decode_state")
+                        != reference):
+                    raise ValueError("raw execution kernel anchor state differs")
+        rows[entry["execution_id"]] = batch
     return manifest, rows
 
 
@@ -1773,7 +1843,8 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
                 "dataset_identity_sha256": manifest["identity_sha256"],
                 "subject_identity_sha256": manifest.get("subject_identity_sha256"),
                 "event_identity_sha256": manifest.get("event_identity_sha256"),
-                "feature_schema": MULTIMODAL_FEATURE_SCHEMA,
+                "feature_schema": manifest.get("feature_schema") or
+                "cpu2tensor-hardware-multimodal-features-v1",
             },
         )
         scoring_started = time.perf_counter()

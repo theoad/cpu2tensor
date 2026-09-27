@@ -2,6 +2,7 @@
 """Real capture fixtures map to deterministic, uncertainty-aware model tensors."""
 
 from dataclasses import replace
+from functools import partial
 import io
 import math
 import unittest
@@ -13,16 +14,23 @@ from cpu2tensor.examples.hardware_multimodal_features import (
     PEBS_FEATURES,
     PMU_FEATURES,
     HardwareFeatureError,
-    featurize_hardware_capture,
-    featurize_hardware_captures,
+    KernelTextAnchor,
+    MULTIMODAL_FEATURE_SCHEMA,
+    featurize_hardware_capture as _featurize_hardware_capture,
+    featurize_hardware_captures as _featurize_hardware_captures,
 )
 from cpu2tensor.hardware import (
     HardwareBatch,
     HardwareCaptureEnvelope,
     HardwareCounterBatch,
+    HardwareDecodeSideband,
     HardwareMultimodalBatch,
     HardwareSourceStatus,
 )
+
+_ANCHOR = KernelTextAnchor(0x400000, 0x800000, "a" * 64)
+featurize_hardware_capture = partial(_featurize_hardware_capture, kernel_anchor=_ANCHOR)
+featurize_hardware_captures = partial(_featurize_hardware_captures, kernel_anchor=_ANCHOR)
 
 
 def _empty() -> torch.Tensor:
@@ -181,10 +189,12 @@ class HardwareMultimodalFeatureTests(unittest.TestCase):
         changed_ips[-1] += 0x100000
         changed = replace(lane, pebs=replace(lane.pebs, ip=changed_ips))
         original = featurize_hardware_capture((lane,)).batch.pebs
-        relocated = featurize_hardware_capture((shifted,)).batch.pebs
+        relocated = featurize_hardware_capture((shifted,), kernel_anchor=replace(
+            _ANCHOR, start=_ANCHOR.start + 0x100000, end=_ANCHOR.end + 0x100000,
+        )).batch.pebs
         modified = featurize_hardware_capture((changed,)).batch.pebs
         torch.testing.assert_close(original, relocated)
-        self.assertFalse(torch.equal(original[..., 24:88], modified[..., 24:88]))
+        self.assertFalse(torch.equal(original[..., 28:92], modified[..., 28:92]))
 
     def test_precise_store_lane_preserves_signal_and_timing(self) -> None:
         lane = _lane(10, cpu=3)
@@ -294,7 +304,10 @@ class HardwareMultimodalFeatureTests(unittest.TestCase):
             address_shift=0x40000000,
         )
         changed = replace(lane, envelope=shifted_envelope, pebs=relocated)
-        observed = featurize_hardware_capture((changed,))
+        observed = featurize_hardware_capture((changed,), kernel_anchor=replace(
+            _ANCHOR, start=_ANCHOR.start + 0x40000000,
+            end=_ANCHOR.end + 0x40000000,
+        ))
 
         _assert_batches_equal(self, expected.batch, observed.batch)
         self.assertEqual(expected.lanes[0].observed_cpu, 3)
@@ -386,6 +399,67 @@ class HardwareMultimodalFeatureTests(unittest.TestCase):
                 self.assertRaisesRegex(HardwareFeatureError, "source"),
             ):
                 featurize_hardware_capture((swapped,))
+
+    def test_lower_sample_does_not_move_existing_site_or_address_features(self) -> None:
+        lane = _lane(10, cpu=3)
+        sample = lane.pebs
+        assert sample is not None
+        additions = {
+            "ip": 0x400010, "address": 0x123, "pid": 900, "tid": 10,
+            "time": _ENVELOPE.arm_before_ns, "cpu": 3, "period": 10000,
+            "weight": 2, "data_source": 0x681, "exact_ip": 1,
+        }
+        extended = replace(sample, **{
+            name: torch.cat((getattr(sample, name), torch.tensor([value])))
+            for name, value in additions.items()
+        })
+        original = featurize_hardware_capture((lane,)).batch
+        changed = featurize_hardware_capture((replace(lane, pebs=extended),)).batch
+        # The added sample populates a previously empty token. Unchanged tokens
+        # keep the same coordinates, even though both sampled minima changed.
+        available = original.pebs_available
+        torch.testing.assert_close(original.pebs[available], changed.pebs[available],
+                                   rtol=0, atol=0)
+        self.assertEqual(MULTIMODAL_FEATURE_SCHEMA, "cpu2tensor-hardware-multimodal-features-v4")
+
+    def test_independent_page_relocation_preserves_layout_and_occupancy(self) -> None:
+        lane = _lane(10, cpu=3)
+        sample = lane.pebs
+        assert sample is not None
+        addresses = torch.tensor([0x1000, 0x1040, 0xF00040], dtype=torch.int64)
+        relocated = torch.tensor([0x80000000, 0x80000040, 0x20000040], dtype=torch.int64)
+        first = replace(lane, pebs=replace(sample, address=addresses))
+        second = replace(lane, pebs=replace(sample, address=relocated))
+        _assert_batches_equal(self, featurize_hardware_capture((first,)).batch,
+                              featurize_hardware_capture((second,)).batch)
+
+    def test_noncore_ip_is_tagged_without_fabricated_site_coordinate(self) -> None:
+        lane = _lane(10, cpu=3, times=(1_000_002_000,))
+        assert lane.pebs is not None
+        lane = replace(lane, pebs=replace(lane.pebs, ip=torch.tensor([0xF0000000])))
+        row = featurize_hardware_capture((lane,)).batch.pebs[0, 0, 1]
+        self.assertEqual(float(row[PEBS_FEATURES.index("noncore_ip_fraction")]), 1.0)
+        self.assertEqual(float(row[PEBS_FEATURES.index("core_ip_fraction")]), 0.0)
+        self.assertEqual(float(row[28:92].sum()), 0.0)
+        self.assertEqual(float(row[-32:].sum()), 0.0)
+
+    def test_anchor_uses_retained_core_symbols_and_rejects_missing_or_restricted_state(self) -> None:
+        sideband = HardwareDecodeSideband(
+            "CLOCK_MONOTONIC_RAW", 1, b"", b"",
+            b"00400000 T _text\n00800000 T _etext\n00900000 t _text [module]\n",
+            b"{}", b"", "a" * 64,
+        )
+        self.assertEqual(KernelTextAnchor.from_sideband(sideband), _ANCHOR)
+        for symbols in (b"", b"0 T _text\n0 T _etext\n",
+                        b"400000 T _text\n400001 T _text\n800000 T _etext\n"):
+            with self.subTest(symbols=symbols), self.assertRaises(HardwareFeatureError):
+                KernelTextAnchor.from_sideband(replace(sideband, kernel_symbols=symbols))
+        with self.assertRaises(HardwareFeatureError):
+            KernelTextAnchor(0x400000, 0x800000, "not-a-hash")
+        high = KernelTextAnchor(0xFFFFFFFF81000000, 0xFFFFFFFF82000000, "b" * 64)
+        self.assertEqual(high.offset(-2130706416), 0x10)
+        with self.assertRaisesRegex(HardwareFeatureError, "exact-boot kernel anchor"):
+            _featurize_hardware_capture((_lane(10, cpu=3),), kernel_anchor=None)
 
 
 if __name__ == "__main__":

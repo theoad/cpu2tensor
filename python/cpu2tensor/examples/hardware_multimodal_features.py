@@ -23,12 +23,13 @@ from cpu2tensor.hardware import (
     HardwareBatch,
     HardwareCaptureEnvelope,
     HardwareCounterBatch,
+    HardwareDecodeSideband,
     HardwareMultimodalBatch as CaptureHardwareMultimodalBatch,
     HardwareSourceStatus,
 )
 
 
-MULTIMODAL_FEATURE_SCHEMA = "cpu2tensor-hardware-multimodal-features-v3"
+MULTIMODAL_FEATURE_SCHEMA = "cpu2tensor-hardware-multimodal-features-v4"
 SEGMENTS = 16
 BYTE_VALUES = 256
 DATA_SOURCE_BINS = 16
@@ -36,20 +37,24 @@ IP_BINS = 64
 PAGE_OFFSET_BINS = 16
 IP_ADDRESS_BINS = 32
 PEBS_FEATURES = (
-    # Count/latency and exact-IP summaries precede a normalized hash sketch of
-    # the untouched data-source bit pattern and relocation-invariant offsets.
+    # Data addresses describe page-local layout and occupancy, never an
+    # execution-local origin. Core IPs use the captured boot's _text origin.
     "log_sample_count",
     "mean_log_latency",
     "maximum_log_latency",
     "exact_ip_fraction",
     *(f"raw_data_source_{index:02d}" for index in range(DATA_SOURCE_BINS)),
-    "mean_log_address_offset",
-    "std_log_address_offset",
-    "mean_log_ip_offset",
-    "std_log_ip_offset",
-    *(f"raw_ip_hash_{index:02d}" for index in range(IP_BINS)),
+    "mean_log_address_page_offset",
+    "std_log_address_page_offset",
+    "mean_log_core_ip_offset",
+    "std_log_core_ip_offset",
+    "unique_address_page_fraction",
+    "unique_address_cache_line_fraction",
+    "core_ip_fraction",
+    "noncore_ip_fraction",
+    *(f"core_ip_hash_{index:02d}" for index in range(IP_BINS)),
     *(f"address_page_offset_{index:02d}" for index in range(PAGE_OFFSET_BINS)),
-    *(f"ip_address_joint_{index:02d}" for index in range(IP_ADDRESS_BINS)),
+    *(f"core_ip_page_offset_joint_{index:02d}" for index in range(IP_ADDRESS_BINS)),
 )
 PMU_FEATURES = (
     "instructions_per_second",
@@ -118,6 +123,58 @@ _HARDWARE_BATCH_FIELDS = (
 
 class HardwareFeatureError(ValueError):
     """A capture cannot be represented without weakening the feature contract."""
+
+
+@dataclass(frozen=True)
+class KernelTextAnchor:
+    """Runtime core text bounds from one retained exact-boot decode sideband.
+
+    Parse once per kernel state, then reuse this small object across executions.
+    The identity belongs in custody metadata, not the learned tensor.
+    """
+
+    start: int
+    end: int
+    kernel_state_sha256: str
+
+    def __post_init__(self) -> None:
+        if (type(self.start) is not int or type(self.end) is not int or
+                not 0 < self.start < self.end <= 1 << 64):
+            raise HardwareFeatureError("exact-boot core text bounds are invalid")
+        identity = self.kernel_state_sha256
+        if (not isinstance(identity, str) or len(identity) != 64 or
+                any(char not in "0123456789abcdef" for char in identity)):
+            raise HardwareFeatureError("kernel state identity must be a SHA-256")
+
+    @classmethod
+    def from_sideband(cls, sideband: HardwareDecodeSideband) -> "KernelTextAnchor":
+        if not isinstance(sideband, HardwareDecodeSideband):
+            raise HardwareFeatureError("anchor requires captured decode sideband")
+        if sideband.clock != "CLOCK_MONOTONIC_RAW":
+            raise HardwareFeatureError("anchor sideband clock changed")
+        return cls.from_symbols(sideband.kernel_symbols, sideband.kernel_state_sha256)
+
+    @classmethod
+    def from_symbols(cls, symbols: bytes, kernel_state_sha256: str) -> "KernelTextAnchor":
+        """Read retained kallsyms; restricted zero addresses fail closed."""
+        found: dict[str, int] = {}
+        for line in symbols.decode("ascii", errors="replace").splitlines():
+            parts = line.split()
+            # Module symbols can share a name; they are not core text bounds.
+            if len(parts) == 3 and parts[2] in ("_text", "_etext"):
+                if parts[2] in found:
+                    raise HardwareFeatureError(f"duplicate core {parts[2]} symbol")
+                try:
+                    found[parts[2]] = int(parts[0], 16)
+                except ValueError as error:
+                    raise HardwareFeatureError("invalid core text symbol address") from error
+        if set(found) != {"_text", "_etext"}:
+            raise HardwareFeatureError("exact-boot _text and _etext are required")
+        return cls(found["_text"], found["_etext"], kernel_state_sha256)
+
+    def offset(self, ip: int) -> int | None:
+        value = _unsigned(ip)
+        return value - self.start if self.start <= value < self.end else None
 
 
 @dataclass(frozen=True)
@@ -327,6 +384,7 @@ def _pebs_features(
     tid: int,
     outer_start_ns: int,
     outer_stop_ns: int,
+    kernel_anchor: KernelTextAnchor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int | None]:
     if batch.signal not in _PEBS_SIGNALS:
         raise HardwareFeatureError("unknown precise-memory sample signal")
@@ -356,8 +414,7 @@ def _pebs_features(
     duration_ns = outer_stop_ns - outer_start_ns
     addresses = [_unsigned(value) for value in batch.address.tolist()]
     ips = [_unsigned(value) for value in batch.ip.tolist()]
-    address_anchor = min(addresses)
-    ip_anchor = min(ips)
+    ip_offsets = [kernel_anchor.offset(ip) for ip in ips]
     buckets: list[list[int]] = [[] for _ in range(SEGMENTS)]
     for row, timestamp in enumerate(times):
         segment = min(
@@ -384,27 +441,25 @@ def _pebs_features(
         )
         count = len(selected)
         latency = [math.log1p(weights[row]) for row in selected]
-        address_offsets = [
-            math.log1p(addresses[row] - address_anchor) for row in selected
-        ]
-        ip_offsets = [math.log1p(ips[row] - ip_anchor) for row in selected]
+        address_offsets = [math.log1p(addresses[row] & 0xFFF) for row in selected]
+        core_offsets = [math.log1p(ip_offsets[row]) for row in selected
+                        if ip_offsets[row] is not None]
         address_mean, address_std = _mean_std(address_offsets)
-        ip_mean, ip_std = _mean_std(ip_offsets)
+        ip_mean, ip_std = _mean_std(core_offsets) if core_offsets else (0.0, 0.0)
         sketch = [0.0] * DATA_SOURCE_BINS
         ip_sketch = [0.0] * IP_BINS
         page_offset_sketch = [0.0] * PAGE_OFFSET_BINS
         joint_sketch = [0.0] * IP_ADDRESS_BINS
         for row in selected:
             sketch[_data_source_bin(data_sources[row])] += 1.0 / count
-            # Relative sites survive uniform relocation while the previous
-            # mean/std of IP offsets erased rare instruction sites.
-            relative_ip = ips[row] - ip_anchor
-            ip_sketch[_mix64(relative_ip) % IP_BINS] += 1.0 / count
             page_offset = addresses[row] & 0xFFF
             page_offset_sketch[page_offset // 256] += 1.0 / count
-            joint_sketch[
-                _mix64(relative_ip ^ (page_offset << 32)) % IP_ADDRESS_BINS
-            ] += 1.0 / count
+            relative_ip = ip_offsets[row]
+            if relative_ip is not None:
+                ip_sketch[_mix64(relative_ip) % IP_BINS] += 1.0 / count
+                joint_sketch[
+                    _mix64(relative_ip ^ (page_offset << 32)) % IP_ADDRESS_BINS
+                ] += 1.0 / count
         features[segment] = torch.tensor(
             (
                 math.log1p(count),
@@ -416,6 +471,10 @@ def _pebs_features(
                 address_std,
                 ip_mean,
                 ip_std,
+                len({addresses[row] >> 12 for row in selected}) / count,
+                len({addresses[row] >> 6 for row in selected}) / count,
+                len(core_offsets) / count,
+                1.0 - len(core_offsets) / count,
                 *ip_sketch,
                 *page_offset_sketch,
                 *joint_sketch,
@@ -464,6 +523,7 @@ def _pmu_features(
 def featurize_hardware_capture(
     batches: Sequence[CaptureHardwareMultimodalBatch],
     *,
+    kernel_anchor: KernelTextAnchor,
     phase_costs_ns: dict[str, int] | None = None,
 ) -> HardwareCaptureFeatures:
     """Convert one ``PerfMultimodalCapture.stop`` result to a model batch.
@@ -473,6 +533,8 @@ def featurize_hardware_capture(
     """
     if not batches:
         raise HardwareFeatureError("a capture must contain at least one thread lane")
+    if not isinstance(kernel_anchor, KernelTextAnchor):
+        raise HardwareFeatureError("v4 features require an exact-boot kernel anchor")
 
     envelope_values: tuple[int, int, int, int] | None = None
     seen_tids: set[int] = set()
@@ -518,6 +580,7 @@ def featurize_hardware_capture(
                 tid=batch.tid,
                 outer_start_ns=outer_start,
                 outer_stop_ns=outer_stop,
+                kernel_anchor=kernel_anchor,
             )
             if phase_costs_ns is not None:
                 phase_costs_ns["pebs_pmu_features"] = (
@@ -592,11 +655,14 @@ def featurize_hardware_capture(
 
 def featurize_hardware_captures(
     captures: Sequence[Sequence[CaptureHardwareMultimodalBatch]],
+    *,
+    kernel_anchor: KernelTextAnchor,
 ) -> tuple[ModelHardwareMultimodalBatch, tuple[tuple[HardwareLaneReport, ...], ...]]:
     """Stack complete executions after independently sorting their lanes."""
     if not captures:
         raise HardwareFeatureError("at least one capture is required")
-    rows = [featurize_hardware_capture(capture) for capture in captures]
+    rows = [featurize_hardware_capture(capture, kernel_anchor=kernel_anchor)
+            for capture in captures]
     lane_count = rows[0].batch.cpu_count
     if any(row.batch.cpu_count != lane_count for row in rows):
         raise HardwareFeatureError(
