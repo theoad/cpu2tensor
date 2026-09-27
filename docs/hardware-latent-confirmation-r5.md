@@ -36,4 +36,46 @@ against scratch across several held-out effect-family splits.
 
 ## Result
 
-Pending.
+The third launch completed after two safe pre-capture thermal rejections. The
+first two attempts observed package temperature at or above the 70°C start
+gate, produced no output, and left CPU policy unchanged. They also exposed that
+systemd ignores `RuntimeMaxSec` for `Type=oneshot`; the unit was corrected and
+committed as `f148ba4` with `Type=exec` before the successful attempt. The host
+cooled to 48°C before that launch.
+
+The prospective session completed 1,020/1,020 first-attempt executions in 48.42
+seconds (21.07 executions/s), with zero rejection, loss, or required-source
+failure. It retained exactly 204 planned raw captures and 1,020 derived tensors.
+CPU policy restored to turbo enabled and a 4.9 GHz maximum; the independent
+restore timer was removed after clean restoration.
+
+All 1,230 files were copied off host and matched a complete remote hash list.
+The hash-list SHA-256 is
+`53462a78ea0734a2331f4f822f0f9508f038ecaccf1c0aea5e806b3f9b5b3468`;
+the capture-manifest SHA-256 is
+`002222431a58e29cd31523fbb1a44eb77e4088c74b2b2a7a14be286282bb780d`.
+
+The locked representation gate did not fully pass:
+
+| Objective | Family | Intensity | Stratum | Masked-view identity |
+| --- | ---: | ---: | ---: | ---: |
+| Reconstruction | 90.5% | 47.0% | 98.3% | 49.8% |
+| VICReg | 95.9% | 60.9% | 96.9% | 56.5% |
+
+VICReg passed every family, intensity, and stratum absolute threshold and all
+three paired margins over reconstruction. Masked-view identity failed both its
+60% median threshold and 58% per-seed floor (the three seeds reached 57.6%,
+56.5%, and 56.1%). This metric remains far above its 0.39% chance rate and beats
+reconstruction by 6.7 points, but the preregistered conjunction is **NO-GO**.
+
+The generic structure is mostly prospective and reproducible; invariance under
+the fixed masking perturbation is not strong enough. Cohort D now becomes
+development data. The next bounded ablation may strengthen label-free view
+invariance, but any chosen objective needs another untouched physical session.
+
+Off-host capture:
+`/Users/theoad/.cache/cpu2tensor/hardware-latent-confirmation-r5-92618e9`.
+Evaluation artifact:
+`/Users/theoad/.cache/cpu2tensor/hardware-latent-confirmation-r5-result`.
+Evaluation report SHA-256:
+`f2e3d6efa55419c17a7d2e0575cc4453c20fe8d22a4288d95e4d8a72d74658bf`.

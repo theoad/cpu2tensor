@@ -117,3 +117,10 @@ proxy for the quality of foundation pretraining.
 The prospective [R5 confirmation](hardware-latent-confirmation-r5.md) freezes a
 new 1,020-row physical-host plan, the six reconstruction/VICReg checkpoints, and
 all absolute and paired benign-geometry thresholds before collection.
+
+R5 reproduces VICReg's family (95.9%), intensity (60.9%), and stratum (96.9%)
+geometry and every margin over reconstruction, but fails the conjunctive gate
+because masked-view identity falls from 63.5% in development to 56.5% versus a
+60% threshold. The result is well above 0.39% chance yet not prospectively
+qualified. Cohort D becomes development data for a bounded stronger-invariance
+objective ablation; a selected objective must face another untouched session.

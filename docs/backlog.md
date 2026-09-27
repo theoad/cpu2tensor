@@ -101,6 +101,15 @@ from task semantics. Next: prospective fresh-session confirmation of these
 locked benign metrics, followed by a paired sample-efficiency comparison of
 task post-training versus scratch across multiple held-out effect families.
 
+The [R5 prospective confirmation](hardware-latent-confirmation-r5.md) is a
+narrow NO-GO. Its lossless 1,020-row physical session reproduces VICReg family,
+intensity, and stratum geometry plus every margin over reconstruction, but
+masked-view identity reaches 56.5% rather than the locked 60%. Two earlier
+launches rejected safely on the 70°C pre-capture gate; no evidence or policy was
+changed. The successful 244 MiB capture is hash-verified off host. Next: use
+cohort D only as development data for a bounded stronger-invariance objective
+ablation, then require a new untouched session before foundation promotion.
+
 ## Closed decision: initial hardware transfer comparison
 
 The previous sprint is closed NO-GO and its heartbeat is paused. The accepted
