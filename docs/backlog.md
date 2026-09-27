@@ -66,6 +66,15 @@ Anomaly heads remain probes. Promotion still requires recall in the top 100 at
 benign FPR at most $10^{-4}$; the million-run and 24-hour campaigns remain
 **NO-GO**.
 
+The [first nine-point scaling pilot](hardware-scaling-pilot-r1.md) now gives a
+stable local capacity signal: held-out masked loss falls from roughly 0.146 at
+d64 to 0.114 at d128 and 0.098 at d256, with parameter-loss slopes near −0.16
+at all three data budgets. Data slopes are flat under the fixed 2,560-example
+optimizer budget, identifying compute limitation rather than data saturation.
+The next matrix crosses data volume with optimizer steps and aggregates multiple
+few-shot head selections; d512 and workload-diversity axes follow only if those
+curves are coherent.
+
 ## Closed decision: initial hardware transfer comparison
 
 The previous sprint is closed NO-GO and its heartbeat is paused. The accepted

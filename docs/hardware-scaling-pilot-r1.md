@@ -26,3 +26,36 @@ This pilot reports local curves rather than fitting a universal power law. A
 coherent result requires held-out loss to improve with more data at at least two
 of three widths and to improve from d64 to d256 at the 2,040-row budget. Transfer
 is secondary and must not be used to select a known-effect-specific model.
+
+## Result
+
+The nine-point matrix completed on the Mac MPS in under one minute. Capacity
+scaling is coherent at every data budget:
+
+| Width | Parameters | Loss at 255 rows | Loss at 1,020 rows | Loss at 2,040 rows |
+| ---: | ---: | ---: | ---: | ---: |
+| 64 | 189,206 | 0.1459 | 0.1475 | 0.1452 |
+| 128 | 640,150 | 0.1154 | 0.1131 | 0.1143 |
+| 256 | 2,328,470 | 0.0971 | 0.0970 | 0.0984 |
+
+The local log-loss slopes against parameter count are −0.162, −0.167, and
+−0.155 at 255, 1,020, and 2,040 rows. Encoder throughput remains high but falls
+as expected with width: approximately 4,058 rows/s for d64, 3,787 rows/s for
+d128, and 3,131 rows/s for d256 at the largest data budget.
+
+Data-volume slopes are effectively flat and mixed (−0.0006, −0.0061, and
++0.0053 for d64/d128/d256). This run fixed training at 80 × 32 = 2,560 sampled
+examples, so the 2,040-row corpus receives far fewer exposures per row than the
+255-row corpus. The result identifies a compute-limited regime; it does not show
+that additional data lacks value. The next slice must cross data size with
+optimizer compute.
+
+The single-seed two-shot transfer probe is not coherent: d64 ranges from AUROC
+0.879 to 0.523 as data grows, while d128 and d256 produce 0. This conflicts with
+the earlier three-seed d128 result and shows that one labeled-row/head seed is
+too noisy for a scale metric. Future scaling points will aggregate several fixed
+few-shot selections and keep reconstruction loss primary.
+
+Artifact directory:
+`/Users/theoad/.cache/cpu2tensor/hardware-scaling-pilot-r1`. Report SHA-256:
+`d001ffe18e4e87f68a6c73af07ca3372c827c693bba53cbd243d21260e33d8ab`.

@@ -62,3 +62,10 @@ pretrained encoder reaches median cross-family AUROC 1.000 at 1--4 shots, while
 scratch reaches 0.496 at one shot and 0 at two and four shots. Absolute tail
 calibration still fails, so this promotes the scaling-law program rather than a
 detector.
+
+The [first capacity × data slice](hardware-scaling-pilot-r1.md) shows clean
+capacity scaling from d64 to d256 with a local loss exponent near −0.16, while
+data scaling is flat under a fixed 2,560-example optimizer budget. This makes a
+data × optimizer-compute grid the next necessary measurement. Its one-seed
+transfer result is unstable, so later matrices must aggregate several fixed
+few-shot selections rather than treating one head as a scale signal.
