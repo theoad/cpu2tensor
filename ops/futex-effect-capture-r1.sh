@@ -61,26 +61,6 @@ runtime_usec="$(systemctl show "$SERVICE" --property=RuntimeMaxUSec --value)"
 [[ $(awk '/MemAvailable:/ {printf "%.0f\n", $2 * 1024}' /proc/meminfo) -ge $((4 * 1024 * 1024 * 1024)) ]]
 ! pgrep -f '[/]hardware_kernel_workload' >/dev/null
 ! pgrep -f '[h]ardware_multimodal_experiment' >/dev/null
-export PYTHONPATH="$SOURCE/python"
-mapfile -t imported < <("$PYTHON" - <<'PY'
-from importlib.util import find_spec
-from pathlib import Path
-for name in (
-    "cpu2tensor",
-    "cpu2tensor.hardware",
-    "cpu2tensor.examples.hardware_multimodal_experiment",
-    "cpu2tensor._native",
-):
-    spec = find_spec(name)
-    if spec is None or spec.origin is None:
-        raise SystemExit(f"cannot resolve {name}")
-    print(Path(spec.origin).resolve())
-PY
-)
-[[ "${imported[0]}" == "$SOURCE/python/cpu2tensor/__init__.py" ]]
-[[ "${imported[1]}" == "$HARDWARE" ]]
-[[ "${imported[2]}" == "$RUNNER" ]]
-[[ "${imported[3]}" == "$NATIVE" ]]
 
 temperature_input=
 for label in /sys/class/hwmon/hwmon*/temp*_label; do
@@ -117,6 +97,30 @@ systemd-run --quiet --unit=cpu2tensor-futex-effect-r1-restore \
 printf '1\n' > "$NO_TURBO"
 printf '1800000\n' > "$MAX_FREQ"
 [[ "$(<"$NO_TURBO")" == 1 && "$(<"$MAX_FREQ")" == 1800000 ]]
+
+export PYTHONPATH="$SOURCE/python"
+mapfile -t imported < <("$PYTHON" - <<'PY'
+from importlib.util import find_spec
+from pathlib import Path
+for name in (
+    "cpu2tensor",
+    "cpu2tensor.hardware",
+    "cpu2tensor.examples.hardware_multimodal_experiment",
+    "cpu2tensor._native",
+):
+    spec = find_spec(name)
+    if spec is None or spec.origin is None:
+        raise SystemExit(f"cannot resolve {name}")
+    print(Path(spec.origin).resolve())
+PY
+)
+[[ "${imported[0]}" == "$SOURCE/python/cpu2tensor/__init__.py" ]]
+[[ "${imported[1]}" == "$HARDWARE" ]]
+[[ "${imported[2]}" == "$RUNNER" ]]
+[[ "${imported[3]}" == "$NATIVE" ]]
+
+temperature="$(read_temperature)"
+[[ "$temperature" -lt 80000 ]]
 
 mkdir -m 0750 "$OUTPUT"
 cp "$SOURCE/source-revision.txt" "$OUTPUT/source-revision.txt"
