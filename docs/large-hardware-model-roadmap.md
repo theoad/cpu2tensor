@@ -69,3 +69,8 @@ data scaling is flat under a fixed 2,560-example optimizer budget. This makes a
 data × optimizer-compute grid the next necessary measurement. Its one-seed
 transfer result is unstable, so later matrices must aggregate several fixed
 few-shot selections rather than treating one head as a scale signal.
+
+The preregistered [R2 compute grid](hardware-compute-scaling-r2.md) crosses d128
+and d256 with 255, 1,020, and 2,040 rows at 80, 160, and 320 optimizer steps.
+Reconstruction loss remains primary; every point also receives three fixed
+two-shot frozen-head probes solely as a representation-transfer diagnostic.
