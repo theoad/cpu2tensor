@@ -20,7 +20,7 @@ This experiment freezes that rule and evaluates it once on newly captured data.
 - Fresh benign cohort: the same 17 ordinary families as the anchor protocol,
   three intensities each, collected in a new session using the frozen R2 smoke
   plan (cohort seed `2026092706`, plan SHA-256
-  `11ea870dfd7303e73c0dcc0d5ffc414bf69d602316a725810d257a4b678b3f2d`).
+  `d76c443b7221a429c4dd63e41b862c56a554f822e7b392d135bf6827205bd679`).
 - Acquisition parity: every benign row retains raw evidence, has an explicit
   input seed, and uses the anchor's $1$, $1/2$, and $1/5$ loop schedule. The
   effect cohort uses seed `2026092705`, 16 varied-input repetitions per family,

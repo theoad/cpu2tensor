@@ -7,6 +7,7 @@ from cpu2tensor.examples.hardware_effect_confirmation_r1 import (
     conjunctive_gate,
     raw_hashes,
     validate_confirmation_protocol,
+    validate_exact_plan_rows,
     validate_family_counts,
 )
 
@@ -43,3 +44,20 @@ def test_confirmation_protocol_rejects_missing_frozen_plan(tmp_path: Path) -> No
     effect = {"split": {}, "entries": []}
     with pytest.raises(ValueError, match="execution plan differs"):
         validate_confirmation_protocol(tmp_path, benign, effect)
+
+
+def test_exact_plan_rows_reject_mutated_input_seed() -> None:
+    plan = {"rows": [{
+        "execution_id": "a", "family": "getpid", "loops": 2,
+        "repetition": 3, "partition": "collection", "input_seed": 4,
+        "retain_raw": True,
+    }]}
+    manifest = {"entries": [{
+        "execution_id": "a", "family": "getpid", "loops": 2,
+        "repetition": 3, "partition": "collection",
+        "invocation": {"input_seed": 4}, "raw_retained": True,
+    }]}
+    validate_exact_plan_rows(plan, manifest)
+    manifest["entries"][0]["invocation"]["input_seed"] = 5
+    with pytest.raises(ValueError, match="rows differ"):
+        validate_exact_plan_rows(plan, manifest)

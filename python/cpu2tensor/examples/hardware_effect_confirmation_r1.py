@@ -30,7 +30,7 @@ DEVELOPMENT_REPORT_SHA256 = "2d0efd99db73c03562b4a196c4054c8f03b5edfab473acbd312
 READ_FAMILIES = ("read_copy", "read_efault")
 EXPECTED_SEEDS = (2801, 2802, 2803)
 PMU_MODALITY_INDEX = 2
-BENIGN_PLAN_SHA256 = "11ea870dfd7303e73c0dcc0d5ffc414bf69d602316a725810d257a4b678b3f2d"
+BENIGN_PLAN_SHA256 = "d76c443b7221a429c4dd63e41b862c56a554f822e7b392d135bf6827205bd679"
 BENIGN_COHORT_SEED = 2026092706
 EFFECT_COHORT_SEED = 2026092705
 
@@ -69,6 +69,28 @@ def validate_family_counts(
         raise ValueError("fresh cohort differs from the preregistered family counts")
 
 
+def validate_exact_plan_rows(
+    plan: dict[str, object], manifest: dict[str, object]
+) -> None:
+    planned = {
+        row["execution_id"]: (
+            row["family"], row["loops"], row["repetition"], row["partition"],
+            row["input_seed"], row["retain_raw"],
+        )
+        for row in plan["rows"]
+    }
+    observed = {
+        entry["execution_id"]: (
+            entry["family"], entry["loops"], entry["repetition"],
+            entry["partition"], entry.get("invocation", {}).get("input_seed"),
+            entry.get("raw_retained"),
+        )
+        for entry in manifest["entries"]
+    }
+    if observed != planned:
+        raise ValueError("fresh benign rows differ from the frozen execution plan")
+
+
 def validate_confirmation_protocol(
     benign_root: Path,
     benign_manifest: dict[str, object],
@@ -77,6 +99,7 @@ def validate_confirmation_protocol(
     plan_path = benign_root / "execution-plan.json"
     if not plan_path.is_file() or sha256(plan_path) != BENIGN_PLAN_SHA256:
         raise ValueError("fresh benign execution plan differs from preregistration")
+    plan = json.loads(plan_path.read_text())
     benign_split = benign_manifest["split"]
     if benign_split.get("explicit_plan") != {
         "cohort_seed": BENIGN_COHORT_SEED,
@@ -103,6 +126,7 @@ def validate_confirmation_protocol(
     }
     if benign_loops != expected_loops:
         raise ValueError("fresh benign intensity schedule differs")
+    validate_exact_plan_rows(plan, benign_manifest)
 
     effect_split = effect_manifest["split"]
     if (
