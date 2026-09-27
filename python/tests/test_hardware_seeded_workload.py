@@ -137,6 +137,33 @@ class HardwareSeededWorkloadTests(unittest.TestCase):
             self.assertEqual(run(second), (0, b"136\n"))
             self.assertEqual(run(b"s\x01"), (3, b""))
 
+    @unittest.skipUnless(platform.system() == "Linux" and shutil.which("cc"),
+                         "native gated target requires Linux and a C compiler")
+    def test_native_development_effect_siblings_are_finite_and_output_matched(self) -> None:
+        source = Path(__file__).resolve().parents[2] / "native/examples/hardware_kernel_workload.c"
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "hardware_kernel_workload"
+            subprocess.run(
+                ("cc", "-std=c17", "-D_GNU_SOURCE", "-Wall", "-Wextra",
+                 "-Wpedantic", "-Werror", str(source), "-o", str(binary)),
+                check=True,
+            )
+            for family in (
+                "fstat_ok", "fstat_badfd", "openat_ok", "openat_missing",
+                "read_copy", "read_efault",
+            ):
+                with self.subTest(family=family):
+                    process = subprocess.Popen(
+                        (str(binary), family, "32"), stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    )
+                    assert process.stdout is not None
+                    self.assertEqual(process.stdout.readline(), b"READY\n")
+                    output, error = process.communicate(b"x", timeout=5)
+                    self.assertEqual(process.returncode, 0)
+                    self.assertEqual(output, b"0\n")
+                    self.assertEqual(error, b"")
+
 
 if __name__ == "__main__":
     unittest.main()

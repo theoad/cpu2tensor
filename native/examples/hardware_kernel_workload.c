@@ -106,6 +106,92 @@ static int run_futex_mismatch(uint64_t loops, uint64_t *result) {
     return 0;
 }
 
+static int run_fstat_badfd(uint64_t loops, uint64_t *result) {
+    struct stat state;
+    (void)result;
+    for (uint64_t index = 0; index < loops; ++index) {
+        errno = 0;
+        if (fstat(-1, &state) != -1 || errno != EBADF) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int run_openat_missing(uint64_t loops, uint64_t *result) {
+    const char *path = "/proc/self/cpu2tensor-definitely-missing";
+    (void)result;
+    for (uint64_t index = 0; index < loops; ++index) {
+        errno = 0;
+        int descriptor = openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
+        if (descriptor != -1 || errno != ENOENT) {
+            if (descriptor >= 0) {
+                close(descriptor);
+            }
+            return -1;
+        }
+        errno = 0;
+        if (close(-1) != -1 || errno != EBADF) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int run_read_copy(uint64_t loops, uint64_t *result) {
+    const size_t bytes = 4096;
+    int descriptor = open("/dev/zero", O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0) {
+        return -1;
+    }
+    unsigned char *destination = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (destination == MAP_FAILED) {
+        close(descriptor);
+        return -1;
+    }
+    for (uint64_t index = 0; index < loops; ++index) {
+        destination[0] = 0xff;
+        if (read(descriptor, destination, 1) != 1 || destination[0] != 0) {
+            munmap(destination, bytes);
+            close(descriptor);
+            return -1;
+        }
+        *result += destination[0];
+    }
+    int unmap_status = munmap(destination, bytes);
+    int close_status = close(descriptor);
+    return unmap_status == 0 && close_status == 0 ? 0 : -1;
+}
+
+// The kernel must reject this inaccessible user destination with EFAULT.  The
+// mapping remains owned and is never dereferenced by user code.
+static int run_read_efault(uint64_t loops, uint64_t *result) {
+    const size_t bytes = 4096;
+    int descriptor = open("/dev/zero", O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0) {
+        return -1;
+    }
+    void *destination = mmap(NULL, bytes, PROT_NONE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (destination == MAP_FAILED) {
+        close(descriptor);
+        return -1;
+    }
+    (void)result;
+    for (uint64_t index = 0; index < loops; ++index) {
+        errno = 0;
+        if (read(descriptor, destination, 1) != -1 || errno != EFAULT) {
+            munmap(destination, bytes);
+            close(descriptor);
+            return -1;
+        }
+    }
+    int unmap_status = munmap(destination, bytes);
+    int close_status = close(descriptor);
+    return unmap_status == 0 && close_status == 0 ? 0 : -1;
+}
+
 static int run_openat(uint64_t loops, uint64_t *result, uint64_t seed, int seeded) {
     for (uint64_t index = 0; index < loops; ++index) {
         const char *path = seeded && (seeded_byte(seed, index) & 1) ?
@@ -342,6 +428,24 @@ static int run_family(const char *family, uint64_t loops, uint64_t *result,
     }
     if (strcmp(family, "futex_mismatch") == 0) {
         return run_futex_mismatch(loops, result);
+    }
+    if (strcmp(family, "fstat_ok") == 0) {
+        return run_fstat(loops, result);
+    }
+    if (strcmp(family, "fstat_badfd") == 0) {
+        return run_fstat_badfd(loops, result);
+    }
+    if (strcmp(family, "openat_ok") == 0) {
+        return run_openat(loops, result, seed, seeded);
+    }
+    if (strcmp(family, "openat_missing") == 0) {
+        return run_openat_missing(loops, result);
+    }
+    if (strcmp(family, "read_copy") == 0) {
+        return run_read_copy(loops, result);
+    }
+    if (strcmp(family, "read_efault") == 0) {
+        return run_read_efault(loops, result);
     }
     if (strcmp(family, "openat") == 0) {
         return run_openat(loops, result, seed, seeded);

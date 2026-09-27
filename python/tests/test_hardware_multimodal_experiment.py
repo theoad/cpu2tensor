@@ -274,6 +274,12 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
         self.assertEqual(experiment.DEVELOPMENT_EFFECT_LOOPS, {
             "futex_wake": 5_000,
             "futex_mismatch": 5_000,
+            "fstat_ok": 5_000,
+            "fstat_badfd": 5_000,
+            "openat_ok": 5_000,
+            "openat_missing": 5_000,
+            "read_copy": 5_000,
+            "read_efault": 5_000,
         })
         plan, _ = experiment.make_plan(
             ("getpid", "futex_wake", "futex_mismatch"),
