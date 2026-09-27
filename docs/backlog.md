@@ -81,6 +81,16 @@ on the retained tensors under the same locked transfer protocol. More parameters
 or physical collection wait until reconstruction scaling and reusable transfer
 are no longer moving in opposite directions.
 
+The first [R3 objective ablation](hardware-objective-ablation-r3.md) also fails
+its promotion gate. Contrastive learning improves median transfer AUROC from 0
+to 0.180 and wins two paired seeds, but remains below the required 0.75. VICReg
+is bifurcated: one pretraining seed transfers at approximately 1.000 AUROC across
+all heads, while two seeds remain near zero. Selecting that seed is forbidden.
+All objectives preserve masked loss, localizing the problem to unstable latent
+geometry. Next: score all retained encoders on benign-only cross-session family
+and intensity retrieval, view agreement, and effective rank; keep the effect
+labels sealed until a generic metric predicts reproducibility.
+
 ## Closed decision: initial hardware transfer comparison
 
 The previous sprint is closed NO-GO and its heartbeat is paused. The accepted

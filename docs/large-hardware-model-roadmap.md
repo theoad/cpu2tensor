@@ -89,3 +89,12 @@ The preregistered [R3 objective ablation](hardware-objective-ablation-r3.md)
 holds scale and data fixed while comparing two-view reconstruction against
 instance contrast and VICReg-style invariance. Three independent pretraining
 seeds and three locked heads per model prevent another single-head conclusion.
+
+R3 does not promote an objective. Contrastive pretraining raises median transfer
+AUROC from 0 to 0.180, while VICReg has one striking 1.000 seed and two near-zero
+seeds. Both preserve reconstruction quality, so the failure is reproducibility
+of representation geometry rather than simple underfitting. The effect gate is
+now sealed while a benign-only diagnostic measures cross-session family and
+intensity retrieval, view agreement, and effective rank for all nine retained
+encoders. Those generic metrics—not the successful effect seed—must determine
+the next objective change.

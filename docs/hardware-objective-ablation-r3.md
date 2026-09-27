@@ -30,4 +30,30 @@ a pass would qualify an objective—not a vulnerability detector.
 
 ## Result
 
-Pending.
+The nine-model matrix completed on Mac MPS in approximately four minutes. No
+objective passed the preregistered gate:
+
+| Objective | Median held-out masked loss | Per-seed median `read` AUROC | Overall median AUROC | Paired wins |
+| --- | ---: | --- | ---: | ---: |
+| Reconstruction | 0.0787 | 0.000, 0.000, 0.000 | 0.000 | — |
+| Contrastive | 0.0750 | 0.000, 0.180, 0.402 | 0.180 | 2/3 |
+| VICReg | 0.0756 | 0.000, 0.004, 1.000 | 0.004 | 2/3 |
+
+Both alternatives preserve—and slightly improve—the reconstruction metric.
+Contrastive learning produces a modest but insufficient transfer improvement.
+VICReg seed 3903 reaches AUROC 0.996--1.000 for all three locked heads, proving
+that the architecture can encode a transferable direction, but seeds 3901 and
+3902 remain near zero. Selecting the successful seed would violate the protocol;
+VICReg is therefore not promoted.
+
+The result sharpens the blocker from “no latent signal” to “latent geometry is
+not reproducible across initializations.” The next diagnostic must use generic
+benign-only geometry measures—cross-session family retrieval, intensity
+retrieval, representation effective rank, and view agreement—to explain the
+seed split without consulting the effect labels. Objective tuning may resume
+only against those generic measures; the held-out effect gate remains sealed.
+
+Artifact directory:
+`/Users/theoad/.cache/cpu2tensor/hardware-objective-ablation-r3`. All nine
+checkpoint hashes verify. Report SHA-256:
+`b4b6517c2948b7c33e34227c5bc9d1df1feb0e60e87f15b38daa2252752969cb`.
