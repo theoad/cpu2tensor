@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
+from dataclasses import asdict, replace
 from io import BytesIO
 from pathlib import Path
 import tempfile
@@ -64,9 +64,9 @@ def _capture_batch() -> HardwareMultimodalBatch:
     )
 
 
-def _model_row(value: float) -> ModelBatch:
+def _model_row(value: float, pebs_width: int = 24) -> ModelBatch:
     pt = torch.full((1, 1, 16, 256), value, dtype=torch.float32)
-    pebs = torch.full((1, 1, 16, 24), value * 0.5, dtype=torch.float32)
+    pebs = torch.full((1, 1, 16, pebs_width), value * 0.5, dtype=torch.float32)
     pmu = torch.full((1, 1, 1, 4), value * 0.25, dtype=torch.float32)
     pt_available = torch.ones((1, 1, 16), dtype=torch.bool)
     pebs_available = torch.ones_like(pt_available)
@@ -103,8 +103,8 @@ class _Capture:
 
     def __enter__(self):
         self.decode_sideband = HardwareDecodeSideband(
-            "CLOCK_MONOTONIC_RAW", 9, b"maps", b"modules", b"symbols",
-            b"{}", b"attr", "state",
+            "CLOCK_MONOTONIC_RAW", 9, b"maps", b"modules",
+            b"100 T _text\n1000 T _etext\n", b"{}", b"attr", "a" * 64,
         )
         return self
 
@@ -115,7 +115,133 @@ class _Capture:
         return (_capture_batch(),)
 
 
+def _seal_manifest(artifact: Path, manifest: dict) -> None:
+    manifest.pop("manifest_content_sha256", None)
+    manifest["manifest_content_sha256"] = experiment._json_hash(manifest)
+    experiment._atomic_json(artifact / "capture-manifest.json", manifest)
+
+
+def _dataset_fixture(artifact: Path, *, legacy: bool = False) -> dict:
+    """Two benign rows with distinct captured kernel states, all hashes sealed."""
+    schema = (
+        "cpu2tensor-hardware-multimodal-features-v3" if legacy
+        else experiment.MULTIMODAL_FEATURE_SCHEMA
+    )
+    references = []
+    entries = []
+    for index, state_id in enumerate(("a" * 64, "b" * 64)):
+        sideband = HardwareDecodeSideband(
+            "CLOCK_MONOTONIC_RAW", 9, b"maps", b"modules",
+            f"{0x100 + index * 0x100:x} T _text\n1000 T _etext\n".encode(),
+            b"{}", b"attr", state_id,
+        )
+        reference = experiment.seal_kernel_decode_state(artifact, sideband)
+        references.append(reference)
+        execution = experiment.PlannedExecution(
+            f"getpid-{index:05d}", "getpid", index, "training"
+        )
+        raw_path = artifact / "raw" / f"{execution.execution_id}.pt"
+        raw_hash = experiment._atomic_torch_save(
+            raw_path, experiment.raw_capture_payload(
+                (_capture_batch(),), decode_sideband=sideband,
+                kernel_decode_state=reference, execution=execution,
+                loops=100, stdout=b"42\n", elapsed_ns=10,
+            ),
+        )
+        derived_path = artifact / "derived" / f"{execution.execution_id}.pt"
+        payload = {
+            "schema": experiment.LEGACY_DERIVED_SCHEMA if legacy
+            else experiment.DERIVED_SCHEMA,
+            "feature_schema": schema,
+            "execution": asdict(execution),
+            "raw_sha256": raw_hash,
+            "batch": experiment._model_payload(_model_row(1.0, 136 if legacy else 140)),
+        }
+        if not legacy:
+            payload.update(
+                kernel_anchor=asdict(experiment.KernelTextAnchor.from_sideband(sideband)),
+                kernel_decode_state=reference,
+            )
+        derived_hash = experiment._atomic_torch_save(derived_path, payload)
+        entries.append({
+            **asdict(execution),
+            "raw_path": str(raw_path.relative_to(artifact)), "raw_sha256": raw_hash,
+            "derived_path": str(derived_path.relative_to(artifact)),
+            "derived_sha256": derived_hash,
+            **({"kernel_decode_state": reference} if not legacy else {}),
+        })
+    manifest = {
+        "schema": experiment.SCHEMA, "feature_schema": schema,
+        "event": {
+            "scope": experiment.SCOPE, "modalities": list(experiment.MODALITIES),
+            "intel_pt_representation": "raw_aux_bytes_no_decode",
+            "pebs_period": experiment.PEBS_PERIOD,
+        },
+        "kernel_decode_states": references, "entries": entries,
+    }
+    _seal_manifest(artifact, manifest)
+    return manifest
+
+
 class KernelMultimodalExperimentTests(unittest.TestCase):
+    def test_v3_is_readable_and_cannot_mix_v4_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory)
+            manifest = _dataset_fixture(artifact, legacy=True)
+            loaded, rows = experiment.load_dataset(artifact)
+            self.assertEqual(loaded["feature_schema"], manifest["feature_schema"])
+            self.assertEqual(rows["getpid-00000"].pebs.shape[-1], 136)
+            entry = manifest["entries"][1]
+            path = artifact / entry["derived_path"]
+            payload = torch.load(path, weights_only=True)
+            payload["feature_schema"] = experiment.MULTIMODAL_FEATURE_SCHEMA
+            entry["derived_sha256"] = experiment._atomic_torch_save(path, payload)
+            _seal_manifest(artifact, manifest)
+            with self.assertRaisesRegex(ValueError, "derived tensor identity mismatch"):
+                experiment.load_dataset(artifact)
+
+    def test_v4_anchors_bind_each_execution_even_when_raw_is_evicted(self) -> None:
+        for retained in (False, True):
+            with self.subTest(retained=retained), tempfile.TemporaryDirectory() as directory:
+                artifact = Path(directory)
+                manifest = _dataset_fixture(artifact)
+                first, second = manifest["entries"]
+                first["raw_retained"] = retained
+                if not retained:
+                    (artifact / first["raw_path"]).unlink()
+                _seal_manifest(artifact, manifest)
+                _, rows = experiment.load_dataset(artifact)
+                self.assertEqual(rows["getpid-00000"].pebs.shape[-1], 140)
+                path = artifact / first["derived_path"]
+                payload = torch.load(path, weights_only=True)
+                other = torch.load(artifact / second["derived_path"], weights_only=True)
+                payload["kernel_anchor"] = other["kernel_anchor"]
+                payload["kernel_decode_state"] = other["kernel_decode_state"]
+                first["derived_sha256"] = experiment._atomic_torch_save(path, payload)
+                _seal_manifest(artifact, manifest)
+                with self.assertRaisesRegex(ValueError, "execution kernel anchor state"):
+                    experiment.load_dataset(artifact)
+
+                if retained:
+                    # Even sealed entry/derived state B must disagree with raw A.
+                    first["kernel_decode_state"] = second["kernel_decode_state"]
+                    _seal_manifest(artifact, manifest)
+                    with self.assertRaisesRegex(ValueError, "raw execution kernel anchor"):
+                        experiment.load_dataset(artifact)
+
+    def test_v4_anchor_bounds_must_match_retained_symbols(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory)
+            manifest = _dataset_fixture(artifact)
+            first = manifest["entries"][0]
+            path = artifact / first["derived_path"]
+            payload = torch.load(path, weights_only=True)
+            payload["kernel_anchor"]["start"] += 16
+            first["derived_sha256"] = experiment._atomic_torch_save(path, payload)
+            _seal_manifest(artifact, manifest)
+            with self.assertRaisesRegex(ValueError, "anchor differs from retained sideband"):
+                experiment.load_dataset(artifact)
+
     def test_large_pt_baseline_uses_bounded_reproducible_low_rank_fit(self) -> None:
         generator = torch.Generator().manual_seed(7)
         values = torch.randn((4_097, 16), generator=generator)
@@ -353,8 +479,8 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
             captured = experiment.CapturedExecution(
                 batches=(_capture_batch(),),
                 decode_sideband=HardwareDecodeSideband(
-                    "CLOCK_MONOTONIC_RAW", 9, b"maps", b"modules", b"symbols",
-                    b"{}", b"attr", "state",
+                    "CLOCK_MONOTONIC_RAW", 9, b"maps", b"modules",
+                    b"100 T _text\n1000 T _etext\n", b"{}", b"attr", "a" * 64,
                 ),
                 output=b"42\n",
                 elapsed_ns=10,
@@ -382,17 +508,18 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                 decode_sideband=replace(
                     captured.decode_sideband,
                     kernel_modules=b"different module mapping",
-                    kernel_state_sha256="state-2",
+                    kernel_state_sha256="b" * 64,
                 ),
             )
             lane = argparse.Namespace(
                 tid=77, observed_cpu=2, migration_verified=True, pebs_samples=1
             )
 
-            def featurize(unused_batches, phases):
+            def featurize(unused_batches, phases, *, kernel_anchor):
                 del unused_batches
+                self.assertEqual(kernel_anchor.start, 0x100)
                 phases.update(pt_histogram=5, pebs_pmu_features=6)
-                return _model_row(1.0), (lane,)
+                return _model_row(1.0, 140), (lane,)
 
             args = argparse.Namespace(
                 binary=binary,
@@ -544,7 +671,7 @@ class KernelMultimodalExperimentTests(unittest.TestCase):
                     "partition": partition,
                 }
                 derived_hash = experiment._atomic_torch_save(derived_path, {
-                    "schema": experiment.DERIVED_SCHEMA,
+                    "schema": experiment.LEGACY_DERIVED_SCHEMA,
                     "execution": execution,
                     "raw_sha256": raw_hash,
                     "batch": experiment._model_payload(_model_row(float(index + 1))),
