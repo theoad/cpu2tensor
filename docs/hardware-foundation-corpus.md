@@ -174,3 +174,39 @@ trigger was retired after it correctly started session B but remained armed and
 attempted to restart into the already sealed artifact directory. This did not
 alter the valid release, but filesystem path triggers are not admissible for the
 promoted campaign.
+
+## Qualified 64 GiB release
+
+The promoted campaign completed both sessions on the exact qualified subject
+and admitted all 200,016 planned executions on their first attempt. Session A
+published 35,920,988,160 raw bytes in 133 shards; session B published
+35,818,598,400 raw bytes in 133 shards. The combined release is
+71,739,586,560 bytes (66.81 GiB). CPU policy restoration succeeded after each
+session, and neither session recorded a rejection, source loss, AUX gap, PMU
+multiplex, or retry.
+
+The independent off-host audit accepted the release. It verified all 532 raw
+and index objects through S3 checksum and version metadata, then independently
+range-read and hashed one indexed execution from each session. All 41
+applications exceeded the preregistered 1,400,000,000-byte PT floor; the
+smallest contribution was `strings` at 1,590,674,384 PT bytes. The audit also
+revalidated the complete execution set, exact subject and plan identities,
+content-isolated partitions, and every preregistered quality gate.
+
+Acquisition noise remained small relative to application signal. Median repeat
+relative MAD was 0.168% for instructions, 0.208% for PT bytes, and 0.487% for
+cycles. Median matched-session shift was 0.146% for instructions and 0.193% for
+PT bytes. Application-signal/repeat-noise ratios ranged from 202.96 to 912.40.
+Of 319,490 PEBS samples, 99.651% were usable; user samples covered 38/41
+applications and kernel samples covered 41/41.
+
+The immutable evidence hashes are:
+
+- plan: `085e6aab278be939b206a4e360bcfbd476c0fe7166ad8947020c762a74375eee`;
+- session A release: `befc563c083ed9c9d92ad2e0b01a2482aa8a0448e293d506a6edcf7bb791a98d`;
+- session B release: `7da5f5df843e878641d57093e31b11570b16aaf9dfdd21e4be9bc797eb0d3ac2`;
+- independent audit: `79d700b51b2b02e42da5ae602eec6bb32f2fc95c7b0c6d1c612a5244c2f771b4`.
+
+This release is the qualified raw-data foundation for the first autoresearch
+loop. Derived tensor views must remain separately versioned and trace every
+training window back to an execution ID and byte range in this release.
