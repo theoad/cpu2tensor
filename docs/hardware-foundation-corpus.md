@@ -144,3 +144,33 @@ CPU policy restoration.
 
 The 8 GB pilot may expose new gates. It cannot weaken these gates merely to make
 the 64 GB target complete.
+
+## Qualified pilot and 64 GiB promotion
+
+The replacement two-session pilot was independently accepted with 26,206
+unique executions from all 41 applications and 10,130,995,200 raw bytes. Its
+76 remote objects, S3 versions and checksums, and one indexed member range per
+session verified off-host. PEBS was usable for 99.713% of 44,268 samples and
+covered user privilege in 38 applications and kernel privilege in 40. Median
+matched-session shifts were 0.123% for instructions and 0.186% for PT bytes;
+all preregistered integrity, coverage, leakage, repeat-noise, signal-to-noise,
+and session-shift gates passed. The pilot plan SHA-256 is
+`1db47aeca9e9d1302ae8e93845e4d84f0cd465de87fc178dbf5fba6caf12ef7d`;
+the independent audit SHA-256 is
+`cf7d25e60e14a0489cfca49b655af8f62f4c2fa3204af7c78c271c262dc66807`.
+Both are preserved with the two release records.
+
+The promoted plan increases each split pool from eight to 32 fixtures and sets
+the calibrated PT target to 760 MiB per application per session. It contains
+200,016 unique execution IDs, 100,008 per session, while retaining the pilot's
+41 applications and eight whole-application holdouts. An off-host `load_plan`
+audit found zero content overlap among training, calibration, familiar
+validation, and held-out-application pools. The immutable plan SHA-256 is
+`085e6aab278be939b206a4e360bcfbd476c0fe7166ad8947020c762a74375eee`;
+pilot calibration predicts approximately 66 GiB raw.
+
+Production sessions use explicitly ordered one-shot services. The pilot's path
+trigger was retired after it correctly started session B but remained armed and
+attempted to restart into the already sealed artifact directory. This did not
+alter the valid release, but filesystem path triggers are not admissible for the
+promoted campaign.

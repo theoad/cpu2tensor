@@ -322,7 +322,7 @@ def _run_twice(
     for _ in range(2):
         result = subprocess.run(
             argv, cwd=cwd, env=environment, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, timeout=30,
+            stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, timeout=30,
         )
         evidence = (
             result.returncode,
@@ -402,7 +402,26 @@ def make_plan(
         "SOURCE_DATE_EPOCH": "0",
         "TZ": "UTC",
     }
+    # Validate and hash every unique invocation before expanding repetitions.
+    # At production scale ``rows`` is hundreds of thousands of dictionaries.
+    # Forking validation commands after that expansion makes even tiny tools pay
+    # the parent's page-table cost, while hashing inputs per repetition rereads
+    # tens of GiB that are identical by construction.
     expectations: dict[tuple[str, int], tuple[str, str]] = {}
+    input_hashes: dict[tuple[str, int], tuple[str, ...]] = {}
+    for workload in applications:
+        for fixtures in fixture_pools.values():
+            for fixture in fixtures:
+                cache_key = (workload.application, fixture.seed)
+                invocation = workload.command(fixture, support)
+                expectations[cache_key] = _run_twice(
+                    invocation.argv, cwd=support, environment=environment,
+                    exit_code=workload.expected_exit_code,
+                )
+                input_hashes[cache_key] = tuple(
+                    hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in invocation.input_paths
+                )
     rows = []
     for session in ("session-a", "session-b"):
         for workload in applications:
@@ -445,11 +464,6 @@ def make_plan(
                 fixture = fixtures[fixture_ordinal % len(fixtures)]
                 invocation = workload.command(fixture, support)
                 cache_key = (workload.application, fixture.seed)
-                if cache_key not in expectations:
-                    expectations[cache_key] = _run_twice(
-                        invocation.argv, cwd=support, environment=environment,
-                        exit_code=workload.expected_exit_code,
-                    )
                 stdout_hash, stderr_hash = expectations[cache_key]
                 rows.append({
                     "execution_id": f"{workload.application}-{session[-1]}-{repetition:06d}",
@@ -463,10 +477,7 @@ def make_plan(
                     "stdin_base64": base64.b64encode(b"").decode(),
                     "cwd": str(support),
                     "input_paths": [str(path) for path in invocation.input_paths],
-                    "input_sha256": [
-                        hashlib.sha256(path.read_bytes()).hexdigest()
-                        for path in invocation.input_paths
-                    ],
+                    "input_sha256": list(input_hashes[cache_key]),
                     "support_paths": [
                         str(path) for path in invocation.support_paths
                     ],

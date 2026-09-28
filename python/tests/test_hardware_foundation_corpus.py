@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import tarfile
 import tempfile
 
@@ -19,6 +20,7 @@ from cpu2tensor.examples.hardware_foundation_corpus import (
     seal_custody,
 )
 from cpu2tensor.examples.hardware_foundation_audit import audit
+from cpu2tensor.examples.hardware_foundation_plan import _run_twice
 from cpu2tensor.hardware import (
     HardwareBatch, HardwareCaptureEnvelope, HardwareCounterBatch,
     HardwareMultimodalBatch, HardwareSourceStatus,
@@ -27,6 +29,16 @@ from cpu2tensor.hardware import (
 
 def _hash(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def test_plan_preflight_never_inherits_interactive_stdin() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        stdout, stderr = _run_twice(
+            (sys.executable, "-c", "import sys; print(len(sys.stdin.read()))"),
+            cwd=Path(directory), environment=dict(os.environ), exit_code=0,
+        )
+    assert stdout == _hash(b"0\n")
+    assert stderr == _hash(b"")
 
 
 def test_plan_requires_whole_application_holdout_and_exact_inputs() -> None:
