@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 
 from cpu2tensor.examples.hardware_foundation_upload import S3CorpusStore, sha256
@@ -168,16 +169,37 @@ class CorpusRelay:
             shutil.rmtree(current)
         return release
 
-    def run(self, *, poll_seconds: float) -> dict[str, object]:
+    def run(
+        self, *, poll_seconds: float, transient_retry_seconds: float,
+    ) -> dict[str, object]:
+        failure_started: float | None = None
+        consecutive_failures = 0
         while True:
-            for name in self.ready_descriptors():
-                self.relay_one(name)
-            failure = self.capture_failure()
-            if failure is not None:
-                raise RuntimeError(f"remote capture failed: {failure}")
-            if self.capture_finished() and not self.ready_descriptors():
-                return self.finalize()
-            time.sleep(poll_seconds)
+            try:
+                for name in self.ready_descriptors():
+                    self.relay_one(name)
+                failure = self.capture_failure()
+                if failure is not None:
+                    raise RuntimeError(f"remote capture failed: {failure}")
+                if self.capture_finished() and not self.ready_descriptors():
+                    return self.finalize()
+                failure_started = None
+                consecutive_failures = 0
+                time.sleep(poll_seconds)
+            except subprocess.CalledProcessError as error:
+                now = time.monotonic()
+                failure_started = now if failure_started is None else failure_started
+                if now - failure_started >= transient_retry_seconds:
+                    raise
+                consecutive_failures += 1
+                delay = min(30.0, max(
+                    poll_seconds, float(2 ** min(consecutive_failures, 5)),
+                ))
+                print(
+                    f"transient relay command failure; retrying in {delay:g}s: "
+                    f"{error}", file=sys.stderr, flush=True,
+                )
+                time.sleep(delay)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -189,6 +211,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--region", default="us-east-1")
     result.add_argument("--identity", type=Path)
     result.add_argument("--poll-seconds", type=float, default=2.0)
+    result.add_argument("--transient-retry-seconds", type=float, default=1800.0)
     return result
 
 
@@ -199,7 +222,10 @@ def main() -> None:
         store=S3CorpusStore(args.bucket, region=args.region),
         identity=None if args.identity is None else args.identity.expanduser().resolve(),
     )
-    print(json.dumps(relay.run(poll_seconds=args.poll_seconds), sort_keys=True))
+    print(json.dumps(relay.run(
+        poll_seconds=args.poll_seconds,
+        transient_retry_seconds=args.transient_retry_seconds,
+    ), sort_keys=True))
 
 
 if __name__ == "__main__":

@@ -4,10 +4,12 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+from pathlib import PurePosixPath
 import subprocess
 import tempfile
 from unittest import mock
 
+from cpu2tensor.examples.hardware_foundation_relay import CorpusRelay
 from cpu2tensor.examples.hardware_foundation_upload import S3CorpusStore
 
 
@@ -62,3 +64,28 @@ def test_upload_shard_rejects_tampered_bundle() -> None:
             assert "verification" in str(error)
         else:
             raise AssertionError("tampered raw shard was uploaded")
+
+
+def test_relay_retries_a_transient_transport_failure() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        relay = CorpusRelay(
+            host="collector", remote=PurePosixPath("/artifact"),
+            staging=Path(directory), store=mock.Mock(),
+        )
+        transport_error = subprocess.CalledProcessError(255, ("ssh",))
+        with mock.patch.object(
+            relay, "ready_descriptors", side_effect=[transport_error, (), ()],
+        ), mock.patch.object(
+            relay, "capture_failure", return_value=None,
+        ), mock.patch.object(
+            relay, "capture_finished", return_value=True,
+        ), mock.patch.object(
+            relay, "finalize", return_value={"released": True},
+        ), mock.patch(
+            "cpu2tensor.examples.hardware_foundation_relay.time.sleep",
+        ) as sleep:
+            result = relay.run(
+                poll_seconds=0.01, transient_retry_seconds=60.0,
+            )
+        assert result == {"released": True}
+        sleep.assert_called_once_with(2.0)
